@@ -27,7 +27,7 @@ watch(() => chatStore.messages.length, scrollToBottom)
 onMounted(() => {
   const sessionId = route.params.sessionId as string
   if (sessionId) {
-    chatStore.sessionId = sessionId
+    chatStore.loadHistory(sessionId)
   }
 })
 </script>

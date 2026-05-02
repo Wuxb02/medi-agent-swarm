@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import type { ChatMessage } from '../types'
 import { useSSE } from '../composables/useSSE'
+import { getSessionDetail } from '../api/session'
 
 let msgIdCounter = 0
 function genId() {
@@ -144,6 +145,43 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function loadHistory(sid: string) {
+    try {
+      const detail = await getSessionDetail(sid)
+      if (detail) {
+        sessionId.value = detail.session_id
+        messages.value = []
+        if (detail.question) {
+          messages.value.push({
+            id: genId(),
+            role: 'user',
+            content: detail.question,
+            timestamp: detail.created_at || new Date().toISOString(),
+          })
+        }
+        if (detail.answer) {
+          messages.value.push({
+            id: genId(),
+            role: 'assistant',
+            content: detail.answer,
+            timestamp: detail.created_at || new Date().toISOString(),
+            isStreaming: false,
+            suggestions: [],
+            disclaimer: '',
+            agentEvents: [],
+            metadata: {
+              swarmEnabled: detail.mode === 'swarm',
+              agentsInvolved: detail.agents_involved || [],
+              totalTime: detail.total_time,
+            },
+          })
+        }
+      }
+    } catch (e: any) {
+      error.value = `加载历史会话失败：${e.message}`
+    }
+  }
+
   function clearChat() {
     messages.value = []
     sessionId.value = null
@@ -152,5 +190,5 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value = false
   }
 
-  return { sessionId, messages, isStreaming, swarmMode, error, sendMessage, clearChat }
+  return { sessionId, messages, isStreaming, swarmMode, error, sendMessage, loadHistory, clearChat }
 })

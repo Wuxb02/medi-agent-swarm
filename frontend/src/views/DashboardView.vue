@@ -5,16 +5,22 @@ import type { DashboardStats } from '../types'
 
 const stats = ref<DashboardStats | null>(null)
 const loading = ref(true)
+const error = ref<string | null>(null)
 
-onMounted(async () => {
+async function loadDashboard() {
+  loading.value = true
+  error.value = null
   try {
     stats.value = await getDashboardStats()
-  } catch (e) {
+  } catch (e: any) {
+    error.value = e.message || '加载仪表盘数据失败'
     console.error('Failed to load dashboard:', e)
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(loadDashboard)
 
 const statCards = [
   { key: 'total_sessions', label: '总会话数', icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z', color: 'blue' },
@@ -32,7 +38,16 @@ const colorMap: Record<string, string> = {
 
 function getStatValue(key: string): number {
   if (!stats.value) return 0
-  return (stats.value as any)[key] ?? 0
+  const record = stats.value as unknown as Record<string, unknown>
+  const val = record[key]
+  return typeof val === 'number' ? val : 0
+}
+
+function getAgentBarWidth(count: unknown): number {
+  if (!stats.value) return 0
+  const values = Object.values(stats.value.agents_usage)
+  const maxVal = Math.max(...values, 1)
+  return Math.min(100, (Number(count) / maxVal) * 100)
 }
 </script>
 
@@ -40,6 +55,10 @@ function getStatValue(key: string): number {
   <div class="h-full overflow-y-auto p-6">
     <div class="max-w-5xl mx-auto">
       <div v-if="loading" class="text-center py-12 text-slate-400">加载中...</div>
+      <div v-else-if="error" class="text-center py-12">
+        <p class="text-red-500 mb-3">{{ error }}</p>
+        <button @click="loadDashboard()" class="text-sm text-blue-500 hover:underline">重试</button>
+      </div>
       <template v-else-if="stats">
         <!-- 统计卡片 -->
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
@@ -71,7 +90,7 @@ function getStatValue(key: string): number {
               <div class="flex-1 bg-slate-100 rounded-full h-3 overflow-hidden">
                 <div
                   class="h-full bg-blue-500 rounded-full transition-all"
-                  :style="{ width: `${Math.min(100, ((count as number) / Math.max(...Object.values(stats.agents_usage as Record<string, number>), 1)) * 100)}%` }"
+                  :style="{ width: `${getAgentBarWidth(count)}%` }"
                 />
               </div>
               <span class="text-xs text-slate-500 w-8 text-right">{{ count }}</span>

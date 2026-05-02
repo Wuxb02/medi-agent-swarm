@@ -186,6 +186,21 @@ class SwarmCoordinator:
             if 'suggestions' not in result:
                 result['suggestions'] = []
 
+            # 保存单 Agent 会话总结
+            try:
+                end_time = datetime.now()
+                summary = SessionSummary.from_single_agent(
+                    session_id=session_id,
+                    question=question,
+                    agent_id=agent_id,
+                    final_answer=final_answer,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                self.session_manager.save_summary(summary)
+            except Exception as e:
+                logger.error(f"Failed to save single agent session summary: {e}")
+
         elif len(subtasks) >= 2 and self.enable_swarm:
             # 多任务 → 启动 Swarm
             logger.info(f"Route: Swarm (Multi-Agent Collaboration) - {len(subtasks)} tasks")
@@ -221,6 +236,21 @@ class SwarmCoordinator:
                 'swarm_enabled': False,
                 'session_id': session_id
             })
+
+            # 保存 fallback 会话总结
+            try:
+                end_time = datetime.now()
+                summary = SessionSummary.from_single_agent(
+                    session_id=session_id,
+                    question=question,
+                    agent_id="consultation_agent",
+                    final_answer=final_answer,
+                    start_time=start_time,
+                    end_time=end_time
+                )
+                self.session_manager.save_summary(summary)
+            except Exception as e:
+                logger.error(f"Failed to save fallback session summary: {e}")
 
         # ===== 统一的记忆保存（非 Swarm 模式）=====
         end_time = datetime.now()

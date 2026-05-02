@@ -94,17 +94,26 @@ class SessionSummary:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_markdown(self) -> str:
-        """转换为 Markdown 格式"""
+        """转换为 Markdown 格式
+
+        输出格式与 session_service 解析器匹配，
+        同时保留详细信息用于人工查阅。
+        """
         date_str = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        mode_str = "swarm 协作" if self.swarm_enabled else "单 Agent 模式"
+        agent_names = ", ".join(a.agent_id for a in self.agents_participated)
 
         lines = [
             f"# Session Summary: {self.session_id}",
             "",
-            f"**时间**: {date_str}",
+            f"会话ID：{self.session_id}",
+            f"时间：{date_str}",
             "",
-            "## 问题",
-            self.question,
-            ""
+            f"原始问题：{self.question}",
+            "",
+            f"运行模式：{mode_str}",
+            f"参与 Agent：{agent_names}",
+            "",
         ]
 
         if self.context:
@@ -117,7 +126,7 @@ class SessionSummary:
             ])
 
         lines.extend([
-            "## 参与 Agent",
+            "## 参与 Agent 详情",
             ""
         ])
 
@@ -151,10 +160,11 @@ class SessionSummary:
                 lines.append("")
 
         lines.extend([
-            "## 最终答案",
+            "最终回答：",
+            self.final_answer,
             "",
-            self.final_answer[:500] + ("..." if len(self.final_answer) > 500 else ""),
-            ""
+            "---",
+            "",
         ])
 
         if self.lessons_learned:
@@ -174,8 +184,8 @@ class SessionSummary:
         lines.extend([
             "## 性能指标",
             "",
-            f"- 总耗时：{self.performance.total_time:.2f} 秒",
-            f"- 参与 Agent：{self.performance.agent_count} 个",
+            f"总耗时：{self.performance.total_time:.2f} 秒",
+            f"参与 Agent：{self.performance.agent_count} 个",
             f"- 并行效率：{self.performance.parallel_efficiency:.1%}",
             f"- 信息覆盖度：{self.performance.information_coverage:.1%}",
             f"- 信息冗余度：{self.performance.redundancy:.1%}",
@@ -184,6 +194,49 @@ class SessionSummary:
         ])
 
         return "\n".join(lines)
+
+    @classmethod
+    def from_single_agent(
+        cls,
+        session_id: str,
+        question: str,
+        agent_id: str,
+        final_answer: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> "SessionSummary":
+        """从单 Agent 处理结果构建 SessionSummary"""
+        total_time = (end_time - start_time).total_seconds()
+
+        return cls(
+            session_id=session_id,
+            question=question,
+            context={},
+            timestamp=start_time,
+            agents_participated=[
+                AgentParticipation(
+                    agent_id=agent_id,
+                    role="single",
+                    subtasks_handled=[],
+                    tool_calls=0,
+                    execution_time=total_time
+                )
+            ],
+            subtasks_created=1,
+            subtasks_completed=1,
+            events_count=0,
+            final_answer=final_answer,
+            key_findings=[],
+            lessons_learned=[],
+            performance=PerformanceMetrics(
+                total_time=total_time,
+                agent_count=1,
+                parallel_efficiency=1.0,
+                information_coverage=1.0,
+                redundancy=0.0
+            ),
+            swarm_enabled=False
+        )
 
     @classmethod
     def from_shared_context(
@@ -264,11 +317,7 @@ class SessionSummaryManager:
 
     def _get_summary_path(self, session_id: str) -> Path:
         """获取会话总结文件路径"""
-        # 按日期组织
-        date_str = session_id.split("-")[0] if "-" in session_id else "unknown"
-        date_dir = self.base_dir / date_str
-        date_dir.mkdir(parents=True, exist_ok=True)
-        return date_dir / f"{session_id}.md"
+        return self.base_dir / f"{session_id}.md"
 
     def save_summary(self, summary: SessionSummary):
         """保存会话总结"""
