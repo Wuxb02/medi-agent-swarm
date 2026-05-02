@@ -8,9 +8,11 @@ import sys
 import time
 from pathlib import Path
 from loguru import logger
+from dotenv import load_dotenv
 
-# 添加项目根目录到路径
+# 加载 .env 环境变量
 project_root = Path(__file__).parent
+load_dotenv(project_root / ".env")
 sys.path.insert(0, str(project_root))
 
 from swarm import process_with_swarm

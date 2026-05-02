@@ -3,16 +3,13 @@ LLM客户端
 支持调用 OpenAI 兼容的 API（如字节跳动豆包、OpenAI、Deepseek 等）
 支持 function calling
 """
-import sys
+import os
 import asyncio
 import json
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from openai import AsyncOpenAI
 from loguru import logger
-
-sys.path.insert(0, '/Users/saintgeo/Desktop/self-learn/swarm')
-from config import LLM_CONFIG
 
 
 @dataclass
@@ -48,15 +45,16 @@ class LLMClient:
         self.model_type = model_type
 
         if model_type == "openai_compatible":
-            # 使用 OpenAI 兼容的 API（通过 config.py 配置）
-            self.config = LLM_CONFIG
-            self.client = AsyncOpenAI(
-                api_key=self.config["api_key"],
-                base_url=self.config["base_url"]
-            )
-            self.model_name = self.config["model_name"]
-            self.temperature = self.config.get("temperature", 0.7)
-            self.max_tokens = self.config.get("max_tokens", 8192)
+            # 使用 OpenAI 兼容的 API（通过 .env 环境变量配置）
+            api_key = os.getenv("LLM_API_KEY")
+            base_url = os.getenv("LLM_BASE_URL")
+            if not api_key or not base_url:
+                raise ValueError("LLM_API_KEY 或 LLM_BASE_URL 未设置，请在 .env 文件中配置")
+
+            self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            self.model_name = os.getenv("LLM_MODEL_NAME", "gpt-4o")
+            self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
+            self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 

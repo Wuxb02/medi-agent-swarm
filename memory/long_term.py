@@ -15,7 +15,6 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from loguru import logger
 import os
-import sys
 
 # Harness Engineering: 熵管理
 try:
@@ -24,13 +23,6 @@ try:
 except ImportError:
     logger.warning("EntropyManager not found, running without entropy management")
     ENTROPY_ENABLED = False
-
-# 加载上层目录的config.py
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-try:
-    from config import MEM0_CONFIG
-except ImportError:
-    MEM0_CONFIG = None
 
 try:
     from mem0 import MemoryClient
@@ -73,21 +65,18 @@ class LongTermMemory:
             logger.debug("✅ Entropy management enabled for long-term memory")
 
         try:
-            # 获取 API key（优先级：config参数 > 全局config.py > 环境变量）
+            # 获取 API key（优先级：config参数 > 环境变量）
             mem0_api_key = None
 
             # 1. 从参数config获取
             if config and "api_key" in config:
                 mem0_api_key = config["api_key"]
-            # 2. 从全局config.py获取
-            elif MEM0_CONFIG and "api_key" in MEM0_CONFIG:
-                mem0_api_key = MEM0_CONFIG["api_key"]
-            # 3. 从环境变量获取
+            # 2. 从环境变量获取
             else:
                 mem0_api_key = os.getenv("MEM0_API_KEY")
 
             if not mem0_api_key:
-                raise ValueError("MEM0_API_KEY not found. Set it in /Users/saintgeo/Desktop/self-learn/swarm/config.py")
+                raise ValueError("MEM0_API_KEY 未设置，请在 .env 文件中配置")
 
             # 初始化 Mem0 云服务客户端
             self.mem0 = MemoryClient(api_key=mem0_api_key)
@@ -96,7 +85,7 @@ class LongTermMemory:
         except Exception as e:
             logger.warning(f"Failed to initialize Mem0: {e}")
             logger.warning("Long-term memory disabled. System will work without Mem0.")
-            logger.info("To enable Mem0: set MEM0_API_KEY in /Users/saintgeo/Desktop/self-learn/swarm/config.py")
+            logger.info("To enable Mem0: set MEM0_API_KEY in .env file")
             self.enabled = False
 
     def add_session_summary(

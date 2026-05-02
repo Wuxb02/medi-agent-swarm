@@ -581,7 +581,7 @@ async def test_long_term_memory():
 
     if not ltm.enabled:
         print("⚠️  Mem0未配置，跳过测试")
-        print("   配置方法：在 /Users/saintgeo/Desktop/self-learn/swarm/config.py 中设置 MEM0_CONFIG['api_key']")
+        print("   配置方法：在项目根目录 .env 文件中设置 MEM0_API_KEY")
         print("✅ 测试 4.2 跳过（Mem0未配置）")
         return
 

@@ -93,18 +93,24 @@ pip install -r requirements.txt
 
 ### 3. 配置 API
 
-创建 `../config.py`：
+复制 `.env.example` 并填入实际配置：
 
-```python
-LLM_CONFIG = {
-    "api_key": "your-llm-api-key",
-    "model_name": "your-model-name",
-    "base_url": "https://api.openai.com/v1",
-    "temperature": 0.7,
-    "max_tokens": 8192,
-}
+```bash
+cp .env.example .env
+```
 
-MEM0_CONFIG = {"api_key": "m0-your-api-key-here"}
+编辑 `.env` 文件：
+
+```env
+# LLM 配置（OpenAI 兼容 API）
+LLM_API_KEY=your-llm-api-key
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL_NAME=your-model-name
+LLM_TEMPERATURE=0.7
+LLM_MAX_TOKENS=8192
+
+# Mem0 长期记忆配置（可选）
+MEM0_API_KEY=m0-your-api-key-here
 ```
 
 ### 4. 初始化知识库
@@ -238,7 +244,7 @@ medix-agent-swarm/
 - ✅ **Skills 自包含**：每个 Skill 在 `script/` 目录下实现，直接调用知识库
 - ✅ **动态加载**：`skill_loader.py` 扫描 `.claude/skills/` 目录动态加载
 - ✅ **SkillRegistry**：统一管理 Skill 注册、执行、格式转换
-- ✅ **统一配置**：使用上层 `/Users/saintgeo/Desktop/self-learn/swarm/config.py`
+- ✅ **统一配置**：使用项目根目录 `.env` 文件管理环境变量
 - ✅ **记忆分离**：Agent 身份文件和会话总结分别存储在 `memory/agents/` 和 `memory/swarm/`
 
 ## 🤖 Skills 和 Agent 清单
@@ -291,31 +297,20 @@ medix-agent-swarm/
 
 ## ⚙️ 配置说明
 
-项目使用上层目录的统一配置文件：`/Users/saintgeo/Desktop/self-learn/swarm/config.py`
+项目使用 `.env` 文件管理配置（基于 `python-dotenv`）。
 
 ### 配置内容
 
-```python
-# LLM API config (LLM)
-LLM_CONFIG = {
-    "api_key": "your-your-model-api-key",
-    "model_name": "your-model",
-    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
-    "temperature": 0.7,
-    "max_tokens": 8192,
-}
+```env
+# LLM 配置（OpenAI 兼容 API）
+LLM_API_KEY=your-llm-api-key
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+LLM_MODEL_NAME=your-model
+LLM_TEMPERATURE=0.7
+LLM_MAX_TOKENS=8192
 
-# Mem0 API config (Long-term memory)
-MEM0_CONFIG = {
-    "api_key": "m0-your-api-key-here",  # 获取地址：https://app.mem0.ai
-}
-
-# Redis config (Short-term memory persistence, optional)
-REDIS_CONFIG = {
-    "host": "localhost",
-    "port": 6379,
-    "db": 0,
-}
+# Mem0 长期记忆配置（可选，获取地址：https://app.mem0.ai）
+MEM0_API_KEY=m0-your-api-key-here
 ```
 
 ### 记忆系统配置
@@ -351,7 +346,7 @@ memory.clear()
 
 **存储方式**：
 - **内存**（默认）：无需配置，保留时间60分钟
-- **Redis**（可选）：需配置 REDIS_CONFIG，支持持久化
+- **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
 - 存储容量：最近10条消息
 
 #### 长期记忆（Mem0）
@@ -359,11 +354,10 @@ memory.clear()
 **作用**：跨会话记忆，通过向量相似度检索历史案例和经验。
 
 **配置**：
-```python
-# 在 /Users/saintgeo/Desktop/self-learn/swarm/config.py 中配置
-MEM0_CONFIG = {
-    "api_key": "m0-your-api-key-here",  # 获取地址：https://app.mem0.ai
-}
+
+```env
+# 在 .env 文件中配置
+MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
 ```
 
 **使用示例**：
@@ -424,7 +418,8 @@ results = memory.search("高血压患者如何管理？")
 ```
 
 **注意事项**：
-- 未设置 `MEM0_CONFIG["api_key"]` 时，系统会优雅降级，仅使用短期记忆继续工作
+
+- 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆继续工作
 - 短期记忆默认使用内存存储，无需配置 Redis
 - 长期记忆依赖 Mem0 云服务，需注册账号获取 API Key
 
@@ -477,7 +472,7 @@ python examples/test_all.py
 ### ✅ 阶段 1: 基础框架（已完成）
 
 - [x] 项目目录结构
-- [x] 配置管理（复用config.py）
+- [x] 配置管理（.env 环境变量）
 - [x] LLM客户端（LLM集成，支持 function calling）
 - [x] **Skill 注册系统**（SkillRegistry）
 - [x] **Agent Loop**（LLM 驱动的 Skill 调用循环）
