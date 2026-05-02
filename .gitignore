@@ -50,3 +50,8 @@ htmlcov/
 # 会话记录
 session_summaries/*.md
 agent_identities/*.md
+
+# 数据库
+knowledge/data/milvus_lite.db
+knowledge/data/.milvus_lite.db.lock
+knowledge/scripts/knowledge/data/milvus_lite.db

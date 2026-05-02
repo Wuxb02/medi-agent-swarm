@@ -38,7 +38,11 @@ dependencies = [
     "tqdm>=4.65.0",
     "aiohttp>=3.8.0",
     "httpx>=0.24.0",
+    "milvus-lite>=2.5.1",
 ]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "constraints*", "core*", "knowledge*", "memory*", "research*", "swarm*", "validation*"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

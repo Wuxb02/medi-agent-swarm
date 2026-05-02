@@ -81,6 +81,7 @@ class LLMClient:
             max_tokens = max_tokens or self.max_tokens
 
             logger.debug(f"Calling LLM ({self.model_type}) with {len(messages)} messages")
+            logger.debug(f"LLM base_url: {self.client.base_url}, model: {self.model_name}")
 
             response = await self.client.chat.completions.create(
                 model=self.model_name,
