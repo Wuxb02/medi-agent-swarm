@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #2563eb;
+  --color-primary-light: #3b82f6;
+  --color-success: #16a34a;
+  --color-warning: #f59e0b;
+  --color-danger: #dc2626;
+  --color-bg: #f8fafc;
+  --color-sidebar: #1e293b;
+  --color-card: #ffffff;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--color-bg);
+  color: #1e293b;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+/* Markdown 内容样式 */
+.markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
+.markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8rem 0 0.4rem; }
+.markdown-body h3 { font-size: 1.1rem; font-weight: 600; margin: 0.6rem 0 0.3rem; }
+.markdown-body p { margin: 0.4rem 0; line-height: 1.7; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.5rem; margin: 0.4rem 0; }
+.markdown-body li { margin: 0.2rem 0; }
+.markdown-body code {
+  background: #f1f5f9;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+.markdown-body pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.markdown-body pre code { background: transparent; padding: 0; color: inherit; }
+.markdown-body blockquote {
+  border-left: 3px solid #3b82f6;
+  padding-left: 1rem;
+  margin: 0.5rem 0;
+  color: #64748b;
+}
+.markdown-body strong { font-weight: 600; }
+.markdown-body table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
+.markdown-body th, .markdown-body td { border: 1px solid #e2e8f0; padding: 0.5rem; text-align: left; }
+.markdown-body th { background: #f8fafc; font-weight: 600; }

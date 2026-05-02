@@ -11,7 +11,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 from loguru import logger
 
 from core import LLMClient
@@ -41,10 +41,12 @@ class SwarmCoordinator:
     def __init__(
         self,
         llm_client: Optional[LLMClient] = None,
-        enable_swarm: bool = True
+        enable_swarm: bool = True,
+        event_callback: Optional[Any] = None
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
+        self.event_callback = event_callback
 
         # 初始化 Agent
         self.lead_agent = LeadAgent(llm_client=self.llm_client)
@@ -263,6 +265,8 @@ class SwarmCoordinator:
 
         # 创建 SharedContext
         shared_context = SharedContext(session_id=session_id)
+        if self.event_callback:
+            shared_context.on_event_callback = self.event_callback
 
         # 附加 SharedContext 到所有 Worker
         for worker in self.worker_pool:

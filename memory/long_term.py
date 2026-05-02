@@ -117,7 +117,7 @@ class LongTermMemory:
             # 添加到 Mem0
             result = self.mem0.add(
                 messages=[{"role": "user", "content": memory_text}],
-                user_id="medix_user",  # 固定用户ID（可扩展为多用户）
+                user_id="mediZJ_user",  # 固定用户ID（可扩展为多用户）
                 metadata={
                     "type": "session_summary",
                     "session_id": session_id,
@@ -160,7 +160,7 @@ class LongTermMemory:
         try:
             results = self.mem0.search(
                 query=query,
-                user_id="medix_user",
+                user_id="mediZJ_user",
                 limit=limit * 2  # 多获取一些以便去重后有足够结果
             )
 

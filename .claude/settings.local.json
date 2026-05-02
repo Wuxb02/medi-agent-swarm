@@ -61,7 +61,10 @@
       "Bash(find /Users/saintgeo/Desktop/self-learn/swarm/.claude/skills -name \"*.py\" -exec basename {})",
       "Bash(xargs -I {} basename {} .py)",
       "Bash(command:*)",
-      "Bash(uv sync *)"
+      "Bash(uv sync *)",
+      "Bash(npm run *)",
+      "Bash(uv add *)",
+      "Bash(uv run *)"
     ]
   }
 }

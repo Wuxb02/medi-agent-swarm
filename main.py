@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MediX多智能体医疗助手 - 主入口
+MediZJ多智能体医疗助手 - 主入口
 交互式对话；可选 -v / --verbose 开启详细日志
 """
 import asyncio
@@ -38,7 +38,7 @@ def setup_logger(verbose: bool = False):
 async def interactive_mode():
     """交互式对话模式"""
     print("\n" + "🏥 " * 20)
-    print(" " * 15 + "MediX多智能体医疗助手")
+    print(" " * 15 + "MediZJ多智能体医疗助手")
     print(" " * 15 + "智能群体协作系统")
     print("🏥 " * 20 + "\n")
 

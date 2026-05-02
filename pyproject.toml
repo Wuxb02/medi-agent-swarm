@@ -1,11 +1,11 @@
 [project]
 name = "medix-agent-swarm"
 version = "0.1.0"
-description = "Multi-agent medical assistant system based on MediX-R1"
+description = "Multi-agent medical assistant system based on MediZJ-R1"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    { name = "MediX Team" },
+    { name = "MediZJ Team" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,6 +39,10 @@ dependencies = [
     "aiohttp>=3.8.0",
     "httpx>=0.24.0",
     "milvus-lite>=2.5.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sse-starlette>=2.1.0",
+    "python-multipart>=0.0.9",
 ]
 
 [tool.setuptools.packages.find]

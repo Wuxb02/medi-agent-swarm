@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MediX Agent Swarm 完整测试套件
+MediZJ Agent Swarm 完整测试套件
 
 包含三部分测试：
 1. Phase 1: Agent Loop 工具调用测试
@@ -49,7 +49,7 @@ async def generate_test_report(passed: int, failed: int, total: int, context_awa
     report_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     report_path = Path(__file__).parent.parent / "TEST_REPORT.md"
 
-    report = f"""# MediX Agent Swarm 测试报告
+    report = f"""# MediZJ Agent Swarm 测试报告
 
 **测试时间**: {report_time}
 **测试总数**: {total}
@@ -1351,7 +1351,7 @@ async def test_memory_no_duplication():
 async def main():
     """运行所有测试"""
     print("\n" + "🧪 "*35)
-    print(" "*15 + "MediX Agent Swarm 完整测试套件")
+    print(" "*15 + "MediZJ Agent Swarm 完整测试套件")
     print(" "*10 + "Phase 1-6: Agent Loop + Swarm + Memory + Tools + DeepResearch + Milvus")
     print("🧪 "*35 + "\n")
 

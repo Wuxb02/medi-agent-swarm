@@ -1,0 +1,61 @@
+/** 前端类型定义 */
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: string
+  isStreaming?: boolean
+  suggestions?: string[]
+  disclaimer?: string
+  agentEvents?: AgentEvent[]
+  metadata?: {
+    swarmEnabled: boolean
+    agentsInvolved: string[]
+    totalTime?: number
+    subtasksCompleted?: number
+    timeoutOccurred?: boolean
+  }
+}
+
+export interface AgentEvent {
+  id: string
+  type: 'decomposed' | 'start' | 'tool_call' | 'tool_result' | 'complete'
+  agentId: string
+  subtaskId?: string
+  subtaskType?: string
+  toolName?: string
+  timestamp: string
+  data?: Record<string, any>
+}
+
+export interface SSEEvent {
+  type: string
+  data: Record<string, any>
+}
+
+export interface KnowledgeItem {
+  id: string
+  content: string
+  metadata: Record<string, any>
+  score: number
+}
+
+export interface SessionItem {
+  session_id: string
+  first_question: string
+  created_at: string
+  message_count: number
+  mode: string
+}
+
+export interface DashboardStats {
+  total_sessions: number
+  total_messages: number
+  swarm_sessions: number
+  single_sessions: number
+  avg_response_time: number
+  agents_usage: Record<string, number>
+  knowledge_base_size: number
+  recent_sessions: SessionItem[]
+}

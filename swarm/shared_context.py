@@ -10,7 +10,7 @@ SharedContext：Agent 群体智能的共享环境（信息素系统）
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 import uuid
 from collections import defaultdict
 
@@ -117,6 +117,9 @@ class SharedContext:
         # 工作记忆池（临时数据）
         self.memory_pool: Dict[str, Any] = {}
 
+        # 事件回调（用于 SSE 流式推送等外部监听）
+        self.on_event_callback: Optional[Callable] = None
+
     def publish_event(self, event: Event):
         """
         发布事件
@@ -124,6 +127,11 @@ class SharedContext:
         Agent 通过发布事件来通知其他 Agent
         """
         self.events.append(event)
+        if self.on_event_callback:
+            try:
+                self.on_event_callback(event)
+            except Exception:
+                pass
 
     def get_events(
         self,

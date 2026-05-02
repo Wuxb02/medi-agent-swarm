@@ -1,19 +1,21 @@
-# MediX多智能体医疗助手
+# MediZJ多智能体医疗助手
 
-基于 Skills-Agent 两层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理和 Milvus 知识库。
+基于 Skills-Agent 两层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
 
 ## 📋 项目概述
 
-本项目采用创新的 **Skills-Agent 两层架构**，通过7个自包含的原子 Skills 和3个专业 Agent 协同工作，提供智能、专业的医疗服务。
+本项目采用创新的 **Skills-Agent 两层架构**，通过9个自包含的原子 Skills 和3个专业 Agent 协同工作，提供智能、专业的医疗服务。支持 **CLI 交互**和 **Web 界面**两种使用方式。
 
 ### 🎯 核心特性
 
-- **🔧 Skills 直达架构**: 7个原子 Skills 自包含，直接转换为 OpenAI function calling 格式 ✅
+- **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
+- **📡 流式响应**: 实时推送 Agent 协作过程，可视化多 Agent 并行执行 ✅
+- **🔧 Skills 直达架构**: 9个原子 Skills 自包含，直接转换为 OpenAI function calling 格式 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
 - **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）✅
-- **⚡ Claude Code Skills**: 8个预定义技能（7个原子 + 1个复杂），一键调用医疗助手 ✅
+- **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 
 ## 🎯 Skills 直达架构
@@ -127,6 +129,21 @@ python examples/test_all.py
 
 ### 6. 开始使用
 
+**方式一：Web 界面（推荐）**
+
+```bash
+# 终端 1：启动后端 API 服务
+uv run python api_main.py
+
+# 终端 2：启动前端开发服务器
+cd frontend && npm install && npm run dev
+
+# 浏览器访问 http://localhost:5173
+# API 文档：http://localhost:8000/docs
+```
+
+**方式二：CLI 交互**
+
 ```bash
 python main.py
 ```
@@ -135,42 +152,40 @@ python main.py
 
 ```
 medix-agent-swarm/
-├── .claude/skills/                    # Claude Code Skills (10个)
+├── api/                               # FastAPI 后端 API 层
+│   ├── main.py                        # FastAPI 应用入口、CORS
+│   ├── routers/
+│   │   ├── chat.py                    # /api/chat 问答接口（含流式）
+│   │   ├── knowledge.py               # /api/knowledge 知识库检索
+│   │   ├── sessions.py                # /api/sessions 会话管理
+│   │   └── dashboard.py               # /api/dashboard 仪表盘 + 健康检查
+│   ├── models/                        # Pydantic 请求/响应模型
+│   ├── services/                      # 业务逻辑封装
+│   └── dependencies.py               # 依赖注入
+│
+├── frontend/                          # Vue 3 前端项目
+│   ├── src/
+│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView
+│   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/
+│   │   ├── stores/                    # Pinia 状态管理
+│   │   ├── api/                       # API 调用层
+│   │   ├── composables/               # useSSE (流式), useMarkdown
+│   │   └── types/                     # TypeScript 类型定义
+│   ├── vite.config.ts
+│   └── package.json
+│
+├── .claude/skills/                    # Claude Code Skills (9个)
 │   ├── search-knowledge/              # 搜索医学知识库
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── search.py
 │   ├── assess-risk/                   # 风险评估
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── risk.py
 │   ├── analyze-symptoms/              # 症状分析
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── symptoms.py
 │   ├── recommend-lifestyle/           # 生活方式建议
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── lifestyle.py
 │   ├── disease-code/                  # ICD-10疾病编码
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── code.py
 │   ├── clinical-guideline/            # 临床指南检索
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── guideline.py
 │   ├── deep-research/                 # 深度研究
-│   │   └── script/
-│   │       ├── __init__.py
-│   │       └── research.py
 │   ├── search-history/                # 搜索会话历史（短期记忆）
-│   │   └── script/search.py
 │   └── search-similar-cases/          # 搜索相似案例（长期记忆）
-│       └── script/search.py
 │
 ├── agents/                            # Agent 实现
-│   ├── __init__.py
 │   ├── base_agent.py                  # Agent 基类
 │   ├── consultation_agent.py          # 健康咨询 Agent
 │   ├── diagnostic_agent.py            # 症状诊断 Agent
@@ -178,68 +193,53 @@ medix-agent-swarm/
 │   └── skill_registry_mixin.py        # Skill 注册混入
 │
 ├── core/                              # 核心引擎
-│   ├── __init__.py
 │   ├── agent_loop.py                  # Agent Loop（集成约束验证）
 │   ├── llm_client.py                  # LLM 客户端
 │   ├── skill_loader.py                # 动态加载 Skills
-│   ├── skill_registry.py              # Skill 注册表（直接转 OpenAI format，无 Tool 层）
+│   ├── skill_registry.py              # Skill 注册表（直接转 OpenAI format）
 │   └── state_manager.py               # 状态管理
 │
 ├── swarm/                             # Swarm 协调器
-│   ├── __init__.py
 │   ├── events.py                      # 事件驱动通信
 │   ├── lead_agent.py                  # 任务分解和汇总
 │   ├── shared_context.py              # 共享环境（信息素）
 │   └── swarm_coordinator.py           # 智能路由
 │
 ├── memory/                            # 记忆管理（集成熵管理）
-│   ├── __init__.py
-│   ├── agent_identity.py              # Agent 身份管理
 │   ├── long_term.py                   # 长期记忆（Mem0）
-│   ├── short_term.py                  # 短期记忆（自动去重和压缩）
+│   ├── short_term.py                  # 短期记忆
 │   ├── session_summary.py             # 会话总结
-│   ├── entropy_manager.py             # 熵管理器（Harness）
-│   ├── agents/                        # Agent 身份文件存储
-│   └── swarm/session_summaries/       # Swarm 会话总结存储
+│   └── entropy_manager.py             # 熵管理器
 │
-├── constraints/                       # 约束系统（Harness）
-│   ├── __init__.py
-│   ├── agent_constraints.yaml         # Agent 能力边界定义
+├── constraints/                       # 约束系统
+│   ├── agent_constraints.yaml         # Agent 能力边界
 │   ├── swarm_constraints.yaml         # Swarm 协作规则
-│   └── validator.py                   # 运行时约束验证器
+│   └── validator.py                   # 约束验证器
 │
-├── validation/                        # 输出验证和修复（Harness）
-│   ├── __init__.py
+├── validation/                        # 输出验证和修复
 │   └── auto_fixer.py                  # 自动修复器
 │
 ├── knowledge/                         # Milvus 知识库
-│   ├── __init__.py
 │   ├── milvus_kb.py                   # 知识库封装
-│   ├── data/
-│   │   ├── documents/                 # 医学知识文档（txt）
-│   │   └── milvus_lite.db             # 向量数据库（自动生成）
-│   └── scripts/
-│       ├── __init__.py
-│       └── import_hardcoded_data.py   # 数据导入脚本
+│   ├── data/documents/                # 医学知识文档
+│   └── scripts/import_hardcoded_data.py
 │
 ├── research/                          # DeepResearch 模块
-│   ├── __init__.py
-│   ├── deep_research_workflow.py      # 深度研究工作流
-│   ├── evidence_synthesizer.py        # 证据综合器
-│   ├── knowledge_base.py              # 知识库（可选 Qdrant）
-│   └── web_search.py                  # 网络搜索
+│   ├── deep_research_workflow.py
+│   ├── evidence_synthesizer.py
+│   └── web_search.py
 │
 ├── examples/
-│   └── test_all.py                    # 完整测试套件（26个测试）
+│   └── test_all.py                    # 测试套件
 │
-├── main.py                            # 主入口（交互式对话）
-├── setup.py                           # 安装脚本
-├── requirements.txt                   # 依赖列表
-├── MediX代码解读.md                   # 代码解读文档
-└── README.md                          # 本文档
+├── main.py                            # CLI 入口
+├── api_main.py                        # Web 服务入口（uvicorn）
+├── pyproject.toml                     # 项目配置和依赖
+└── .env                               # 环境变量配置
 ```
 
 **架构说明**：
+- ✅ **Web + CLI 双入口**：`api_main.py`（Web）/ `main.py`（CLI）
 - ✅ **直达架构**：Skills → OpenAI Format
 - ✅ **Skills 自包含**：每个 Skill 在 `script/` 目录下实现，直接调用知识库
 - ✅ **动态加载**：`skill_loader.py` 扫描 `.claude/skills/` 目录动态加载
@@ -249,7 +249,7 @@ medix-agent-swarm/
 
 ## 🤖 Skills 和 Agent 清单
 
-### 7个原子 Skills（两层架构）
+### 9个原子 Skills（两层架构）
 
 **所有 Agent 共享以下 Skills**：
 
@@ -262,6 +262,8 @@ medix-agent-swarm/
 | `disease_code` | ICD-10疾病编码 | Milvus | 标准编码 |
 | `clinical_guideline` | 临床指南检索 | Milvus | 权威指南 |
 | `deep_research` | 深度研究 | 网络搜索 | 最新进展 |
+| `search_history` | 搜索会话历史 | 短期记忆 | 当前会话上下文 |
+| `search_similar_cases` | 搜索相似案例 | 长期记忆 | 跨会话经验 |
 
 ### 3个专业 Agent（自主选择 Skills）
 
@@ -289,10 +291,54 @@ medix-agent-swarm/
 
 - ✅ **直达架构**: Skills → OpenAI Format
 - ✅ **Skills 自包含**: 直接调用 Milvus 或内置逻辑
-- ✅ **Agent 灵活性**: 每个 Agent 注册全部7个 Skills，根据任务自主选择
+- ✅ **Agent 灵活性**: 每个 Agent 注册全部9个 Skills，根据任务自主选择
 - ✅ **SkillRegistry**: 统一管理注册、执行、格式转换
 - ✅ **统一知识库**: 医学知识统一存储在 Milvus 向量数据库，支持语义检索
 - ✅ **易于扩展**: 添加新 Skill 或新知识无需修改 Agent 代码
+
+## 🌐 Web 界面
+
+系统提供基于 Vue 3 + FastAPI 的 Web 界面，支持以下功能模块：
+
+| 页面 | 功能 | 路由 |
+|------|------|------|
+| **智能问答** | 聊天式问答，实时展示 Agent 协作过程，Markdown 渲染 | `/chat` |
+| **知识库** | 医学知识语义搜索，按类型过滤（生活方式/症状/编码/指南） | `/knowledge` |
+| **历史会话** | 会话列表查看、恢复、删除 | `/sessions` |
+| **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
+
+### Web 架构
+
+```
+浏览器 (Vue 3 + Vite + Tailwind CSS)
+   ↓ fetch + ReadableStream
+Vite Dev Proxy (/api → localhost:8000)
+   ↓
+FastAPI (api_main.py)
+   ↓
+api/routers/chat.py → api/services/chat_service.py
+   ↓ EventBridge (asyncio.Queue)
+SwarmCoordinator.process()
+   ↓
+SharedContext.on_event_callback → 事件推送
+   ↓
+换行分隔 JSON 流式响应 → 前端实时渲染
+```
+
+### API 端点
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| POST | `/api/chat` | 非流式问答 |
+| POST | `/api/chat/stream` | 流式问答（换行分隔 JSON） |
+| GET | `/api/chat/history/{session_id}` | 获取会话历史 |
+| POST | `/api/knowledge/search` | 知识库搜索 |
+| GET | `/api/knowledge/types` | 知识库类型列表 |
+| GET | `/api/sessions` | 会话列表 |
+| GET | `/api/sessions/{session_id}` | 会话详情 |
+| DELETE | `/api/sessions/{session_id}` | 删除会话 |
+| GET | `/api/dashboard/stats` | 仪表盘统计 |
+| GET | `/api/health` | 健康检查 |
 
 
 ## ⚙️ 配置说明
@@ -429,7 +475,7 @@ results = memory.search("高血压患者如何管理？")
 
 ### 实现的 Harness 原则
 
-| 原则 | MediX 实现 | 位置 |
+| 原则 | MediZJ 实现 | 位置 |
 |------|-----------|------|
 | **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 | `constraints/` |
 | **自动修复** | 输出违规自动添加免责声明、高危警告 | `validation/` |
@@ -700,7 +746,7 @@ MIT License
 
 ## 🙏 致谢
 
-- 基于 [MediX-R1](https://github.com/...) 医学多模态模型
+- 基于 [MediZJ-R1](https://github.com/...) 医学多模态模型
 - 使用 [LLM API](https://www.volcengine.com/) 作为LLM后端
 - 记忆管理基于 [Mem0](https://mem0.ai/)
 
