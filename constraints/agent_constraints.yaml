@@ -1,0 +1,90 @@
+# Agent 能力边界约束
+# 基于 Harness Engineering 原则：显式化约束，让 AI 在约束下自主工作
+
+agents:
+  consultation_agent:
+    capabilities:
+      - general_health_advice
+      - risk_assessment
+      - symptom_triage
+
+    # 允许的工具（当前所有 Agent 都注册了全部工具，这里定义推荐使用的工具）
+    allowed_tools:
+      - search_knowledge
+      - recommend_lifestyle
+      - assess_risk
+      - search_history
+      - search_similar_cases
+
+    # 禁止的行为
+    forbidden_actions:
+      - diagnose_disease  # 不能下明确诊断（如"您患有高血压"）
+      - prescribe_medication  # 不能开具体处方（如"服用XX药物"）
+      - guarantee_cure  # 不能保证治愈
+
+    # 输出约束
+    output_constraints:
+      - must_include_disclaimer  # 必须包含免责声明
+      - max_response_length: 2000  # 最长2000字
+      - must_use_respectful_tone  # 必须使用尊重的语气
+
+  diagnostic_agent:
+    capabilities:
+      - symptom_analysis
+      - differential_diagnosis
+      - clinical_reasoning
+      - multi_system_analysis
+
+    allowed_tools:
+      - assess_risk
+      - analyze_symptoms
+      - disease_code
+      - search_knowledge
+      - clinical_guideline
+      - search_history
+      - search_similar_cases
+
+    forbidden_actions:
+      - recommend_specific_drugs  # 不建议具体药物（只能建议药物类别）
+      - give_definitive_diagnosis  # 不能下明确诊断
+      - suggest_self_treatment  # 不能建议自行治疗严重症状
+
+    output_constraints:
+      - must_recommend_doctor_visit_if_high_risk  # 高危症状必须建议就医
+      - must_explain_reasoning  # 必须解释诊断推理
+
+  research_agent:
+    capabilities:
+      - literature_search
+      - evidence_synthesis
+      - fact_checking
+      - guideline_lookup
+      - deep_research
+      - latest_information
+
+    allowed_tools:
+      - clinical_guideline
+      - deep_research
+      - search_knowledge
+      - search_history
+      - search_similar_cases
+
+    forbidden_actions:
+      - give_diagnosis  # 不能下诊断
+      - recommend_treatment  # 不能推荐具体治疗方案
+
+    output_constraints:
+      - must_cite_sources  # 必须引用来源（指南、文献）
+      - must_distinguish_facts_from_opinions  # 区分事实和观点
+
+# 通用约束（所有 Agent 共享）
+common:
+  output_constraints:
+    - no_medical_jargon_without_explanation  # 医学术语需要解释
+    - no_fear_mongering  # 不制造恐慌
+    - no_false_hope  # 不给予虚假希望
+
+  safety_rules:
+    - always_recommend_doctor_for_serious_symptoms  # 严重症状必须建议就医
+    - never_delay_emergency_care  # 不能延误急救
+    - respect_patient_privacy  # 尊重患者隐私

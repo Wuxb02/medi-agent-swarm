@@ -1,0 +1,80 @@
+# Swarm 协作约束
+# 基于 Harness Engineering 原则：定义协作规则，让 Agent Swarm 在约束下高效协作
+
+swarm:
+  # 基本限制
+  max_agents_per_task: 3  # 单个任务最多3个Agent参与（避免过度协作）
+  max_parallel_tasks: 5   # 最多5个任务并行（避免资源耗尽）
+  timeout_seconds: 90     # 任务超时时间（当前已在 SwarmCoordinator 中定义）
+
+  # 任务分解规则（LeadAgent 使用）
+  task_decomposition_rules:
+    - name: "simple_query"
+      pattern: "单一症状|常见疾病科普|健康建议|如何预防"
+      max_subtasks: 1
+      reason: "简单问题无需Swarm，单Agent足够"
+      example: "感冒了怎么办？"
+
+    - name: "lifestyle_advice"
+      pattern: "饮食|运动|睡眠|生活习惯|日常护理"
+      max_subtasks: 1
+      reason: "生活方式建议相对简单"
+      example: "高血压患者饮食注意什么？"
+
+    - name: "moderate_case"
+      pattern: "两个症状|轻微既往史|简单组合"
+      min_subtasks: 2
+      max_subtasks: 3
+      reason: "中等复杂度，需要2-3个Agent协作"
+      example: "头痛加恶心，严重吗？"
+
+    - name: "complex_case"
+      pattern: "多个症状|既往病史|综合管理|疑难症状|多系统"
+      min_subtasks: 2
+      max_subtasks: 5
+      reason: "复杂案例需要多角度深度分析"
+      example: "35岁女性，持续头痛伴发热、颈部僵硬、恶心呕吐，有高血压病史"
+
+  # Agent 选择规则（强制约束）
+  agent_selection_rules:
+    - if_symptoms: ["胸痛", "呼吸困难", "心悸", "昏厥", "剧烈头痛", "突然视力模糊"]
+      must_include: ["diagnostic_agent"]
+      reason: "高危症状必须风险评估"
+      priority: critical
+
+    - if_keywords: ["指南", "循证", "研究", "文献", "最新进展", "专家共识"]
+      must_include: ["research_agent"]
+      reason: "需要权威证据和最新信息"
+      priority: high
+
+    - if_keywords: ["饮食", "运动", "生活方式", "日常护理", "用药指导"]
+      must_include: ["consultation_agent"]
+      reason: "需要生活方式建议"
+      priority: medium
+
+  # 质量控制
+  quality_control:
+    min_contribution_length: 50  # 每个Agent贡献至少50字（避免敷衍）
+    max_contribution_length: 800  # 每个Agent贡献最多800字（避免冗长）
+    require_evidence: true  # 要求提供证据支持
+    allow_disagreement: true  # 允许Agent之间观点不同（但需说明理由）
+
+  # 冲突解决
+  conflict_resolution:
+    strategy: "lead_agent_decides"  # LeadAgent 最终决策
+    require_explanation: true  # 冲突时需要解释理由
+    escalate_if_safety_concern: true  # 安全问题上报用户
+
+  # 协作模式
+  collaboration_modes:
+    - mode: "parallel"
+      description: "各Agent并行独立工作"
+      use_when: "任务相对独立"
+
+    - mode: "sequential"
+      description: "Agent按顺序工作（当前未实现）"
+      use_when: "任务有依赖关系"
+
+    - mode: "debate"
+      description: "Agent辩论后达成共识（当前未实现）"
+      use_when: "存在多种观点"
