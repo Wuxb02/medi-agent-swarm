@@ -588,7 +588,7 @@ async def test_long_term_memory():
     print(f"✅ Mem0已启用")
 
     # 添加会话总结
-    memory_id = ltm.add_session_summary(
+    memory_id = await ltm.add_session_summary(
         session_id="test-ltm-001",
         question="测试问题：头痛怎么办？",
         answer="建议休息，多喝水，如果持续或加重建议就医",
@@ -599,7 +599,7 @@ async def test_long_term_memory():
 
     # 搜索相似会话
     print("\n🔍 搜索测试：'头痛'")
-    results = ltm.search_similar_sessions("头痛", limit=3)
+    results = await ltm.search_similar_sessions("头痛", limit=3)
 
     print(f"✅ 找到 {len(results)} 条相似记录")
     for i, r in enumerate(results[:3], 1):
@@ -1018,7 +1018,7 @@ async def test_unified_memory_single_agent():
 
     # 验证长期记忆（通过 Mem0 检索）
     ltm = LongTermMemory()
-    similar = ltm.search_similar_sessions("高血压", limit=5)
+    similar = await ltm.search_similar_sessions("高血压", limit=5)
     print(f"\n🔍 长期记忆检索:")
     print(f"  - 找到 {len(similar)} 条相似历史案例")
 
@@ -1067,7 +1067,7 @@ async def test_unified_memory_swarm():
 
     # 验证长期记忆
     ltm = LongTermMemory()
-    similar = ltm.search_similar_sessions("高血压 胸痛", limit=5)
+    similar = await ltm.search_similar_sessions("高血压 胸痛", limit=5)
     print(f"\n🔍 长期记忆检索:")
     print(f"  - 找到 {len(similar)} 条相似案例")
 

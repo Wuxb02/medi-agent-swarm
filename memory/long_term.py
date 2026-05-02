@@ -11,6 +11,7 @@ Mem0 优势：
 - 云端或本地 Qdrant 存储
 - 内置去重和摘要
 """
+import asyncio
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from loguru import logger
@@ -88,7 +89,7 @@ class LongTermMemory:
             logger.info("To enable Mem0: set MEM0_API_KEY in .env file")
             self.enabled = False
 
-    def add_session_summary(
+    async def add_session_summary(
         self,
         session_id: str,
         question: str,
@@ -96,7 +97,7 @@ class LongTermMemory:
         metadata: Optional[Dict[str, Any]] = None
     ) -> Optional[str]:
         """
-        添加会话总结到 Mem0
+        添加会话总结到 Mem0（异步，5秒超时）
 
         Args:
             session_id: 会话ID
@@ -114,16 +115,20 @@ class LongTermMemory:
             # 构建记忆文本（包含问题和答案摘要）
             memory_text = f"问题：{question}\\n回答：{answer[:500]}..."
 
-            # 添加到 Mem0
-            result = self.mem0.add(
-                messages=[{"role": "user", "content": memory_text}],
-                user_id="mediZJ_user",  # 固定用户ID（可扩展为多用户）
-                metadata={
-                    "type": "session_summary",
-                    "session_id": session_id,
-                    "timestamp": datetime.now().isoformat(),
-                    **(metadata or {})
-                }
+            # 异步添加到 Mem0（5秒超时）
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.mem0.add,
+                    messages=[{"role": "user", "content": memory_text}],
+                    user_id="mediZJ_user",
+                    metadata={
+                        "type": "session_summary",
+                        "session_id": session_id,
+                        "timestamp": datetime.now().isoformat(),
+                        **(metadata or {})
+                    }
+                ),
+                timeout=5.0
             )
 
             # 提取记忆ID
@@ -135,17 +140,20 @@ class LongTermMemory:
             logger.info(f"Added session summary to Mem0: {memory_id}")
             return memory_id
 
+        except asyncio.TimeoutError:
+            logger.warning("Mem0 add timeout (5s), session summary not saved")
+            return None
         except Exception as e:
             logger.error(f"Failed to add session summary to Mem0: {e}")
             return None
 
-    def search_similar_sessions(
+    async def search_similar_sessions(
         self,
         query: str,
         limit: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        搜索相似的历史会话（向量相似度搜索，自动去重）
+        搜索相似的历史会话（异步，5秒超时，向量相似度搜索，自动去重）
 
         Args:
             query: 查询文本（通常是用户问题）
@@ -158,10 +166,15 @@ class LongTermMemory:
             return []
 
         try:
-            results = self.mem0.search(
-                query=query,
-                user_id="mediZJ_user",
-                limit=limit * 2  # 多获取一些以便去重后有足够结果
+            # 异步搜索 Mem0（5秒超时）
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.mem0.search,
+                    query=query,
+                    user_id="mediZJ_user",
+                    limit=limit * 2
+                ),
+                timeout=5.0
             )
 
             # 添加调试日志
@@ -200,6 +213,9 @@ class LongTermMemory:
             logger.info(f"Found {len(formatted_results)} similar sessions for query: {query[:50]}...")
             return formatted_results
 
+        except asyncio.TimeoutError:
+            logger.warning("Mem0 search timeout (5s), continuing without long-term memory")
+            return []
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []

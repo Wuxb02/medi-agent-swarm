@@ -114,13 +114,15 @@ class SwarmCoordinator:
             limit=10  # 最近5轮对话（10条消息）
         )
 
-        # 2. 检索长期记忆（相似历史会话）
-        similar_memories = self.long_term_memory.search_similar_sessions(
-            query=question,
-            limit=3
+        # 2. 异步启动长期记忆检索（与路由并行，不阻塞）
+        search_task = asyncio.create_task(
+            self.long_term_memory.search_similar_sessions(
+                query=question,
+                limit=3
+            )
         )
 
-        # 3. 构建增强上下文
+        # 3. 构建增强上下文（先注入短期记忆）
         enhanced_context = context or {}
 
         # 添加短期记忆
@@ -131,7 +133,11 @@ class SwarmCoordinator:
             ]
             logger.info(f"Loaded {len(recent_history)} recent messages from short-term memory")
 
-        # 添加长期记忆
+        # Step 1: LeadAgent 分解任务（与长期记忆检索并行）
+        assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
+
+        # 等待长期记忆检索完成（若还未完成），注入到上下文
+        similar_memories = await search_task
         if similar_memories:
             enhanced_context["historical_cases"] = [
                 {
@@ -141,9 +147,6 @@ class SwarmCoordinator:
                 for mem in similar_memories
             ]
             logger.info(f"Found {len(similar_memories)} similar historical cases from long-term memory")
-
-        # Step 1: LeadAgent 分解任务
-        assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
         subtasks = assessment.get("subtasks", [])
 
         logger.info(f"LeadAgent 分解任务：{len(subtasks)} 个")
@@ -257,21 +260,17 @@ class SwarmCoordinator:
 
         # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
 
-        # 保存到长期记忆
-        try:
-            self.long_term_memory.add_session_summary(
-                session_id=session_id,
-                question=question,
-                answer=final_answer,
-                metadata={
-                    "mode": mode,
-                    "subtasks_count": len(subtasks),
-                    "total_time": (end_time - start_time).total_seconds(),
-                }
-            )
-            logger.info(f"Saved to long-term memory (session={session_id}, mode={mode})")
-        except Exception as e:
-            logger.error(f"Failed to save to long-term memory: {e}")
+        # 后台异步保存到长期记忆（不阻塞返回）
+        asyncio.ensure_future(self._save_long_term_memory(
+            session_id=session_id,
+            question=question,
+            answer=final_answer,
+            metadata={
+                "mode": mode,
+                "subtasks_count": len(subtasks),
+                "total_time": (end_time - start_time).total_seconds(),
+            }
+        ))
 
         return result
 
@@ -371,25 +370,18 @@ class SwarmCoordinator:
         # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
         # Agent Loop 保存了完整的对话历史（user + assistant + tool messages）
 
-        # 保存到 Mem0 长期记忆
-        try:
-            # 保存会话总结
-            self.long_term_memory.add_session_summary(
-                session_id=session_id,
-                question=question,
-                answer=final_answer,
-                metadata={
-                    "mode": "swarm",
-                    "agents_count": len(shared_context.agent_contributions),
-                    "total_time": (end_time - start_time).total_seconds(),
-                    "timeout_occurred": timeout_occurred
-                }
-            )
-
-            logger.info(f"Saved to Mem0 long-term memory (session={session_id})")
-
-        except Exception as e:
-            logger.error(f"Failed to save to Mem0: {e}")
+        # 后台异步保存到 Mem0 长期记忆（不阻塞返回）
+        asyncio.ensure_future(self._save_long_term_memory(
+            session_id=session_id,
+            question=question,
+            answer=final_answer,
+            metadata={
+                "mode": "swarm",
+                "agents_count": len(shared_context.agent_contributions),
+                "total_time": (end_time - start_time).total_seconds(),
+                "timeout_occurred": timeout_occurred
+            }
+        ))
 
         # 发布 Swarm 完成事件
         shared_context.publish_event(Event(
@@ -473,6 +465,19 @@ class SwarmCoordinator:
             logger.info(f"{worker.agent_id}: Completed {subtask.type}")
         except Exception as e:
             logger.error(f"{worker.agent_id}: Error in {subtask.type}: {e}")
+
+    async def _save_long_term_memory(self, session_id, question, answer, metadata):
+        """后台异步保存长期记忆"""
+        try:
+            await self.long_term_memory.add_session_summary(
+                session_id=session_id,
+                question=question,
+                answer=answer,
+                metadata=metadata
+            )
+            logger.info(f"Saved to long-term memory (session={session_id})")
+        except Exception as e:
+            logger.error(f"Background LTM save failed (session={session_id}): {e}")
 
     def _extract_suggestions(self, final_answer: str) -> List[str]:
         """从最终答案中提取建议（简化实现）"""

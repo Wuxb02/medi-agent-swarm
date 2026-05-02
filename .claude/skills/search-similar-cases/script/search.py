@@ -38,7 +38,7 @@ async def search_similar_cases(query: str, max_results: int = 3) -> Dict[str, An
             }
 
         # 搜索相似会话
-        results = memory.search_similar_sessions(query=query, limit=max_results)
+        results = await memory.search_similar_sessions(query=query, limit=max_results)
 
         if not results:
             return {
