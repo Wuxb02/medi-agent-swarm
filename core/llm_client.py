@@ -27,6 +27,7 @@ class LLMResponse:
     tool_calls: List[ToolCall]
     finish_reason: str  # "stop", "tool_calls", "length", "content_filter"
     reasoning_content: Optional[str] = None  # 模型原生推理内容（如 GLM-4.7、DeepSeek-R1）
+    usage: Optional[Dict[str, int]] = None  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
 
     def has_tool_calls(self) -> bool:
         """是否包含 function calls"""
@@ -201,11 +202,21 @@ class LLMClient:
             # 提取模型原生推理内容
             reasoning_content = getattr(message, 'reasoning_content', None)
 
+            # 提取 token 用量
+            usage = None
+            if hasattr(response, 'usage') and response.usage:
+                usage = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                }
+
             return LLMResponse(
                 content=message.content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
-                reasoning_content=reasoning_content
+                reasoning_content=reasoning_content,
+                usage=usage
             )
 
         except Exception as e:
@@ -264,8 +275,17 @@ class LLMClient:
             tool_call_accum: Dict[int, Dict[str, Any]] = {}
             finish_reason = "stop"
             tools_notified = False
+            usage = None
 
             async for chunk in stream:
+                # 捕获 usage（最后一个 chunk 可能 choices 为空但包含 usage）
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage = {
+                        "prompt_tokens": chunk.usage.prompt_tokens,
+                        "completion_tokens": chunk.usage.completion_tokens,
+                        "total_tokens": chunk.usage.total_tokens,
+                    }
+
                 if not chunk.choices:
                     continue
 
@@ -327,7 +347,8 @@ class LLMClient:
                 content=content,
                 tool_calls=parsed_tool_calls,
                 finish_reason=finish_reason,
-                reasoning_content=reasoning_content
+                reasoning_content=reasoning_content,
+                usage=usage
             )
 
         except Exception as e:

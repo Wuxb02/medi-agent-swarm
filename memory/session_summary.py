@@ -57,6 +57,10 @@ class PerformanceMetrics:
     information_coverage: float  # 信息覆盖度（0-1）
     redundancy: float  # 信息冗余度（0-1）
     speedup_vs_single: float = 1.0  # 相比单 Agent 的加速比
+    total_tokens: int = 0  # 总 token 消耗
+    prompt_tokens: int = 0  # 输入 token
+    completion_tokens: int = 0  # 输出 token
+    total_messages: int = 0  # 总消息数
 
 
 @dataclass
@@ -190,6 +194,12 @@ class SessionSummary:
             f"- 信息覆盖度：{self.performance.information_coverage:.1%}",
             f"- 信息冗余度：{self.performance.redundancy:.1%}",
             f"- 加速比：{self.performance.speedup_vs_single:.2f}x",
+            "",
+            f"总 Token 消耗：{self.performance.total_tokens}",
+            f"- 输入 Token：{self.performance.prompt_tokens}",
+            f"- 输出 Token：{self.performance.completion_tokens}",
+            "",
+            f"消息数：{self.performance.total_messages}",
             ""
         ])
 
@@ -203,10 +213,13 @@ class SessionSummary:
         agent_id: str,
         final_answer: str,
         start_time: datetime,
-        end_time: datetime
+        end_time: datetime,
+        usage: Optional[Dict[str, int]] = None,
+        total_messages: int = 0
     ) -> "SessionSummary":
         """从单 Agent 处理结果构建 SessionSummary"""
         total_time = (end_time - start_time).total_seconds()
+        usage = usage or {}
 
         return cls(
             session_id=session_id,
@@ -233,7 +246,11 @@ class SessionSummary:
                 agent_count=1,
                 parallel_efficiency=1.0,
                 information_coverage=1.0,
-                redundancy=0.0
+                redundancy=0.0,
+                total_tokens=usage.get('total_tokens', 0),
+                prompt_tokens=usage.get('prompt_tokens', 0),
+                completion_tokens=usage.get('completion_tokens', 0),
+                total_messages=total_messages,
             ),
             swarm_enabled=False
         )
@@ -246,7 +263,9 @@ class SessionSummary:
         shared_context: Any,
         final_answer: str,
         start_time: datetime,
-        end_time: datetime
+        end_time: datetime,
+        usage: Optional[Dict[str, int]] = None,
+        total_messages: int = 0
     ) -> "SessionSummary":
         """从 SharedContext 构建 SessionSummary"""
 
@@ -280,12 +299,17 @@ class SessionSummary:
                 ))
 
         # 性能指标
+        usage = usage or {}
         performance = PerformanceMetrics(
             total_time=total_time,
             agent_count=len(shared_context.agent_contributions),
             parallel_efficiency=0.8,  # TODO: 实际计算
             information_coverage=0.9,  # TODO: 实际计算
-            redundancy=0.15  # TODO: 实际计算
+            redundancy=0.15,  # TODO: 实际计算
+            total_tokens=usage.get('total_tokens', 0),
+            prompt_tokens=usage.get('prompt_tokens', 0),
+            completion_tokens=usage.get('completion_tokens', 0),
+            total_messages=total_messages,
         )
 
         return cls(

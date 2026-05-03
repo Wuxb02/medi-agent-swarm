@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     total_time: float = 0.0
     swarm_metadata: Dict[str, Any] = {}
     timeout_occurred: bool = False
+    usage: Dict[str, int] = {}  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
 
 
 class MessageItem(BaseModel):

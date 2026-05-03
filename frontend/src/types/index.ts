@@ -16,6 +16,11 @@ export interface ChatMessage {
     totalTime?: number
     subtasksCompleted?: number
     timeoutOccurred?: boolean
+    usage?: {
+      prompt_tokens: number
+      completion_tokens: number
+      total_tokens: number
+    }
   }
 }
 
@@ -65,6 +70,7 @@ export interface SessionItem {
   created_at: string
   message_count: number
   mode: string
+  total_tokens: number
 }
 
 export interface DashboardStats {
@@ -76,4 +82,5 @@ export interface DashboardStats {
   agents_usage: Record<string, number>
   knowledge_base_size: number
   recent_sessions: SessionItem[]
+  total_tokens: number
 }

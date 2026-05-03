@@ -86,6 +86,14 @@ class AgentLoop:
         # 重置计数
         self.tool_call_count = 0
 
+        # Token 用量累加器
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+
+        # 消息数计数器
+        message_count = 0
+
         logger.info(f"Starting Agent Loop for {agent.agent_id}, task_id={task_id}")
 
         try:
@@ -102,6 +110,7 @@ class AgentLoop:
                     role="user",
                     content=user_message
                 )
+                message_count += 1
                 logger.debug(f"Recorded user message to short-term memory (session={session_id})")
 
             # 获取 Agent 的 Skills (OpenAI format)
@@ -177,6 +186,12 @@ class AgentLoop:
                             temperature=agent.config.get('temperature', 0.7)
                         )
 
+                    # 累加 token 用量
+                    if llm_response.usage:
+                        total_prompt_tokens += llm_response.usage.get("prompt_tokens", 0)
+                        total_completion_tokens += llm_response.usage.get("completion_tokens", 0)
+                        total_tokens += llm_response.usage.get("total_tokens", 0)
+
                     # 记录中间结果
                     state.add_intermediate_result({
                         'iteration': state.iteration,
@@ -225,6 +240,7 @@ class AgentLoop:
                                 role="assistant",
                                 content=f"调用工具：{', '.join(tool_names)}"
                             )
+                            message_count += 1
 
                         # 执行每个 Skill 调用
                         for tool_call in llm_response.tool_calls:
@@ -276,6 +292,7 @@ class AgentLoop:
                                     role="tool",
                                     content=f"{tool_call.name}: {result_summary}"
                                 )
+                                message_count += 1
 
                         # 推理轮次结束：回调耗时
                         elapsed = time.monotonic() - think_start
@@ -335,12 +352,19 @@ class AgentLoop:
                                 role="assistant",
                                 content=final_answer or "(empty response)"
                             )
+                            message_count += 1
                             logger.debug(f"Recorded final answer to short-term memory (session={session_id})")
 
                         result = {
                             'answer': final_answer,
                             'iterations': state.iteration,
-                            'agent_id': agent.agent_id
+                            'agent_id': agent.agent_id,
+                            'usage': {
+                                'prompt_tokens': total_prompt_tokens,
+                                'completion_tokens': total_completion_tokens,
+                                'total_tokens': total_tokens,
+                            },
+                            'message_count': message_count,
                         }
 
                         # 让 Agent 进行结果后处理（如提取建议等）
@@ -381,7 +405,13 @@ class AgentLoop:
                     result = {
                         'answer': final_response.content or '抱歉，未能完成任务',
                         'iterations': state.iteration,
-                        'warning': 'max_iterations_reached'
+                        'warning': 'max_iterations_reached',
+                        'usage': {
+                            'prompt_tokens': total_prompt_tokens,
+                            'completion_tokens': total_completion_tokens,
+                            'total_tokens': total_tokens,
+                        },
+                        'message_count': message_count,
                     }
 
                     # 记录最终回答到短期记忆
@@ -391,6 +421,7 @@ class AgentLoop:
                             role="assistant",
                             content=result['answer']
                         )
+                        message_count += 1
 
                     state.mark_completed(result)
                     logger.info("Generated fallback answer after max iterations")
@@ -402,7 +433,13 @@ class AgentLoop:
                         'answer': '抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。',
                         'iterations': state.iteration,
                         'warning': 'max_iterations_reached',
-                        'error': str(e)
+                        'error': str(e),
+                        'usage': {
+                            'prompt_tokens': total_prompt_tokens,
+                            'completion_tokens': total_completion_tokens,
+                            'total_tokens': total_tokens,
+                        },
+                        'message_count': message_count,
                     }
                     state.mark_completed(result)
 

@@ -13,6 +13,8 @@ def get_dashboard_stats() -> DashboardStats:
 
     total_sessions = len(sessions)
     swarm_sessions = sum(1 for s in sessions if s.mode == "swarm")
+    total_tokens = sum(s.total_tokens for s in sessions)
+    total_messages = sum(s.message_count for s in sessions)
     single_sessions = total_sessions - swarm_sessions
 
     # Agent 使用统计：从会话详情中获取真实的 agents_involved 数据
@@ -45,11 +47,12 @@ def get_dashboard_stats() -> DashboardStats:
 
     return DashboardStats(
         total_sessions=total_sessions,
-        total_messages=total_sessions * 2,  # 粗略估计：当前会话摘要未记录消息数
+        total_messages=total_messages,
         swarm_sessions=swarm_sessions,
         single_sessions=single_sessions,
         avg_response_time=round(avg_response_time, 2),
         agents_usage=agents_usage,
         knowledge_base_size=get_knowledge_base_size(),
         recent_sessions=recent_sessions,
+        total_tokens=total_tokens,
     )

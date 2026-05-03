@@ -85,12 +85,21 @@ def _parse_summary_file(filepath: str, filename: str) -> Optional[SessionListIte
     # 文件修改时间
     created_at = datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
 
+    # 提取 token 消耗
+    tokens_match = re.search(r"总 Token 消耗[：:]\s*(\d+)", content)
+    total_tokens = int(tokens_match.group(1)) if tokens_match else 0
+
+    # 提取消息数
+    messages_match = re.search(r"消息数[：:]\s*(\d+)", content)
+    message_count = int(messages_match.group(1)) if messages_match else 0
+
     return SessionListItem(
         session_id=session_id,
         first_question=first_question[:80],
         created_at=created_at,
-        message_count=0,
-        mode=mode
+        message_count=message_count,
+        mode=mode,
+        total_tokens=total_tokens
     )
 
 
@@ -116,6 +125,14 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
     time_match = re.search(r"总耗时[：:]\s*([\d.]+)", content)
     total_time = float(time_match.group(1)) if time_match else 0.0
 
+    # 提取 token 消耗
+    total_tokens_match = re.search(r"总 Token 消耗[：:]\s*(\d+)", content)
+    total_tokens = int(total_tokens_match.group(1)) if total_tokens_match else 0
+    prompt_tokens_match = re.search(r"输入 Token[：:]\s*(\d+)", content)
+    prompt_tokens = int(prompt_tokens_match.group(1)) if prompt_tokens_match else 0
+    completion_tokens_match = re.search(r"输出 Token[：:]\s*(\d+)", content)
+    completion_tokens = int(completion_tokens_match.group(1)) if completion_tokens_match else 0
+
     created_at = datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
 
     return SessionDetail(
@@ -125,7 +142,10 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
         mode=mode,
         agents_involved=agents,
         total_time=total_time,
-        created_at=created_at
+        created_at=created_at,
+        total_tokens=total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens
     )
 
 
@@ -150,6 +170,12 @@ def _merge_events_json(md_filepath: str, detail: SessionDetail):
                 # 如果 JSON 中有更准确的 answer，优先使用
                 if data.get("answer"):
                     detail.answer = data["answer"]
+                # 合并 token 用量
+                usage = data.get("usage", {})
+                if usage:
+                    detail.total_tokens = usage.get("total_tokens", detail.total_tokens)
+                    detail.prompt_tokens = usage.get("prompt_tokens", detail.prompt_tokens)
+                    detail.completion_tokens = usage.get("completion_tokens", detail.completion_tokens)
                 logger.info(f"Merged events JSON: {json_path}")
             except Exception as e:
                 logger.warning(f"Failed to read events JSON {json_path}: {e}")

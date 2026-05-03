@@ -180,6 +180,10 @@ class SwarmCoordinator:
             })
             final_answer = result.get('answer', '')
 
+            # 提取 token 用量
+            token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
+            session_message_count = result.get('message_count', 0)
+
             # 清理 thinking 回调
             if hasattr(agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(agent)
@@ -187,7 +191,8 @@ class SwarmCoordinator:
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
-                'route_reason': f'单任务路由到 {agent_id}'
+                'route_reason': f'单任务路由到 {agent_id}',
+                'usage': token_usage
             })
 
             # 确保单Agent模式下也有 disclaimer 字段
@@ -207,7 +212,9 @@ class SwarmCoordinator:
                     agent_id=agent_id,
                     final_answer=final_answer,
                     start_time=start_time,
-                    end_time=end_time
+                    end_time=end_time,
+                    usage=token_usage,
+                    total_messages=session_message_count
                 )
                 self.session_manager.save_summary(summary)
             except Exception as e:
@@ -248,13 +255,16 @@ class SwarmCoordinator:
                 'session_id': session_id
             })
             final_answer = result.get('answer', '')
+            token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
+            session_message_count = result.get('message_count', 0)
 
             # 清理 thinking 回调
             if hasattr(self.consultation_agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(self.consultation_agent)
             result.update({
                 'swarm_enabled': False,
-                'session_id': session_id
+                'session_id': session_id,
+                'usage': token_usage
             })
 
             # 保存 fallback 会话总结
@@ -266,7 +276,9 @@ class SwarmCoordinator:
                     agent_id="consultation_agent",
                     final_answer=final_answer,
                     start_time=start_time,
-                    end_time=end_time
+                    end_time=end_time,
+                    usage=token_usage,
+                    total_messages=session_message_count
                 )
                 self.session_manager.save_summary(summary)
             except Exception as e:
@@ -286,6 +298,7 @@ class SwarmCoordinator:
                 "mode": mode,
                 "subtasks_count": len(subtasks),
                 "total_time": (end_time - start_time).total_seconds(),
+                "total_tokens": token_usage.get('total_tokens', 0),
             }
         ))
 
@@ -371,6 +384,24 @@ class SwarmCoordinator:
 
         end_time = datetime.now()
 
+        # 聚合所有 Worker 的 token 用量和消息数
+        swarm_prompt_tokens = 0
+        swarm_completion_tokens = 0
+        swarm_total_tokens = 0
+        swarm_message_count = 0
+        for agent_id, contributions in shared_context.agent_contributions.items():
+            for contrib in contributions:
+                usage = contrib.result.get('usage', {})
+                swarm_prompt_tokens += usage.get('prompt_tokens', 0)
+                swarm_completion_tokens += usage.get('completion_tokens', 0)
+                swarm_total_tokens += usage.get('total_tokens', 0)
+                swarm_message_count += contrib.result.get('message_count', 0)
+        token_usage = {
+            'prompt_tokens': swarm_prompt_tokens,
+            'completion_tokens': swarm_completion_tokens,
+            'total_tokens': swarm_total_tokens,
+        }
+
         # Step 4: 生成 SessionSummary
         try:
             summary = SessionSummary.from_shared_context(
@@ -379,7 +410,9 @@ class SwarmCoordinator:
                 shared_context=shared_context,
                 final_answer=final_answer,
                 start_time=start_time,
-                end_time=end_time
+                end_time=end_time,
+                usage=token_usage,
+                total_messages=swarm_message_count
             )
             self.session_manager.save_summary(summary)
         except Exception as e:
@@ -397,7 +430,8 @@ class SwarmCoordinator:
                 "mode": "swarm",
                 "agents_count": len(shared_context.agent_contributions),
                 "total_time": (end_time - start_time).total_seconds(),
-                "timeout_occurred": timeout_occurred
+                "timeout_occurred": timeout_occurred,
+                "total_tokens": swarm_total_tokens,
             }
         ))
 
@@ -421,7 +455,8 @@ class SwarmCoordinator:
             'subtasks_completed': len(shared_context.get_all_completed_subtasks()),
             'total_time': (end_time - start_time).total_seconds(),
             'swarm_metadata': shared_context.get_summary(),
-            'timeout_occurred': timeout_occurred
+            'timeout_occurred': timeout_occurred,
+            'usage': token_usage
         }
 
         # 提取建议和免责声明（简化实现）

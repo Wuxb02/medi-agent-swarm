@@ -364,6 +364,7 @@ export const useChatStore = defineStore('chat', () => {
               swarmEnabled: data.swarm_enabled,
               agentsInvolved: data.agents_involved || [],
               totalTime: data.total_time,
+              usage: data.usage,
             }
             // 兜底：折叠所有 thinking 块
             if (msg.thinkingBlocks) {

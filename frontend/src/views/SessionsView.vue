@@ -71,6 +71,10 @@ function formatDate(dateStr: string) {
                 >
                   {{ s.mode === 'swarm' ? 'Swarm' : '单 Agent' }}
                 </span>
+                <span v-if="s.message_count">{{ s.message_count }} 条消息</span>
+                <span v-if="s.total_tokens" class="text-amber-500">
+                  {{ s.total_tokens.toLocaleString() }} tokens
+                </span>
               </div>
             </div>
             <button

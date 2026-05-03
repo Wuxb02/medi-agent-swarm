@@ -14,6 +14,7 @@ class DashboardStats(BaseModel):
     agents_usage: Dict[str, int] = {}
     knowledge_base_size: int = 0
     recent_sessions: List[SessionListItem] = []
+    total_tokens: int = 0
 
 
 class HealthResponse(BaseModel):

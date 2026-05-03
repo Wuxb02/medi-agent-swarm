@@ -47,6 +47,7 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         total_time=result.get("total_time", 0.0),
         swarm_metadata=result.get("swarm_metadata", {}),
         timeout_occurred=result.get("timeout_occurred", False),
+        usage=result.get("usage", {}),
     )
 
 
@@ -118,6 +119,7 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         "swarm_enabled": result.get("swarm_enabled", False),
         "agents_involved": result.get("agents_involved", []),
         "answer": result.get("answer", ""),
+        "usage": result.get("usage", {}),
     }
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
@@ -146,6 +148,7 @@ def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: 
         "subtasks_completed": result.get("subtasks_completed", 0),
         "total_time": result.get("total_time", 0.0),
         "swarm_enabled": result.get("swarm_enabled", False),
+        "usage": result.get("usage", {}),
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)

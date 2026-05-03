@@ -10,6 +10,7 @@ class SessionListItem(BaseModel):
     created_at: str = ""
     message_count: int = 0
     mode: str = "single"
+    total_tokens: int = 0
 
 
 class SessionListResponse(BaseModel):
@@ -32,3 +33,6 @@ class SessionDetail(BaseModel):
     suggestions: List[str] = []
     disclaimer: str = ""
     subtasks_completed: int = 0
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
