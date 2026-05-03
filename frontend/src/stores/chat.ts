@@ -241,6 +241,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     messages.value.push(assistantMsg)
 
+    let isDone = false
     isStreaming.value = true
 
     try {
@@ -341,6 +342,7 @@ export const useChatStore = defineStore('chat', () => {
           }
         },
         onAgentContentDelta(data) {
+          if (isDone) return
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) {
             const token = data.data?.token || ''
@@ -352,6 +354,7 @@ export const useChatStore = defineStore('chat', () => {
           if (msg) msg.suggestions = data.suggestions
         },
         onDone(data) {
+          isDone = true
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) {
             msg.content = data.answer || msg.content

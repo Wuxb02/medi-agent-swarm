@@ -84,6 +84,10 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         try:
             event = await asyncio.wait_for(bridge.queue.get(), timeout=0.5)
             mapped_type = _map_event_type(event.type.value)
+            # Swarm 模式下跳过 content delta（多 Worker 的 token 交错会导致格式混乱，
+            # 最终答案由 done 事件携带的完整 answer 提供）
+            if request.enable_swarm and mapped_type == "agent_content_delta":
+                continue
             event_dict = event.to_dict()
             yield _json_line(mapped_type, event_dict)
             collected_events.append({"event": mapped_type, "data": event_dict})
