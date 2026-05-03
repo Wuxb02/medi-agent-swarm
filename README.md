@@ -1,6 +1,7 @@
 # MediZJ多智能体医疗助手
 
 基于 Skills-Agent 两层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
+![alt text](assets/image.png)
 
 ## 📋 项目概述
 
@@ -17,6 +18,7 @@
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
+- **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 
 ## 🎯 Skills 直达架构
 
@@ -55,28 +57,6 @@ Skills (函数) → 直接转换 → OpenAI Format → LLM 调用
    - **上下文利用率 100%**：追问能正确理解历史对话
    - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
 
-### 测试验证
-
-**所有测试通过（26个测试用例，100% 通过率）**：
-
-**核心功能**：
-- ✅ Agent Loop 和 Skill 调用
-- ✅ Agent Swarm 群体智能
-- ✅ 记忆系统（短期+长期）
-- ✅ 多轮对话上下文利用 🌟
-- ✅ Skills 自主选择
-- ✅ Milvus 知识库集成
-
-**Harness Engineering（Phase 8）**：
-- ✅ 约束系统（Skill 调用验证、输出验证、自动修复）
-- ✅ 熵管理（去重、LLM 语义摘要压缩、截断降级、熵估算）
-- ✅ Agent Loop 集成（约束 + 熵管理协同工作）
-
-运行测试套件：
-```bash
-# 运行所有测试（包含 Harness Engineering）
-python examples/test_all.py
-```
 
 ## 🚀 从零开始运行
 
@@ -196,9 +176,36 @@ medix-agent-swarm/
 ├── core/                              # 核心引擎
 │   ├── agent_loop.py                  # Agent Loop（集成约束验证）
 │   ├── llm_client.py                  # LLM 客户端
+│   ├── prompt_loader.py               # Jinja2 Prompt 模板加载器
 │   ├── skill_loader.py                # 动态加载 Skills
 │   ├── skill_registry.py              # Skill 注册表（直接转 OpenAI format）
 │   └── state_manager.py               # 状态管理
+│
+├── prompt/                            # Prompt 模板（Jinja2，集中管理）
+│   ├── agents/                        # Agent 系统提示词
+│   │   ├── consultation_system.j2
+│   │   ├── consultation_user_input.j2
+│   │   ├── diagnostic_system.j2
+│   │   └── research_system.j2
+│   ├── swarm/                         # Swarm 协调相关提示词
+│   │   ├── lead_system.j2
+│   │   ├── synthesis.j2
+│   │   ├── assessment_user.j2
+│   │   └── timeout_fallback.j2
+│   ├── research/                      # 研究模块提示词
+│   │   ├── evidence_synthesis.j2
+│   │   └── query_planning.j2
+│   ├── memory/                        # 记忆压缩提示词
+│   │   ├── compression_system.j2
+│   │   └── compression_user.j2
+│   ├── agent_loop/                    # Agent Loop 控制消息
+│   │   ├── tool_limit.j2
+│   │   └── force_answer.j2
+│   └── validation/                    # 输出验证模板
+│       ├── disclaimer.j2
+│       ├── high_risk_warning.j2
+│       ├── truncation_notice.j2
+│       └── swarm_disclaimer.j2
 │
 ├── swarm/                             # Swarm 协调器
 │   ├── events.py                      # 事件驱动通信
@@ -520,6 +527,67 @@ results = memory.search("高血压患者如何管理？")
 ```bash
 python examples/test_all.py
 ```
+
+---
+
+## 📝 Prompt 集中管理
+
+所有 LLM prompt 统一存放在 `prompt/` 目录下，使用 Jinja2 模板引擎管理，实现 prompt 与代码解耦。
+
+### 设计理念
+
+- **集中管理**: 18 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
+- **Jinja2 模板**: 支持变量渲染（`{{ variable }}`）、条件分支（`{% if %}`）、循环（`{% for %}`）
+- **代码解耦**: Python 代码不再包含 prompt 字符串，修改 prompt 无需改动业务逻辑
+- **统一入口**: `PromptLoader` 类提供 `load()`（静态）和 `render()`（带变量）两个方法
+
+### 模板目录结构
+
+```
+prompt/
+├── agents/                # Agent 系统提示词（4 个）
+├── swarm/                 # Swarm 协调提示词（4 个）
+├── research/              # 研究模块提示词（2 个）
+├── memory/                # 记忆压缩提示词（2 个）
+├── agent_loop/            # Agent Loop 控制消息（2 个）
+└── validation/            # 输出验证模板（4 个）
+```
+
+### 使用方式
+
+```python
+from core.prompt_loader import PromptLoader
+
+# 加载静态模板（无变量）
+system_prompt = PromptLoader.load("agents/consultation_system.j2")
+
+# 渲染带变量的模板
+user_msg = PromptLoader.render(
+    "swarm/assessment_user.j2",
+    question="高血压怎么办？",
+    context="无"
+)
+
+# 带条件分支的模板
+disclaimer = PromptLoader.render(
+    "validation/swarm_disclaimer.j2",
+    timeout_occurred=True,
+    completed_agents_count=1
+)
+```
+
+### 模板变量说明
+
+| 模板 | 变量 | 说明 |
+| --- | --- | --- |
+| `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
+| `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
+| `swarm/assessment_user.j2` | `question`, `context` | LeadAgent 任务评估 |
+| `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
+| `research/query_planning.j2` | `question` | 查询拆解 |
+| `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
+| `agent_loop/tool_limit.j2` | `max_tool_calls` | 工具调用上限 |
+| `validation/swarm_disclaimer.j2` | `timeout_occurred`, `completed_agents_count` | Swarm 免责声明 |
 
 ---
 

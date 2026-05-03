@@ -13,6 +13,8 @@ from loguru import logger
 import hashlib
 import json
 
+from core.prompt_loader import PromptLoader
+
 
 class MemoryEntropyManager:
     """记忆熵管理器"""
@@ -248,18 +250,14 @@ class MemoryEntropyManager:
         prompt_messages = [
             {
                 "role": "system",
-                "content": (
-                    "你是医疗对话摘要助手。请将多轮医疗对话压缩为一段结构化摘要。\n"
-                    "要求：\n"
-                    "1. 保留关键医学信息：症状描述、检查结果、诊断结论、用药建议、注意事项\n"
-                    "2. 去除寒暄和重复内容\n"
-                    "3. 输出不超过200字\n"
-                    "4. 使用中文"
-                ),
+                "content": PromptLoader.load("memory/compression_system.j2"),
             },
             {
                 "role": "user",
-                "content": f"请对以下对话生成摘要：\n\n{dialogue_text}",
+                "content": PromptLoader.render(
+                    "memory/compression_user.j2",
+                    dialogue_text=dialogue_text,
+                ),
             },
         ]
 

@@ -8,6 +8,7 @@ from loguru import logger
 import asyncio
 
 from core import LLMClient
+from core.prompt_loader import PromptLoader
 from research.web_search import WebSearchTool, SearchResult
 from knowledge.milvus_kb import MedicalKnowledgeBase
 from research.evidence_synthesizer import EvidenceSynthesizer, ResearchReport
@@ -165,24 +166,7 @@ class DeepResearchWorkflow:
         Returns:
             子查询列表
         """
-        prompt = f"""你是医学研究助手。请将以下问题拆解为 2-3 个更具体的子查询，以便进行深度研究。
-
-原始问题：{question}
-
-要求：
-1. 每个子查询应该聚焦一个特定方面
-2. 子查询应该互补，覆盖问题的不同角度
-3. 子查询应该简洁明确
-
-输出格式：
-每行一个子查询，不需要编号。
-
-示例：
-原始问题：2型糖尿病如何治疗？
-子查询1：2型糖尿病的药物治疗方案
-子查询2：2型糖尿病的生活方式管理
-子查询3：2型糖尿病的并发症预防
-"""
+        prompt = PromptLoader.render("research/query_planning.j2", question=question)
 
         try:
             response = await self.llm_client.chat([

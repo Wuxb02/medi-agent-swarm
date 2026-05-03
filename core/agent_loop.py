@@ -12,6 +12,7 @@ from loguru import logger
 
 from .state_manager import StateManager, TaskStatus
 from .llm_client import LLMResponse
+from .prompt_loader import PromptLoader
 
 # Harness Engineering: 约束验证和自动修复
 try:
@@ -213,7 +214,7 @@ class AgentLoop:
                             # 强制要求 LLM 提供最终答案
                             messages.append({
                                 'role': 'user',
-                                'content': f'已完成 {self.max_tool_calls} 次信息检索。请基于已获取的信息提供最终答复。'
+                                'content': PromptLoader.render("agent_loop/tool_limit.j2", max_tool_calls=self.max_tool_calls)
                             })
                             continue
 
@@ -392,7 +393,7 @@ class AgentLoop:
                     # 添加强制总结的提示
                     messages.append({
                         'role': 'user',
-                        'content': '请基于以上信息，提供最终的答复。'
+                        'content': PromptLoader.load("agent_loop/force_answer.j2")
                     })
 
                     # 调用 LLM（禁用 function calling）

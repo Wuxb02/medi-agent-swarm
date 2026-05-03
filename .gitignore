@@ -58,3 +58,5 @@ knowledge/scripts/knowledge/data/milvus_lite.db
 
 # 对话记录
 memory/swarm/session_summaries/*
+
+.claude/settings.local.json

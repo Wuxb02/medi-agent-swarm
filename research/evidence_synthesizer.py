@@ -9,6 +9,7 @@ from datetime import datetime
 from loguru import logger
 
 from core import LLMClient
+from core.prompt_loader import PromptLoader
 from research.web_search import SearchResult
 
 
@@ -99,67 +100,12 @@ class EvidenceSynthesizer:
         kb_results: List[Dict[str, Any]]
     ) -> str:
         """构建综合提示"""
-        prompt = f"""你是医学证据综合专家。请整合以下来源的信息，回答用户问题。
-
-【用户问题】
-{query}
-
-"""
-
-        # 添加网络搜索结果
-        if web_results:
-            prompt += "【网络搜索结果】\n"
-            for i, result in enumerate(web_results[:5], 1):
-                prompt += f"{i}. {result.title}\n"
-                prompt += f"   来源: {result.url}\n"
-                prompt += f"   摘要: {result.snippet}\n\n"
-
-        # 添加知识库检索结果（Milvus 返回的字典）
-        if kb_results:
-            prompt += "【知识库检索结果】\n"
-            for i, doc in enumerate(kb_results[:5], 1):
-                metadata = doc.get('metadata', {})
-                prompt += f"{i}. {metadata.get('title', '医学知识')}\n"
-                prompt += f"   内容: {doc.get('content', '')[:300]}...\n"
-                prompt += f"   相似度: {doc.get('score', 0):.2f}\n\n"
-
-        prompt += """
-请生成综合研究报告，包含以下部分：
-
-【关键发现】
-- 列出 3-5 条最重要的发现
-- 每条发现应简洁明确
-
-【证据等级】
-- A级：高质量随机对照试验或系统评价
-- B级：队列研究或病例对照研究
-- C级：专家共识或观察性研究
-- 基于提供的信息来源，判断证据等级
-
-【信息来源】
-- 列出主要参考来源（网站或文档标题）
-
-【置信度】
-- 0.0-1.0 之间的数值
-- 基于信息来源的权威性和一致性
-
-【信息冲突】
-- 如果不同来源存在矛盾，明确指出
-- 如果没有冲突，写"无明显冲突"
-
-【综合总结】
-- 200-300字的综合性回答
-- 客观、专业、易懂
-
-【建议】
-- 给出 2-3 条实用建议
-- 如需就医，明确指出
-
-**输出格式**：
-按照上述结构输出，使用【】标记各个部分。
-"""
-
-        return prompt
+        return PromptLoader.render(
+            "research/evidence_synthesis.j2",
+            query=query,
+            web_results=web_results or [],
+            kb_results=kb_results or [],
+        )
 
     def _parse_response(
         self,

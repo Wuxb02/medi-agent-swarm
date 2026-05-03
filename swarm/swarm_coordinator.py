@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional, List, Callable
 from loguru import logger
 
 from core import LLMClient
+from core.prompt_loader import PromptLoader
 from .shared_context import SharedContext
 from .lead_agent import LeadAgent
 from .events import Event, EventType
@@ -468,12 +469,11 @@ class SwarmCoordinator:
         result['suggestions'] = self._extract_suggestions(final_answer)
 
         # 根据是否超时调整免责声明
-        if timeout_occurred and not completed_agents:
-            result['disclaimer'] = "由于系统超时，未能提供完整分析。建议简化问题重试，或在紧急情况下立即就医。"
-        elif timeout_occurred:
-            result['disclaimer'] = f"以上分析基于 {len(completed_agents)} 个 Agent 的部分协作结果（部分分析模块超时未完成），仅供参考，不能替代医生诊断。"
-        else:
-            result['disclaimer'] = "以上分析基于多个专业 Agent 的协作，仅供参考，不能替代医生诊断。"
+        result['disclaimer'] = PromptLoader.render(
+            "validation/swarm_disclaimer.j2",
+            timeout_occurred=timeout_occurred,
+            completed_agents_count=len(completed_agents),
+        )
 
         return result
 

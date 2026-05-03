@@ -5,6 +5,7 @@ from .llm_client import LLMClient, ToolCall, LLMResponse
 from .agent_loop import AgentLoop
 from .state_manager import AgentState, TaskStatus
 from .skill_registry import SkillRegistry, SkillParameter
+from .prompt_loader import PromptLoader
 
 __all__ = [
     'LLMClient',
@@ -14,5 +15,6 @@ __all__ = [
     'AgentState',
     'TaskStatus',
     'SkillRegistry',
-    'SkillParameter'
+    'SkillParameter',
+    'PromptLoader',
 ]

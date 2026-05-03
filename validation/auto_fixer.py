@@ -9,6 +9,7 @@
 """
 from typing import Dict, Any, List
 from loguru import logger
+from core.prompt_loader import PromptLoader
 
 
 class AutoFixer:
@@ -53,7 +54,7 @@ class AutoFixer:
             添加免责声明后的输出
         """
         if "免责" not in output and "仅供参考" not in output:
-            disclaimer = "\n\n【免责声明】\n以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
+            disclaimer = "\n\n" + PromptLoader.load("validation/disclaimer.j2")
             logger.debug("+ 自动添加免责声明")
             return output + disclaimer
         return output
@@ -73,7 +74,7 @@ class AutoFixer:
         # 检查是否包含高危症状且未建议就医
         if any(kw in output for kw in high_risk_keywords):
             if "就医" not in output and "急诊" not in output and "医院" not in output:
-                warning = "⚠️ **重要提醒**：您描述的症状可能提示严重问题，建议立即就医或拨打急救电话120，不要延误。\n\n"
+                warning = PromptLoader.load("validation/high_risk_warning.j2")
                 logger.debug("+ 自动添加高危症状警告")
                 return warning + output
 
@@ -93,7 +94,7 @@ class AutoFixer:
         if len(output) > max_length:
             logger.warning(f"输出过长（{len(output)} > {max_length}），自动截断")
             truncated = output[:max_length - 50]  # 保留50字空间添加提示
-            truncated += "\n\n[回答内容较长，已截断。如需完整信息，请咨询专业医生]"
+            truncated += "\n\n" + PromptLoader.load("validation/truncation_notice.j2")
             return truncated
 
         return output
