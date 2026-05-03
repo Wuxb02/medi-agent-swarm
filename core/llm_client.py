@@ -26,6 +26,7 @@ class LLMResponse:
     content: Optional[str]
     tool_calls: List[ToolCall]
     finish_reason: str  # "stop", "tool_calls", "length", "content_filter"
+    reasoning_content: Optional[str] = None  # 模型原生推理内容（如 GLM-4.7、DeepSeek-R1）
 
     def has_tool_calls(self) -> bool:
         """是否包含 function calls"""
@@ -197,10 +198,14 @@ class LLMClient:
                     ))
                 logger.debug(f"LLM requested {len(tool_calls)} tool calls")
 
+            # 提取模型原生推理内容
+            reasoning_content = getattr(message, 'reasoning_content', None)
+
             return LLMResponse(
                 content=message.content,
                 tool_calls=tool_calls,
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                reasoning_content=reasoning_content
             )
 
         except Exception as e:
@@ -215,6 +220,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         on_content_token: Optional[Any] = None,
+        on_reasoning_token: Optional[Any] = None,
         on_tools_detected: Optional[Any] = None,
         **kwargs
     ) -> LLMResponse:
@@ -226,6 +232,7 @@ class LLMClient:
             tools: 工具定义列表
             tool_choice: 工具选择策略
             on_content_token: 内容 token 回调 fn(token: str)
+            on_reasoning_token: 推理内容 token 回调 fn(token: str)
             on_tools_detected: 首次检测到 tool_calls 时的回调 fn()
 
         Returns:
@@ -253,6 +260,7 @@ class LLMClient:
             stream = await self.client.chat.completions.create(**request_params)
 
             content_parts: List[str] = []
+            reasoning_parts: List[str] = []
             tool_call_accum: Dict[int, Dict[str, Any]] = {}
             finish_reason = "stop"
             tools_notified = False
@@ -272,6 +280,12 @@ class LLMClient:
                     content_parts.append(delta.content)
                     if on_content_token:
                         on_content_token(delta.content)
+
+                # 累积推理内容
+                if getattr(delta, 'reasoning_content', None):
+                    reasoning_parts.append(delta.reasoning_content)
+                    if on_reasoning_token:
+                        on_reasoning_token(delta.reasoning_content)
 
                 # 累积 tool_calls
                 if delta.tool_calls:
@@ -307,11 +321,13 @@ class LLMClient:
                 ))
 
             content = "".join(content_parts) or None
+            reasoning_content = "".join(reasoning_parts) or None
 
             return LLMResponse(
                 content=content,
                 tool_calls=parsed_tool_calls,
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                reasoning_content=reasoning_content
             )
 
         except Exception as e:

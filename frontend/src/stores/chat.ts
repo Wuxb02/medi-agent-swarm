@@ -94,16 +94,25 @@ function reconstructFromEvents(rawEvents: any[]): {
       case 'agent_thinking': {
         const d = data.data || data
         const agentId = data.source_agent || 'unknown'
+        const iteration = d.iteration || 0
         agentsWithThinking.add(agentId)
         thinkingAgents.add(agentId)
-        thinkingBlocks.push({
-          id: genId(),
-          agentId,
-          thinking: d.content || '',
-          iteration: d.iteration || 0,
-          toolSteps: [],
-          isCollapsed: true,
-        })
+        // 同 agent + 同 iteration 追加到已有 block，避免拆成多个
+        const existing = thinkingBlocks.findLast(
+          b => b.agentId === agentId && b.iteration === iteration
+        )
+        if (existing) {
+          existing.thinking += d.content || ''
+        } else {
+          thinkingBlocks.push({
+            id: genId(),
+            agentId,
+            thinking: d.content || '',
+            iteration,
+            toolSteps: [],
+            isCollapsed: true,
+          })
+        }
         break
       }
 
@@ -285,14 +294,24 @@ export const useChatStore = defineStore('chat', () => {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) {
             if (!msg.thinkingBlocks) msg.thinkingBlocks = []
-            msg.thinkingBlocks.push({
-              id: `think-${Date.now()}`,
-              agentId: data.source_agent || 'unknown',
-              thinking: data.data?.content || '',
-              iteration: data.data?.iteration || 0,
-              toolSteps: [],
-              isCollapsed: false,
-            })
+            const agentId = data.source_agent || 'unknown'
+            const iteration = data.data?.iteration || 0
+            // 查找同 agent + 同 iteration 的最后一个未折叠 block，追加内容而非创建新 block
+            const existing = msg.thinkingBlocks.findLast(
+              b => b.agentId === agentId && b.iteration === iteration && !b.isCollapsed
+            )
+            if (existing) {
+              existing.thinking += data.data?.content || ''
+            } else {
+              msg.thinkingBlocks.push({
+                id: `think-${Date.now()}`,
+                agentId,
+                thinking: data.data?.content || '',
+                iteration,
+                toolSteps: [],
+                isCollapsed: false,
+              })
+            }
           }
         },
         onAgentToolStep(data) {

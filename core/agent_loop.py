@@ -132,6 +132,11 @@ class AgentLoop:
                                 if self.on_content_token:
                                     self.on_content_token(token)
 
+                        def _route_reasoning(token: str):
+                            # 模型原生推理内容 → 直接路由到 thinking
+                            if self.on_thinking:
+                                self.on_thinking(content=token, iteration=state.iteration)
+
                         def _on_stream_tools_detected():
                             _has_tools[0] = True
 
@@ -141,6 +146,7 @@ class AgentLoop:
                             tool_choice="auto",
                             temperature=agent.config.get('temperature', 0.7),
                             on_content_token=_route_token,
+                            on_reasoning_token=_route_reasoning,
                             on_tools_detected=_on_stream_tools_detected
                         )
                     else:
@@ -180,7 +186,7 @@ class AgentLoop:
                         # 推理开始：计时 + 回调 thinking 内容
                         think_start = time.monotonic()
                         tool_names = [tc.name for tc in llm_response.tool_calls]
-                        thinking_text = llm_response.content or f"正在分析问题，准备调用 {', '.join(tool_names)}..."
+                        thinking_text = llm_response.reasoning_content or llm_response.content or f"正在分析问题，准备调用 {', '.join(tool_names)}..."
                         if self.on_thinking:
                             self.on_thinking(
                                 content=thinking_text,
@@ -266,6 +272,18 @@ class AgentLoop:
                     # 情况2: LLM 返回文本响应，任务完成
                     else:
                         logger.info(f"LLM provided final response (no tool calls)")
+
+                        # 推送模型原生推理内容到 thinking 回调
+                        if llm_response.reasoning_content and self.on_thinking:
+                            self.on_thinking(
+                                content=llm_response.reasoning_content,
+                                iteration=state.iteration
+                            )
+                            if self.on_thinking_done:
+                                self.on_thinking_done(
+                                    iteration=state.iteration,
+                                    elapsed_seconds=0
+                                )
 
                         # Harness Engineering: 验证和修复输出
                         final_answer = llm_response.content
