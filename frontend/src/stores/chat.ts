@@ -1,12 +1,198 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { ChatMessage } from '../types'
+import type { ChatMessage, ThinkingBlock, AgentEvent } from '../types'
 import { useSSE } from '../composables/useSSE'
 import { getSessionDetail } from '../api/session'
 
 let msgIdCounter = 0
 function genId() {
   return `msg-${Date.now()}-${++msgIdCounter}`
+}
+
+/** 格式化工具结果：处理 dict / stringified dict */
+function formatToolResult(result: any): string {
+  if (result == null) return ''
+  if (typeof result === 'string') {
+    // 尝试解析 JSON 字符串
+    try {
+      const parsed = JSON.parse(result)
+      if (parsed && typeof parsed === 'object') {
+        return parsed.answer || parsed.content || JSON.stringify(parsed, null, 2)
+      }
+    } catch { /* 不是 JSON，继续 */ }
+    // 尝试解析 Python dict 字符串: {'answer': '...'}
+    const pyMatch = result.match(/^\{['"]answer['"]:\s*['"]([\s\S]*?)['"]\}$/)
+    if (pyMatch) return pyMatch[1].replace(/\\n/g, '\n')
+    return result
+  }
+  if (typeof result === 'object') {
+    return result.answer || result.content || JSON.stringify(result, null, 2)
+  }
+  return String(result)
+}
+
+/** 不需要在历史回放中显示的事件类型 */
+const SKIP_EVENT_TYPES = new Set([
+  'agent_content_delta', 'start', 'done', 'error', 'suggestions'
+])
+
+/** 从持久化的 SSE 事件列表重建 agentEvents 和 thinkingBlocks */
+function reconstructFromEvents(rawEvents: any[]): {
+  agentEvents: AgentEvent[]
+  thinkingBlocks: ThinkingBlock[]
+} {
+  const agentEvents: AgentEvent[] = []
+  const thinkingBlocks: ThinkingBlock[] = []
+
+  // 记录哪些 agent 有显式 thinking 事件
+  const agentsWithThinking = new Set<string>()
+  // 收集 thinking 事件中出现的 agent（用于补充 timeline）
+  const thinkingAgents = new Set<string>()
+
+  for (const item of rawEvents) {
+    const eventType: string = item.event || ''
+    const data = item.data || {}
+
+    // 跳过流式内容和控制事件
+    if (SKIP_EVENT_TYPES.has(eventType)) continue
+
+    switch (eventType) {
+      case 'task_decomposed':
+        agentEvents.push({
+          id: data.id || genId(),
+          type: 'decomposed',
+          agentId: 'lead_agent',
+          timestamp: data.timestamp || new Date().toISOString(),
+          data,
+        })
+        break
+
+      case 'agent_start': {
+        const agentId = data.source_agent || 'unknown'
+        agentEvents.push({
+          id: data.id || genId(),
+          type: 'start',
+          agentId,
+          subtaskId: data.data?.subtask_id,
+          subtaskType: data.data?.subtask_type,
+          timestamp: data.timestamp || new Date().toISOString(),
+          data: data.data || data,
+        })
+        break
+      }
+
+      case 'agent_complete':
+        agentEvents.push({
+          id: data.id || genId(),
+          type: 'complete',
+          agentId: data.source_agent || 'unknown',
+          timestamp: data.timestamp || new Date().toISOString(),
+          data: data.data || data,
+        })
+        break
+
+      case 'agent_thinking': {
+        const d = data.data || data
+        const agentId = data.source_agent || 'unknown'
+        agentsWithThinking.add(agentId)
+        thinkingAgents.add(agentId)
+        thinkingBlocks.push({
+          id: genId(),
+          agentId,
+          thinking: d.content || '',
+          iteration: d.iteration || 0,
+          toolSteps: [],
+          isCollapsed: true,
+        })
+        break
+      }
+
+      case 'agent_tool_step': {
+        const d = data.data || data
+        const iteration = d.iteration || 0
+        const sourceAgent = data.source_agent || 'unknown'
+        thinkingAgents.add(sourceAgent)
+        const block = thinkingBlocks.findLast(
+          b => b.iteration === iteration && b.agentId === sourceAgent
+        ) || thinkingBlocks.findLast(b => b.agentId === sourceAgent)
+          || thinkingBlocks[thinkingBlocks.length - 1]
+        if (block) {
+          block.toolSteps.push({
+            toolName: d.tool_name || 'unknown',
+            arguments: d.arguments || {},
+            result: formatToolResult(d.result),
+            success: d.success !== false,
+          })
+        }
+        break
+      }
+
+      case 'agent_thinking_done': {
+        const d = data.data || data
+        const iteration = d.iteration || 0
+        const sourceAgent = data.source_agent || 'unknown'
+        const block = thinkingBlocks.findLast(
+          b => b.iteration === iteration && b.agentId === sourceAgent
+        ) || thinkingBlocks.findLast(b => b.agentId === sourceAgent)
+          || thinkingBlocks[thinkingBlocks.length - 1]
+        if (block) {
+          block.elapsedSeconds = d.elapsed_seconds
+          block.isCollapsed = true
+        }
+        break
+      }
+    }
+  }
+
+  // 为有 thinking 但没有 timeline 的 Agent 补充 timeline 事件
+  for (const agentId of thinkingAgents) {
+    const hasStart = agentEvents.some(e => e.type === 'start' && e.agentId === agentId)
+    if (!hasStart) {
+      agentEvents.push({
+        id: genId(),
+        type: 'start',
+        agentId,
+        timestamp: agentEvents[0]?.timestamp || new Date().toISOString(),
+        data: {},
+      })
+      agentEvents.push({
+        id: genId(),
+        type: 'complete',
+        agentId,
+        timestamp: agentEvents[agentEvents.length - 1]?.timestamp || new Date().toISOString(),
+        data: {},
+      })
+    }
+  }
+
+  // 为没有显式 thinking 的 Agent 补充摘要 thinking block
+  for (const evt of agentEvents) {
+    if (evt.type === 'start' && !agentsWithThinking.has(evt.agentId)) {
+      const completeEvt = agentEvents.find(
+        e => e.type === 'complete' && e.agentId === evt.agentId
+      )
+      const execTime = completeEvt?.data?.execution_time
+      const subtasks = completeEvt?.data?.subtasks_completed ?? evt.data?.subtasks_count
+      const tools = evt.data?.tool_calls
+      const summary = [
+        subtasks ? `处理 ${subtasks} 个子任务` : '',
+        tools ? `调用 ${tools} 次工具` : '',
+        execTime ? `执行耗时 ${execTime}s` : '',
+      ].filter(Boolean).join('，')
+
+      thinkingBlocks.push({
+        id: genId(),
+        agentId: evt.agentId,
+        thinking: summary || '已执行完成',
+        iteration: 0,
+        toolSteps: [],
+        elapsedSeconds: execTime,
+        isCollapsed: true,
+      })
+    }
+  }
+
+  return { agentEvents, thinkingBlocks }
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -212,19 +398,25 @@ export const useChatStore = defineStore('chat', () => {
           })
         }
         if (detail.answer) {
+          // 从持久化事件重建 agentEvents 和 thinkingBlocks
+          const rawEvents = detail.agent_events || []
+          const { agentEvents, thinkingBlocks } = reconstructFromEvents(rawEvents)
+
           messages.value.push({
             id: genId(),
             role: 'assistant',
             content: detail.answer,
             timestamp: detail.created_at || new Date().toISOString(),
             isStreaming: false,
-            suggestions: [],
-            disclaimer: '',
-            agentEvents: [],
+            suggestions: detail.suggestions || [],
+            disclaimer: detail.disclaimer || '',
+            agentEvents,
+            thinkingBlocks,
             metadata: {
               swarmEnabled: detail.mode === 'swarm',
               agentsInvolved: detail.agents_involved || [],
               totalTime: detail.total_time,
+              subtasksCompleted: detail.subtasks_completed,
             },
           })
         }

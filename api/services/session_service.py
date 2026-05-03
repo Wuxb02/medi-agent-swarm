@@ -1,7 +1,9 @@
 """会话服务：封装 SessionSummaryManager + ShortTermMemory"""
+import json
 import os
 import re
-from typing import List, Optional
+import uuid
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from loguru import logger
 
@@ -43,7 +45,10 @@ def get_session_detail(session_id: str) -> Optional[SessionDetail]:
     """获取会话详情"""
     for filepath in _iter_summary_files():
         if session_id in filepath and filepath.endswith(".md"):
-            return _parse_detail_file(filepath, session_id)
+            detail = _parse_detail_file(filepath, session_id)
+            if detail:
+                _merge_events_json(filepath, detail)
+            return detail
     return None
 
 
@@ -97,11 +102,8 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
     question_match = re.search(r"原始问题[：:]\s*(.+)", content)
     question = question_match.group(1).strip() if question_match else ""
 
-    answer_match = re.search(r"最终回答[：:]\s*\n([\s\S]+?)\n---", content)
-    if not answer_match:
-        answer_match = re.search(r"最终回答[：:]\s*\n([\s\S]+?)\n## 性能指标", content)
-    if not answer_match:
-        answer_match = re.search(r"最终回答[：:]\s*\n([\s\S]+?)\Z", content)
+    # 提取最终回答：匹配到下一个 ## 章节或文件末尾（不使用 --- 分隔符，因内容中可能含 ---）
+    answer_match = re.search(r"最终回答[：:]\s*\n([\s\S]*?)(?=\n## |\Z)", content)
     answer = answer_match.group(1).strip() if answer_match else ""
 
     mode_match = re.search(r"运行模式[：:]\s*(.+)", content)
@@ -125,3 +127,159 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
         total_time=total_time,
         created_at=created_at
     )
+
+
+def _merge_events_json(md_filepath: str, detail: SessionDetail):
+    """如果存在对应的 JSON 事件文件，将数据合并到 SessionDetail；否则从 MD 重建"""
+    # 尝试两种 JSON 文件名格式：session_{id}.json 和 {id}.json
+    base_dir = os.path.dirname(md_filepath)
+    basename = os.path.splitext(os.path.basename(md_filepath))[0]
+    candidates = [
+        os.path.join(base_dir, f"session_{basename}.json"),
+        os.path.join(base_dir, f"{basename}.json"),
+    ]
+    for json_path in candidates:
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                detail.agent_events = data.get("events", [])
+                detail.suggestions = data.get("suggestions", [])
+                detail.disclaimer = data.get("disclaimer", "")
+                detail.subtasks_completed = data.get("subtasks_completed", 0)
+                # 如果 JSON 中有更准确的 answer，优先使用
+                if data.get("answer"):
+                    detail.answer = data["answer"]
+                logger.info(f"Merged events JSON: {json_path}")
+            except Exception as e:
+                logger.warning(f"Failed to read events JSON {json_path}: {e}")
+            return
+
+    # 无 JSON 文件 → 从 MD 文件重建事件数据（兼容旧会话）
+    try:
+        with open(md_filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        _rebuild_events_from_md(content, detail)
+    except Exception as e:
+        logger.warning(f"Failed to rebuild events from MD: {e}")
+
+
+def _rebuild_events_from_md(content: str, detail: SessionDetail):
+    """从 Markdown 摘要重建 agent_events，为旧会话提供历史展示数据"""
+    events: List[Dict[str, Any]] = []
+    ts = detail.created_at or datetime.now().isoformat()
+
+    # 解析参与 Agent 详情 → 生成 agent_start / thinking / agent_complete 事件
+    agent_section = re.search(
+        r"## 参与 Agent 详情\s*\n([\s\S]*?)(?=\n## |\Z)", content
+    )
+    if agent_section:
+        agent_blocks = re.findall(
+            r"### (\S+) \((\w+)\)\s*\n"
+            r"- 处理子任务：(\d+) 个\s*\n"
+            r"- 工具调用：(\d+) 次\s*\n"
+            r"- 执行时间：([\d.]+) 秒",
+            agent_section.group(1)
+        )
+        for agent_id, role, subtasks, tools, exec_time in agent_blocks:
+            # agent_start
+            events.append({
+                "event": "agent_start",
+                "data": {
+                    "id": str(uuid.uuid4()),
+                    "source_agent": agent_id,
+                    "timestamp": ts,
+                    "data": {
+                        "subtask_type": role,
+                        "subtasks_count": int(subtasks),
+                        "tool_calls": int(tools),
+                    }
+                }
+            })
+            # thinking（从 Agent 详情重建执行摘要）
+            role_name = {"worker": "执行", "lead": "协调", "single": "处理"}.get(role, role)
+            thinking_content = (
+                f"作为{role_name} Agent，处理了 {subtasks} 个子任务，"
+                f"调用了 {tools} 次工具，耗时 {exec_time} 秒。"
+            )
+            events.append({
+                "event": "agent_thinking",
+                "data": {
+                    "source_agent": agent_id,
+                    "data": {
+                        "content": thinking_content,
+                        "iteration": 0,
+                    }
+                }
+            })
+            events.append({
+                "event": "agent_thinking_done",
+                "data": {
+                    "source_agent": agent_id,
+                    "data": {
+                        "iteration": 0,
+                        "elapsed_seconds": float(exec_time),
+                    }
+                }
+            })
+            # agent_complete
+            events.append({
+                "event": "agent_complete",
+                "data": {
+                    "id": str(uuid.uuid4()),
+                    "source_agent": agent_id,
+                    "timestamp": ts,
+                    "data": {
+                        "execution_time": float(exec_time),
+                        "subtasks_completed": int(subtasks),
+                    }
+                }
+            })
+
+    # 解析协作过程 → 写入 metadata
+    collab_match = re.search(
+        r"## 协作过程\s*\n\s*- 创建子任务：(\d+) 个\s*\n- 完成子任务：(\d+) 个\s*\n- 发布事件：(\d+) 个",
+        content
+    )
+    if collab_match:
+        detail.subtasks_completed = int(collab_match.group(2))
+
+    # 解析关键发现 → 追加 thinking 事件（补充到对应 Agent）
+    findings_section = re.search(r"## 关键发现\s*\n([\s\S]*?)(?=\n## |\Z)", content)
+    if findings_section:
+        findings = re.findall(
+            r"### (\w+)\s*\n\*\*来源\*\*:\s*(\S+)\s*\n\*\*发现\*\*:\s*(.+)\s*\n\*\*置信度\*\*:\s*([\d.]+)%",
+            findings_section.group(1)
+        )
+        for category, source_agent, finding, confidence in findings:
+            # 插入到该 Agent 的最后一个 thinking_done 之前
+            insert_idx = len(events)
+            for i in reversed(range(len(events))):
+                if events[i].get("data", {}).get("source_agent") == source_agent:
+                    insert_idx = i + 1
+                    break
+            events.insert(insert_idx, {
+                "event": "agent_thinking",
+                "data": {
+                    "source_agent": source_agent,
+                    "data": {
+                        "content": f"[{category.upper()}] {finding}（置信度 {confidence}%）",
+                        "iteration": 1,
+                    }
+                }
+            })
+
+    # 解析免责声明
+    disclaimer_match = re.search(r"【免责声明】\s*\n(.+?)(?=\n---|\n## |\Z)", content, re.DOTALL)
+    if disclaimer_match:
+        detail.disclaimer = disclaimer_match.group(1).strip()
+
+    # 解析核心建议 → suggestions
+    suggestions_match = re.search(r"【核心建议】\s*\n([\s\S]*?)(?=\n---|\n【)", content)
+    if suggestions_match:
+        items = re.findall(r"\*\*\d+\.\s*(.+?)\*\*", suggestions_match.group(1))
+        if items:
+            detail.suggestions = items[:5]
+
+    detail.agent_events = events
+    logger.info(f"Rebuilt {len(events)} events from MD for session {detail.session_id}")

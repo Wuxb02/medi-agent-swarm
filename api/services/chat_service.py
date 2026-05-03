@@ -1,14 +1,21 @@
 """问答服务：封装 process_with_swarm + 流式事件推送"""
 import asyncio
 import json
+import os
 import uuid
-from typing import Dict, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, AsyncGenerator, List
 from datetime import datetime
 from loguru import logger
 
 from swarm.swarm_coordinator import SwarmCoordinator
 from swarm.events import Event
 from api.models.chat import ChatRequest, ChatResponse
+
+# 事件持久化目录（与 SessionSummaryManager 一致）
+_SUMMARY_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "memory", "swarm", "session_summaries"
+)
 
 
 class EventBridge:
@@ -52,10 +59,11 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     )
 
     # 1. 发送 start
-    yield _json_line("start", {
-        "session_id": session_id,
-        "mode": "swarm" if request.enable_swarm else "single"
-    })
+    start_event = {"session_id": session_id, "mode": "swarm" if request.enable_swarm else "single"}
+    yield _json_line("start", start_event)
+
+    # 收集所有事件用于持久化
+    collected_events: List[Dict[str, Any]] = [{"event": "start", "data": start_event}]
 
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
@@ -75,7 +83,10 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     while not process_task.done() or not bridge.queue.empty():
         try:
             event = await asyncio.wait_for(bridge.queue.get(), timeout=0.5)
-            yield _json_line(_map_event_type(event.type.value), event.to_dict())
+            mapped_type = _map_event_type(event.type.value)
+            event_dict = event.to_dict()
+            yield _json_line(mapped_type, event_dict)
+            collected_events.append({"event": mapped_type, "data": event_dict})
         except asyncio.TimeoutError:
             continue
 
@@ -90,10 +101,12 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     # 5. 发送建议
     suggestions = result.get("suggestions", [])
     if suggestions:
-        yield _json_line("suggestions", {"suggestions": suggestions})
+        suggestions_payload = {"suggestions": suggestions}
+        yield _json_line("suggestions", suggestions_payload)
+        collected_events.append({"event": "suggestions", "data": suggestions_payload})
 
     # 6. 发送 done（最后一个事件）
-    yield _json_line("done", {
+    done_data = {
         "session_id": result.get("session_id", session_id),
         "total_time": result.get("total_time", 0.0),
         "swarm_metadata": result.get("swarm_metadata", {}),
@@ -101,7 +114,38 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         "swarm_enabled": result.get("swarm_enabled", False),
         "agents_involved": result.get("agents_involved", []),
         "answer": result.get("answer", ""),
-    })
+    }
+    yield _json_line("done", done_data)
+    collected_events.append({"event": "done", "data": done_data})
+
+    # 7. 持久化事件到 JSON 文件（后台不阻塞返回）
+    try:
+        _save_session_events(session_id, collected_events, result)
+    except Exception as e:
+        logger.warning(f"Failed to save session events: {e}")
+
+
+def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: Dict[str, Any]):
+    """将 SSE 事件列表持久化为 JSON 文件，供历史回放使用"""
+    os.makedirs(_SUMMARY_DIR, exist_ok=True)
+    filepath = os.path.join(_SUMMARY_DIR, f"session_{session_id}.json")
+    # 过滤掉流式内容增量事件（历史回放不需要）
+    _SKIP_TYPES = {"agent_content_delta"}
+    filtered = [e for e in events if e.get("event") not in _SKIP_TYPES]
+    payload = {
+        "session_id": session_id,
+        "events": filtered,
+        "suggestions": result.get("suggestions", []),
+        "disclaimer": result.get("disclaimer", ""),
+        "answer": result.get("answer", ""),
+        "agents_involved": result.get("agents_involved", []),
+        "subtasks_completed": result.get("subtasks_completed", 0),
+        "total_time": result.get("total_time", 0.0),
+        "swarm_enabled": result.get("swarm_enabled", False),
+    }
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+    logger.info(f"Saved session events: {filepath}")
 
 
 def _json_line(event_name: str, data: Dict[str, Any]) -> str:

@@ -1,5 +1,5 @@
 """会话管理接口的请求/响应模型"""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 
@@ -27,3 +27,8 @@ class SessionDetail(BaseModel):
     agents_involved: List[str] = []
     total_time: float = 0.0
     created_at: str = ""
+    # 从 JSON 事件文件恢复的完整数据
+    agent_events: List[Dict[str, Any]] = []
+    suggestions: List[str] = []
+    disclaimer: str = ""
+    subtasks_completed: int = 0
