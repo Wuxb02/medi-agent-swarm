@@ -63,7 +63,7 @@ class SwarmCoordinator:
 
         # 记忆管理器
         self.session_manager = SessionSummaryManager()
-        self.short_term_memory = ShortTermMemory(storage_type="memory")  # 或 "redis"
+        self.short_term_memory = ShortTermMemory(storage_type="memory", llm_client=self.llm_client)  # 或 "redis"
         self.long_term_memory = LongTermMemory()
 
         # 将短期记忆注入到所有 Worker Agent 的 Loop
@@ -109,7 +109,7 @@ class SwarmCoordinator:
 
         # ===== 统一的记忆检索（所有模式都使用）=====
         # 1. 检索短期记忆（当前会话历史）
-        recent_history = self.short_term_memory.get_recent_messages(
+        recent_history = await self.short_term_memory.get_recent_messages(
             session_id=session_id,
             limit=10  # 最近5轮对话（10条消息）
         )

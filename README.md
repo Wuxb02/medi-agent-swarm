@@ -13,7 +13,7 @@
 - **🔧 Skills 直达架构**: 9个原子 Skills 自包含，直接转换为 OpenAI function calling 格式 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
-- **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** ✅
+- **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** + **LLM 语义摘要压缩** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -53,6 +53,7 @@ Skills (函数) → 直接转换 → OpenAI Format → LLM 调用
    - 短期记忆：会话级对话历史（10条消息）
    - 长期记忆：Mem0 跨会话记忆
    - **上下文利用率 100%**：追问能正确理解历史对话
+   - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
 
 ### 测试验证
 
@@ -68,7 +69,7 @@ Skills (函数) → 直接转换 → OpenAI Format → LLM 调用
 
 **Harness Engineering（Phase 8）**：
 - ✅ 约束系统（Skill 调用验证、输出验证、自动修复）
-- ✅ 熵管理（去重、压缩、熵估算）
+- ✅ 熵管理（去重、LLM 语义摘要压缩、截断降级、熵估算）
 - ✅ Agent Loop 集成（约束 + 熵管理协同工作）
 
 运行测试套件：
@@ -207,9 +208,9 @@ medix-agent-swarm/
 │
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
-│   ├── short_term.py                  # 短期记忆
+│   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要）
 │   ├── session_summary.py             # 会话总结
-│   └── entropy_manager.py             # 熵管理器
+│   └── entropy_manager.py             # 熵管理器（LLM 摘要 + 截断降级）
 │
 ├── constraints/                       # 约束系统
 │   ├── agent_constraints.yaml         # Agent 能力边界
@@ -395,6 +396,22 @@ memory.clear()
 - **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
 - 存储容量：最近10条消息
 
+**智能压缩**：
+
+短期记忆集成了熵管理器，在消息积累过多时自动压缩早期对话：
+
+```python
+# 初始化时传入 llm_client 启用 LLM 语义摘要
+from memory.short_term import ShortTermMemory
+from core.llm_client import LLMClient
+
+memory = ShortTermMemory(storage_type="memory", llm_client=LLMClient())
+```
+
+- **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留症状、诊断、用药等关键医学信息
+- **截断降级**（自动）：LLM 不可用或调用失败时，自动降级为截断模式
+- **去重**：基于 MD5 哈希检测并移除重复消息
+
 #### 长期记忆（Mem0）
 
 **作用**：跨会话记忆，通过向量相似度检索历史案例和经验。
@@ -494,7 +511,7 @@ results = memory.search("高血压患者如何管理？")
 
 **3. 熵管理**（`memory/entropy_manager.py`）
 - 自动去重重复消息（基于 MD5 哈希）
-- 自动压缩历史对话（保留最近消息，压缩早期消息为摘要）
+- 自动压缩历史对话：LLM 语义摘要（保留关键医学信息）+ 截断降级（LLM 不可用时自动切换）
 - 熵估算和优化建议
 
 ### 验证
@@ -727,6 +744,11 @@ ConsultAgent DiagAgent ResearchAgent
 │  - 当前会话上下文                  │
 │  - 保留时间：60分钟                │
 │  存储：内存（默认）或 Redis        │
+├────────────────────────────────────┤
+│  熵管理器（自动优化）              │
+│  - MD5 去重（检测重复消息）        │
+│  - LLM 语义摘要（压缩早期对话）    │
+│  - 截断降级（LLM 不可用时）        │
 └────────────────────────────────────┘
            ↕ (会话结束时)
 ┌────────────────────────────────────┐

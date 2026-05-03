@@ -92,7 +92,8 @@ class ShortTermMemory:
     def __init__(
         self,
         storage_type: str = "memory",
-        redis_config: Optional[Dict[str, Any]] = None
+        redis_config: Optional[Dict[str, Any]] = None,
+        llm_client=None
     ):
         """
         初始化短期记忆管理器
@@ -100,6 +101,7 @@ class ShortTermMemory:
         Args:
             storage_type: 存储类型，"memory" 或 "redis"
             redis_config: Redis 配置（storage_type="redis" 时需要）
+            llm_client: LLM 客户端（可选），用于熵管理器的语义摘要生成
         """
         # 防止重复初始化
         if hasattr(self, '_initialized'):
@@ -111,7 +113,7 @@ class ShortTermMemory:
         self._initialized = True
 
         # Harness Engineering: 熵管理器
-        self.entropy_manager = MemoryEntropyManager() if ENTROPY_ENABLED else None
+        self.entropy_manager = MemoryEntropyManager(llm_client=llm_client) if ENTROPY_ENABLED else None
         if ENTROPY_ENABLED:
             logger.debug("✅ Entropy management enabled for short-term memory")
 
@@ -207,7 +209,7 @@ class ShortTermMemory:
             return self._load_from_redis(session_id)
         return None
 
-    def get_recent_messages(
+    async def get_recent_messages(
         self,
         session_id: str,
         limit: int = 50
@@ -239,7 +241,7 @@ class ShortTermMemory:
                         )
 
                 # 统一使用 auto_clean: 自动去重+压缩
-                messages = self.entropy_manager.auto_clean(
+                messages = await self.entropy_manager.auto_clean(
                     messages,
                     enable_deduplication=True,
                     enable_compression=True,
@@ -249,7 +251,7 @@ class ShortTermMemory:
             return messages
         return []
 
-    def get_history(
+    async def get_history(
         self,
         session_id: str,
         limit: int = 10
@@ -265,7 +267,7 @@ class ShortTermMemory:
             消息列表（OpenAI 格式: [{"role": "user", "content": "..."}, ...]）
         """
         # get_recent_messages 已处理熵管理，这里只做格式转换
-        messages = self.get_recent_messages(session_id, limit * 2)  # 每轮2条消息
+        messages = await self.get_recent_messages(session_id, limit * 2)  # 每轮2条消息
 
         # 转换为 OpenAI 格式（只保留 user 和 assistant 消息）
         openai_messages = [

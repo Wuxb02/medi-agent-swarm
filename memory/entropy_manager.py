@@ -17,13 +17,21 @@ import json
 class MemoryEntropyManager:
     """记忆熵管理器"""
 
-    def __init__(self):
-        """初始化熵管理器"""
+    def __init__(self, llm_client=None):
+        """
+        初始化熵管理器
+
+        Args:
+            llm_client: LLM 客户端实例（可选），用于生成语义摘要。
+                        为 None 时降级为截断模式。
+        """
+        self.llm_client = llm_client
         self.deduplication_threshold = 0.9  # 相似度阈值
         self.max_age_days = 90  # 记忆最大保留天数
         self.compression_threshold = 10  # 超过10条消息开始压缩
 
-        logger.debug("📦 MemoryEntropyManager initialized")
+        mode = "LLM语义摘要" if llm_client else "截断降级"
+        logger.debug(f"📦 MemoryEntropyManager initialized (压缩模式: {mode})")
 
     def deduplicate_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -157,7 +165,7 @@ class MemoryEntropyManager:
 
         return cleaned
 
-    def compress_session_history(
+    async def compress_session_history(
         self,
         messages: List[Dict],
         max_messages: int = 10
@@ -184,7 +192,7 @@ class MemoryEntropyManager:
 
         # 压缩更早的消息
         older = messages[:-max_messages]
-        compressed = self._compress_older_messages(older)
+        compressed = await self._compress_older_messages(older)
 
         logger.info(
             f"📦 Compressed {len(older)} messages to {len(compressed)} summaries"
@@ -192,11 +200,84 @@ class MemoryEntropyManager:
 
         return compressed + recent
 
-    def _compress_older_messages(self, messages: List[Dict]) -> List[Dict]:
+    async def _compress_older_messages(self, messages: List[Dict]) -> List[Dict]:
         """
         压缩更早的消息
 
-        简化实现：每两条（user + assistant）压缩为一条摘要
+        优先使用 LLM 生成语义摘要，失败或无 llm_client 时降级为截断。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            压缩后的摘要列表
+        """
+        if self.llm_client:
+            try:
+                return await self._compress_with_llm(messages)
+            except Exception as e:
+                logger.warning(f"LLM 压缩失败，降级为截断模式: {e}")
+        return self._compress_by_truncation(messages)
+
+    async def _compress_with_llm(self, messages: List[Dict]) -> List[Dict]:
+        """
+        使用 LLM 生成语义摘要
+
+        Args:
+            messages: 待压缩的消息列表
+
+        Returns:
+            包含单条语义摘要的列表
+        """
+        # 拼装对话文本
+        dialogue_lines = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user":
+                dialogue_lines.append(f"用户: {content}")
+            elif role == "assistant":
+                dialogue_lines.append(f"助手: {content}")
+            # 跳过 system/tool 消息
+
+        if not dialogue_lines:
+            return self._compress_by_truncation(messages)
+
+        dialogue_text = "\n".join(dialogue_lines)
+
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是医疗对话摘要助手。请将多轮医疗对话压缩为一段结构化摘要。\n"
+                    "要求：\n"
+                    "1. 保留关键医学信息：症状描述、检查结果、诊断结论、用药建议、注意事项\n"
+                    "2. 去除寒暄和重复内容\n"
+                    "3. 输出不超过200字\n"
+                    "4. 使用中文"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"请对以下对话生成摘要：\n\n{dialogue_text}",
+            },
+        ]
+
+        summary_text = await self.llm_client.chat(
+            messages=prompt_messages,
+            temperature=0.3,
+            max_tokens=512,
+        )
+
+        logger.debug(f"📝 LLM 生成摘要: {summary_text[:80]}...")
+
+        return [{"role": "system", "content": f"[语义摘要] {summary_text}"}]
+
+    def _compress_by_truncation(self, messages: List[Dict]) -> List[Dict]:
+        """
+        截断式压缩（降级方案）
+
+        每两条（user + assistant）压缩为一条截断摘要。
 
         Args:
             messages: 消息列表
@@ -308,7 +389,7 @@ class MemoryEntropyManager:
             "recommendations": recommendations
         }
 
-    def auto_clean(
+    async def auto_clean(
         self,
         messages: List[Dict],
         enable_deduplication: bool = True,
@@ -337,6 +418,6 @@ class MemoryEntropyManager:
 
         # 压缩
         if enable_compression and len(cleaned) > max_messages:
-            cleaned = self.compress_session_history(cleaned, max_messages)
+            cleaned = await self.compress_session_history(cleaned, max_messages)
 
         return cleaned

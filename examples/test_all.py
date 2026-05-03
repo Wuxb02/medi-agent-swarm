@@ -552,7 +552,7 @@ async def test_short_term_memory():
     stm.add_message(session_id, "tool", "assess_risk: risk_level=low")
 
     # 获取历史
-    messages = stm.get_recent_messages(session_id, limit=10)
+    messages = await stm.get_recent_messages(session_id, limit=10)
 
     print(f"\n📝 存储了 {len(messages)} 条消息")
     for i, msg in enumerate(messages, 1):
@@ -644,7 +644,7 @@ async def test_memory_integration():
     print(f"{'='*70}")
 
     # 验证短期记忆（第1轮后）
-    history_1 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_1 = await coordinator.short_term_memory.get_history(session_id, limit=10)
     print(f"\n  📝 短期记忆: {len(history_1)} 条消息")
     for msg in history_1:
         role_icon = "👤" if msg['role'] == 'user' else "🤖" if msg['role'] == 'assistant' else "🔧"
@@ -669,7 +669,7 @@ async def test_memory_integration():
     print(f"{'='*70}")
 
     # 验证短期记忆（第2轮后）
-    history_2 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_2 = await coordinator.short_term_memory.get_history(session_id, limit=10)
     print(f"\n  📝 短期记忆: {len(history_2)} 条消息")
 
     assert len(history_2) >= 4, f"第2轮后应该至少有4条消息，实际: {len(history_2)}"
@@ -704,7 +704,7 @@ async def test_memory_integration():
     print(answer3)
     print(f"{'='*70}")
 
-    history_3 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_3 = await coordinator.short_term_memory.get_history(session_id, limit=10)
     print(f"\n  📝 短期记忆: {len(history_3)} 条消息")
 
     assert len(history_3) >= 6, f"第3轮后应该至少有6条消息，实际: {len(history_3)}"
@@ -993,7 +993,7 @@ async def test_unified_memory_single_agent():
 
     # 验证短期记忆
     stm = ShortTermMemory(storage_type='memory')
-    messages1 = stm.get_recent_messages(session_id, limit=100)
+    messages1 = await stm.get_recent_messages(session_id, limit=100)
     user_count1 = sum(1 for msg in messages1 if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user')
     assistant_count1 = sum(1 for msg in messages1 if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'assistant')
 
@@ -1012,7 +1012,7 @@ async def test_unified_memory_single_agent():
         session_id=session_id
     )
 
-    messages2 = stm.get_recent_messages(session_id, limit=100)
+    messages2 = await stm.get_recent_messages(session_id, limit=100)
     print(f"\n📊 第二轮短期记忆:")
     print(f"  - 总计: {len(messages2)} 条消息")
 
@@ -1054,7 +1054,7 @@ async def test_unified_memory_swarm():
     # 注意：Swarm 模式下 Worker Agents 并行执行，每个 Agent 有自己的 session
     # 这里主要验证长期记忆保存成功即可
     stm = ShortTermMemory(storage_type='memory')
-    messages = stm.get_recent_messages(session_id, limit=100)
+    messages = await stm.get_recent_messages(session_id, limit=100)
     user_count = sum(1 for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user')
 
     print(f"\n📊 短期记忆:")
@@ -1163,7 +1163,7 @@ async def test_harness_entropy_manager():
         long_messages.append({"role": "user", "content": f"问题 {i}"})
         long_messages.append({"role": "assistant", "content": f"回答 {i}"})
 
-    compressed = manager.compress_session_history(long_messages, max_messages=10)
+    compressed = await manager.compress_session_history(long_messages, max_messages=10)
     assert len(compressed) < len(long_messages), "应该压缩消息"
     assert compressed[-1]["content"] == "回答 29", "应该保留最新消息"
 
@@ -1253,7 +1253,7 @@ async def test_harness_integration():
         stm.add_message(session_id, "assistant", "重复的回答")
 
     # 获取历史（应该自动去重）
-    history = stm.get_history(session_id, limit=5)
+    history = await stm.get_history(session_id, limit=5)
     # 由于自动去重，重复消息应该被移除
     assert len(history) <= 10, "历史消息应该被限制和去重"
 
@@ -1320,7 +1320,7 @@ async def test_memory_no_duplication():
     )
 
     # 检查消息数量
-    messages = stm.get_recent_messages(session_id, limit=100)
+    messages = await stm.get_recent_messages(session_id, limit=100)
     user_msgs = [msg for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user']
     assistant_msgs = [msg for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'assistant']
 

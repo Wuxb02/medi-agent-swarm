@@ -34,7 +34,7 @@ async def get_chat_history(session_id: str):
     from memory.short_term import ShortTermMemory
 
     memory = ShortTermMemory()
-    raw_messages = memory.get_recent_messages(session_id=session_id, limit=50)
+    raw_messages = await memory.get_recent_messages(session_id=session_id, limit=50)
 
     messages = [
         MessageItem(

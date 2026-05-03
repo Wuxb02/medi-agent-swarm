@@ -92,7 +92,7 @@ class AgentLoop:
             state.status = TaskStatus.IN_PROGRESS
 
             # 初始化消息历史（包含历史对话）
-            messages = self._initialize_messages(agent, input_data, session_id)
+            messages = await self._initialize_messages(agent, input_data, session_id)
 
             # 记录用户消息到短期记忆
             if self.short_term_memory and session_id:
@@ -414,7 +414,7 @@ class AgentLoop:
             state.mark_failed(str(e))
             raise
 
-    def _initialize_messages(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def _initialize_messages(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """初始化消息列表，包含历史对话上下文"""
         messages = []
 
@@ -428,7 +428,7 @@ class AgentLoop:
 
         # 加载历史对话（短期记忆）
         if self.short_term_memory and session_id:
-            history = self.short_term_memory.get_history(session_id, limit=5)  # 最近5轮对话
+            history = await self.short_term_memory.get_history(session_id, limit=5)  # 最近5轮对话
             if history:
                 logger.info(f"Loaded {len(history)} historical messages from short-term memory")
                 messages.extend(history)

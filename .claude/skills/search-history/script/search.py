@@ -31,7 +31,7 @@ async def search_history(session_id: str, limit: int = 10) -> Dict[str, Any]:
         memory = ShortTermMemory(storage_type="memory")
 
         # 获取历史消息
-        messages = memory.get_recent_messages(session_id, limit=limit * 2)  # 每轮包含user+assistant
+        messages = await memory.get_recent_messages(session_id, limit=limit * 2)  # 每轮包含user+assistant
 
         if not messages:
             return {
