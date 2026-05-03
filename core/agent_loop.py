@@ -121,24 +121,39 @@ class AgentLoop:
                     if use_streaming:
                         # 流式模式：逐 token 回调，动态路由到 thinking 或 content
                         _has_tools = [False]  # 用 list 以在闭包中可变
+                        _reasoning_active = [False]  # 推理内容是否正在输出
+                        _content_buffer: List[str] = []  # 推理期间缓存的 content token
+
+                        def _flush_content_buffer():
+                            """推理结束后，将缓存的 content token 推送到正文"""
+                            if _content_buffer and self.on_content_token:
+                                for token in _content_buffer:
+                                    self.on_content_token(token)
+                                _content_buffer.clear()
 
                         def _route_token(token: str):
                             if _has_tools[0]:
                                 # 已检测到 tool_calls → token 是 thinking 内容
                                 if self.on_thinking:
                                     self.on_thinking(content=token, iteration=state.iteration)
+                            elif _reasoning_active[0]:
+                                # 推理内容正在输出 → 缓存 content token，避免正文提前泄露
+                                _content_buffer.append(token)
                             else:
-                                # 尚未检测到 tool_calls → token 是最终回答
+                                # 无推理内容 → 直接输出到正文
                                 if self.on_content_token:
                                     self.on_content_token(token)
 
                         def _route_reasoning(token: str):
-                            # 模型原生推理内容 → 直接路由到 thinking
+                            # 模型原生推理内容 → 标记推理活跃 + 路由到 thinking
+                            _reasoning_active[0] = True
                             if self.on_thinking:
                                 self.on_thinking(content=token, iteration=state.iteration)
 
                         def _on_stream_tools_detected():
                             _has_tools[0] = True
+                            # 检测到 tool_calls 时，清空缓存的 content（不应出现在正文中）
+                            _content_buffer.clear()
 
                         llm_response: LLMResponse = await agent.llm_client.chat_with_tools_stream(
                             messages=messages,
@@ -149,6 +164,10 @@ class AgentLoop:
                             on_reasoning_token=_route_reasoning,
                             on_tools_detected=_on_stream_tools_detected
                         )
+
+                        # 流式输出结束：释放推理期间缓存的 content token
+                        if not _has_tools[0]:
+                            _flush_content_buffer()
                     else:
                         # 非流式模式
                         llm_response: LLMResponse = await agent.llm_client.chat_with_tools(
