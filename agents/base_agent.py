@@ -160,7 +160,7 @@ class BaseAgent(ABC):
         """设置最终回答 token 流式回调"""
         self.loop.on_content_token = callback
 
-    async def process_subtask(self, subtask: Any) -> Dict[str, Any]:
+    async def process_subtask(self, subtask: Any, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         处理子任务（Swarm 模式）
 
@@ -171,7 +171,8 @@ class BaseAgent(ABC):
         input_data = {
             'question': subtask.description,
             'subtask_id': subtask.id,
-            'subtask_type': subtask.type
+            'subtask_type': subtask.type,
+            'session_id': session_id,
         }
 
         return await self.run_loop(input_data)

@@ -11,6 +11,9 @@ class SessionListItem(BaseModel):
     message_count: int = 0
     mode: str = "single"
     total_tokens: int = 0
+    parallel_efficiency: float = 0.0
+    information_coverage: float = 0.0
+    redundancy: float = 0.0
 
 
 class SessionListResponse(BaseModel):
@@ -36,3 +39,6 @@ class SessionDetail(BaseModel):
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    parallel_efficiency: float = 0.0
+    information_coverage: float = 0.0
+    redundancy: float = 0.0

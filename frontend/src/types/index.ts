@@ -21,6 +21,11 @@ export interface ChatMessage {
       completion_tokens: number
       total_tokens: number
     }
+    performanceMetrics?: {
+      parallelEfficiency: number
+      informationCoverage: number
+      redundancy: number
+    }
   }
 }
 
@@ -71,6 +76,9 @@ export interface SessionItem {
   message_count: number
   mode: string
   total_tokens: number
+  parallel_efficiency: number
+  information_coverage: number
+  redundancy: number
 }
 
 export interface DashboardStats {
@@ -83,4 +91,7 @@ export interface DashboardStats {
   knowledge_base_size: number
   recent_sessions: SessionItem[]
   total_tokens: number
+  avg_parallel_efficiency: number
+  avg_information_coverage: number
+  avg_redundancy: number
 }

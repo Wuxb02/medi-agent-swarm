@@ -83,6 +83,42 @@ function getAgentBarWidth(count: unknown): number {
           </div>
         </div>
 
+        <!-- Swarm 平均指标 -->
+        <div v-if="stats.avg_parallel_efficiency > 0" class="bg-white border border-slate-200 rounded-xl p-5 mb-6">
+          <h3 class="text-sm font-semibold text-slate-700 mb-4">Swarm 协作平均指标</h3>
+          <div class="grid grid-cols-3 gap-6">
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-slate-500">并行效率</span>
+                <span class="text-xs font-medium text-blue-600">{{ (stats.avg_parallel_efficiency * 100).toFixed(1) }}%</span>
+              </div>
+              <div class="bg-slate-100 rounded-full h-2">
+                <div class="h-full rounded-full bg-blue-400 transition-all" :style="{ width: `${stats.avg_parallel_efficiency * 100}%` }" />
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-slate-500">子任务覆盖</span>
+                <span class="text-xs font-medium text-green-600">{{ (stats.avg_information_coverage * 100).toFixed(1) }}%</span>
+              </div>
+              <div class="bg-slate-100 rounded-full h-2">
+                <div class="h-full rounded-full bg-green-400 transition-all" :style="{ width: `${stats.avg_information_coverage * 100}%` }" />
+              </div>
+            </div>
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-slate-500">信息冗余</span>
+                <span class="text-xs font-medium" :class="stats.avg_redundancy > 0.5 ? 'text-amber-600' : 'text-slate-600'">{{ (stats.avg_redundancy * 100).toFixed(1) }}%</span>
+              </div>
+              <div class="bg-slate-100 rounded-full h-2">
+                <div class="h-full rounded-full transition-all"
+                  :class="stats.avg_redundancy > 0.5 ? 'bg-amber-400' : 'bg-slate-300'"
+                  :style="{ width: `${stats.avg_redundancy * 100}%` }" />
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Agent 使用分布 -->
         <div class="bg-white border border-slate-200 rounded-xl p-5 mb-6">
           <h3 class="text-sm font-semibold text-slate-700 mb-4">Agent 使用分布</h3>
@@ -110,15 +146,43 @@ function getAgentBarWidth(count: unknown): number {
             <div
               v-for="s in stats.recent_sessions"
               :key="s.session_id"
-              class="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-slate-50 text-sm"
+              class="py-2 px-3 rounded-lg hover:bg-slate-50 text-sm"
             >
-              <span class="w-1.5 h-1.5 rounded-full shrink-0"
-                :class="s.mode === 'swarm' ? 'bg-green-400' : 'bg-slate-300'"
-              />
-              <span class="flex-1 truncate text-slate-700">{{ s.first_question || '未命名' }}</span>
-              <span v-if="s.message_count" class="text-xs text-slate-400 shrink-0">{{ s.message_count }} 条消息</span>
-              <span v-if="s.total_tokens" class="text-xs text-amber-500 shrink-0">{{ s.total_tokens.toLocaleString() }} tok</span>
-              <span class="text-xs text-slate-400 shrink-0">{{ s.created_at ? new Date(s.created_at).toLocaleDateString('zh-CN') : '' }}</span>
+              <div class="flex items-center gap-3">
+                <span class="w-1.5 h-1.5 rounded-full shrink-0"
+                  :class="s.mode === 'swarm' ? 'bg-green-400' : 'bg-slate-300'"
+                />
+                <span class="flex-1 truncate text-slate-700">{{ s.first_question || '未命名' }}</span>
+                <span v-if="s.message_count" class="text-xs text-slate-400 shrink-0">{{ s.message_count }} 条消息</span>
+                <span v-if="s.total_tokens" class="text-xs text-amber-500 shrink-0">{{ s.total_tokens.toLocaleString() }} tok</span>
+                <span class="text-xs text-slate-400 shrink-0">{{ s.created_at ? new Date(s.created_at).toLocaleDateString('zh-CN') : '' }}</span>
+              </div>
+              <!-- Swarm 会话的性能指标 -->
+              <div v-if="s.mode === 'swarm' && s.parallel_efficiency > 0" class="flex items-center gap-4 mt-1.5 ml-4 text-[11px]">
+                <div class="flex items-center gap-1.5 flex-1">
+                  <span class="text-slate-400 w-14 shrink-0">并行效率</span>
+                  <div class="flex-1 bg-slate-100 rounded-full h-1.5">
+                    <div class="h-full rounded-full bg-blue-400" :style="{ width: `${s.parallel_efficiency * 100}%` }" />
+                  </div>
+                  <span class="text-slate-500 w-8 text-right">{{ (s.parallel_efficiency * 100).toFixed(0) }}%</span>
+                </div>
+                <div class="flex items-center gap-1.5 flex-1">
+                  <span class="text-slate-400 w-14 shrink-0">子任务覆盖</span>
+                  <div class="flex-1 bg-slate-100 rounded-full h-1.5">
+                    <div class="h-full rounded-full bg-green-400" :style="{ width: `${s.information_coverage * 100}%` }" />
+                  </div>
+                  <span class="text-slate-500 w-8 text-right">{{ (s.information_coverage * 100).toFixed(0) }}%</span>
+                </div>
+                <div class="flex items-center gap-1.5 flex-1">
+                  <span class="text-slate-400 w-14 shrink-0">信息冗余</span>
+                  <div class="flex-1 bg-slate-100 rounded-full h-1.5">
+                    <div class="h-full rounded-full"
+                      :class="s.redundancy > 0.5 ? 'bg-amber-400' : 'bg-slate-300'"
+                      :style="{ width: `${s.redundancy * 100}%` }" />
+                  </div>
+                  <span class="text-slate-500 w-8 text-right">{{ (s.redundancy * 100).toFixed(0) }}%</span>
+                </div>
+              </div>
             </div>
           </div>
         </div>

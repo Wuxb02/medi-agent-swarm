@@ -16,7 +16,93 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import json
+import re
+from itertools import combinations
 from loguru import logger
+
+
+def _calculate_parallel_efficiency(
+    task_decomposition: Dict[str, Any],
+    agent_contributions: Dict[str, List[Any]],
+    total_time: float
+) -> float:
+    """计算并行效率：sum(subtask_durations) / (agent_count * total_time)"""
+    if total_time <= 0 or not agent_contributions:
+        return 1.0
+
+    sum_of_durations = 0.0
+    valid_count = 0
+    for subtask in task_decomposition.values():
+        if (hasattr(subtask, 'status') and subtask.status.value == "completed"
+                and subtask.started_at and subtask.completed_at):
+            duration = (subtask.completed_at - subtask.started_at).total_seconds()
+            if duration > 0:
+                sum_of_durations += duration
+                valid_count += 1
+
+    if valid_count == 0:
+        return 0.8
+
+    agent_count = max(1, len(agent_contributions))
+    efficiency = sum_of_durations / (agent_count * total_time)
+    return max(0.0, min(1.0, efficiency))
+
+
+def _calculate_information_coverage(
+    task_decomposition: Dict[str, Any]
+) -> float:
+    """计算信息覆盖度：completed_subtasks / total_subtasks"""
+    total = len(task_decomposition)
+    if total == 0:
+        return 1.0
+
+    completed = sum(
+        1 for st in task_decomposition.values()
+        if hasattr(st, 'status') and st.status.value == "completed"
+    )
+    return max(0.0, min(1.0, completed / total))
+
+
+def _extract_text_ngrams(text: str, n: int = 2) -> set:
+    """从文本中提取字符级 n-gram 集合（适配中文）"""
+    if not text or len(text) < n:
+        return set()
+    cleaned = re.sub(r'[^一-鿿\w]', '', text)
+    if len(cleaned) < n:
+        return set()
+    return {cleaned[i:i + n] for i in range(len(cleaned) - n + 1)}
+
+
+def _calculate_redundancy(
+    agent_contributions: Dict[str, List[Any]]
+) -> float:
+    """计算信息冗余度：跨 Agent 贡献文本的平均 Jaccard 相似度"""
+    agent_ids = list(agent_contributions.keys())
+    if len(agent_ids) < 2:
+        return 0.0
+
+    agent_keysets = {}
+    for agent_id in agent_ids:
+        combined_text = ""
+        for contrib in agent_contributions[agent_id]:
+            answer = contrib.result.get("answer", "")
+            if isinstance(answer, str):
+                combined_text += " " + answer
+        agent_keysets[agent_id] = _extract_text_ngrams(combined_text, n=2)
+
+    similarities = []
+    for id_a, id_b in combinations(agent_ids, 2):
+        set_a, set_b = agent_keysets[id_a], agent_keysets[id_b]
+        if not set_a and not set_b:
+            similarities.append(0.0)
+            continue
+        union = len(set_a | set_b)
+        if union > 0:
+            similarities.append(len(set_a & set_b) / union)
+
+    if not similarities:
+        return 0.0
+    return max(0.0, min(1.0, sum(similarities) / len(similarities)))
 
 
 @dataclass
@@ -303,9 +389,17 @@ class SessionSummary:
         performance = PerformanceMetrics(
             total_time=total_time,
             agent_count=len(shared_context.agent_contributions),
-            parallel_efficiency=0.8,  # TODO: 实际计算
-            information_coverage=0.9,  # TODO: 实际计算
-            redundancy=0.15,  # TODO: 实际计算
+            parallel_efficiency=_calculate_parallel_efficiency(
+                shared_context.task_decomposition,
+                shared_context.agent_contributions,
+                total_time
+            ),
+            information_coverage=_calculate_information_coverage(
+                shared_context.task_decomposition
+            ),
+            redundancy=_calculate_redundancy(
+                shared_context.agent_contributions
+            ),
             total_tokens=usage.get('total_tokens', 0),
             prompt_tokens=usage.get('prompt_tokens', 0),
             completion_tokens=usage.get('completion_tokens', 0),

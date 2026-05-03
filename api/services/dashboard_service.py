@@ -43,6 +43,19 @@ def get_dashboard_stats() -> DashboardStats:
         sum(response_times) / len(response_times) if response_times else 0.0
     )
 
+    # 计算性能指标平均值（仅 swarm 会话）
+    swarm_metrics = [
+        (s.parallel_efficiency, s.information_coverage, s.redundancy)
+        for s in sessions
+        if s.mode == "swarm" and s.parallel_efficiency > 0
+    ]
+    if swarm_metrics:
+        avg_pe = sum(m[0] for m in swarm_metrics) / len(swarm_metrics)
+        avg_ic = sum(m[1] for m in swarm_metrics) / len(swarm_metrics)
+        avg_rd = sum(m[2] for m in swarm_metrics) / len(swarm_metrics)
+    else:
+        avg_pe = avg_ic = avg_rd = 0.0
+
     recent_sessions = sessions[:10]
 
     return DashboardStats(
@@ -55,4 +68,7 @@ def get_dashboard_stats() -> DashboardStats:
         knowledge_base_size=get_knowledge_base_size(),
         recent_sessions=recent_sessions,
         total_tokens=total_tokens,
+        avg_parallel_efficiency=round(avg_pe, 4),
+        avg_information_coverage=round(avg_ic, 4),
+        avg_redundancy=round(avg_rd, 4),
     )

@@ -93,13 +93,24 @@ def _parse_summary_file(filepath: str, filename: str) -> Optional[SessionListIte
     messages_match = re.search(r"消息数[：:]\s*(\d+)", content)
     message_count = int(messages_match.group(1)) if messages_match else 0
 
+    # 提取性能指标（百分比转小数）
+    pe_match = re.search(r"并行效率[：:]\s*([\d.]+)%", content)
+    parallel_efficiency = float(pe_match.group(1)) / 100 if pe_match else 0.0
+    ic_match = re.search(r"信息覆盖度[：:]\s*([\d.]+)%", content)
+    information_coverage = float(ic_match.group(1)) / 100 if ic_match else 0.0
+    rd_match = re.search(r"信息冗余度[：:]\s*([\d.]+)%", content)
+    redundancy = float(rd_match.group(1)) / 100 if rd_match else 0.0
+
     return SessionListItem(
         session_id=session_id,
         first_question=first_question[:80],
         created_at=created_at,
         message_count=message_count,
         mode=mode,
-        total_tokens=total_tokens
+        total_tokens=total_tokens,
+        parallel_efficiency=parallel_efficiency,
+        information_coverage=information_coverage,
+        redundancy=redundancy,
     )
 
 
@@ -133,6 +144,14 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
     completion_tokens_match = re.search(r"输出 Token[：:]\s*(\d+)", content)
     completion_tokens = int(completion_tokens_match.group(1)) if completion_tokens_match else 0
 
+    # 提取性能指标（百分比转小数）
+    pe_match = re.search(r"并行效率[：:]\s*([\d.]+)%", content)
+    parallel_efficiency = float(pe_match.group(1)) / 100 if pe_match else 0.0
+    ic_match = re.search(r"信息覆盖度[：:]\s*([\d.]+)%", content)
+    information_coverage = float(ic_match.group(1)) / 100 if ic_match else 0.0
+    rd_match = re.search(r"信息冗余度[：:]\s*([\d.]+)%", content)
+    redundancy = float(rd_match.group(1)) / 100 if rd_match else 0.0
+
     created_at = datetime.fromtimestamp(os.path.getmtime(filepath)).isoformat()
 
     return SessionDetail(
@@ -145,7 +164,10 @@ def _parse_detail_file(filepath: str, session_id: str) -> Optional[SessionDetail
         created_at=created_at,
         total_tokens=total_tokens,
         prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens
+        completion_tokens=completion_tokens,
+        parallel_efficiency=parallel_efficiency,
+        information_coverage=information_coverage,
+        redundancy=redundancy,
     )
 
 
@@ -176,6 +198,12 @@ def _merge_events_json(md_filepath: str, detail: SessionDetail):
                     detail.total_tokens = usage.get("total_tokens", detail.total_tokens)
                     detail.prompt_tokens = usage.get("prompt_tokens", detail.prompt_tokens)
                     detail.completion_tokens = usage.get("completion_tokens", detail.completion_tokens)
+                # 合并性能指标
+                metrics = data.get("performance_metrics", {})
+                if metrics:
+                    detail.parallel_efficiency = metrics.get("parallel_efficiency", detail.parallel_efficiency)
+                    detail.information_coverage = metrics.get("information_coverage", detail.information_coverage)
+                    detail.redundancy = metrics.get("redundancy", detail.redundancy)
                 logger.info(f"Merged events JSON: {json_path}")
             except Exception as e:
                 logger.warning(f"Failed to read events JSON {json_path}: {e}")

@@ -365,6 +365,11 @@ export const useChatStore = defineStore('chat', () => {
               agentsInvolved: data.agents_involved || [],
               totalTime: data.total_time,
               usage: data.usage,
+              performanceMetrics: data.performance_metrics ? {
+                parallelEfficiency: data.performance_metrics.parallel_efficiency || 0,
+                informationCoverage: data.performance_metrics.information_coverage || 0,
+                redundancy: data.performance_metrics.redundancy || 0,
+              } : undefined,
             }
             // 兜底：折叠所有 thinking 块
             if (msg.thinkingBlocks) {
@@ -440,6 +445,11 @@ export const useChatStore = defineStore('chat', () => {
               agentsInvolved: detail.agents_involved || [],
               totalTime: detail.total_time,
               subtasksCompleted: detail.subtasks_completed,
+              performanceMetrics: detail.parallel_efficiency > 0 ? {
+                parallelEfficiency: detail.parallel_efficiency || 0,
+                informationCoverage: detail.information_coverage || 0,
+                redundancy: detail.redundancy || 0,
+              } : undefined,
             },
           })
         }

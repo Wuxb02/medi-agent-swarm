@@ -99,6 +99,12 @@ const isUser = computed(() => props.message.role === 'user')
               <span v-if="message.metadata.agentsInvolved.length">
                 {{ message.metadata.agentsInvolved.length }} 个 Agent
               </span>
+              <template v-if="message.metadata.performanceMetrics">
+                <span class="text-slate-300">|</span>
+                <span>并行效率 {{ (message.metadata.performanceMetrics.parallelEfficiency * 100).toFixed(0) }}%</span>
+                <span>子任务覆盖 {{ (message.metadata.performanceMetrics.informationCoverage * 100).toFixed(0) }}%</span>
+                <span>信息冗余 {{ (message.metadata.performanceMetrics.redundancy * 100).toFixed(0) }}%</span>
+              </template>
             </div>
           </div>
         </div>

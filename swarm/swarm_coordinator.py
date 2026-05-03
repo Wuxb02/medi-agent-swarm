@@ -456,7 +456,12 @@ class SwarmCoordinator:
             'total_time': (end_time - start_time).total_seconds(),
             'swarm_metadata': shared_context.get_summary(),
             'timeout_occurred': timeout_occurred,
-            'usage': token_usage
+            'usage': token_usage,
+            'performance_metrics': {
+                'parallel_efficiency': summary.performance.parallel_efficiency,
+                'information_coverage': summary.performance.information_coverage,
+                'redundancy': summary.performance.redundancy,
+            }
         }
 
         # 提取建议和免责声明（简化实现）
@@ -513,7 +518,7 @@ class SwarmCoordinator:
     async def _execute_single_subtask(self, worker, subtask, shared_context):
         """执行单个子任务"""
         try:
-            result = await worker.process_subtask(subtask)
+            result = await worker.process_subtask(subtask, session_id=shared_context.session_id)
             shared_context.complete_subtask(subtask.id, worker.agent_id, result)
             logger.info(f"{worker.agent_id}: Completed {subtask.type}")
         except Exception as e:

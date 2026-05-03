@@ -15,6 +15,9 @@ class DashboardStats(BaseModel):
     knowledge_base_size: int = 0
     recent_sessions: List[SessionListItem] = []
     total_tokens: int = 0
+    avg_parallel_efficiency: float = 0.0
+    avg_information_coverage: float = 0.0
+    avg_redundancy: float = 0.0
 
 
 class HealthResponse(BaseModel):

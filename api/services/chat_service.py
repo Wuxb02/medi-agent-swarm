@@ -120,6 +120,7 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         "agents_involved": result.get("agents_involved", []),
         "answer": result.get("answer", ""),
         "usage": result.get("usage", {}),
+        "performance_metrics": result.get("performance_metrics", {}),
     }
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
@@ -149,6 +150,7 @@ def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: 
         "total_time": result.get("total_time", 0.0),
         "swarm_enabled": result.get("swarm_enabled", False),
         "usage": result.get("usage", {}),
+        "performance_metrics": result.get("performance_metrics", {}),
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
