@@ -144,6 +144,22 @@ class BaseAgent(ABC):
         """附加 AgentIdentityManager（由 Swarm 调用）"""
         self.identity_manager = identity_manager
 
+    def set_on_thinking(self, callback):
+        """设置 thinking 内容回调"""
+        self.loop.on_thinking = callback
+
+    def set_on_tool_step(self, callback):
+        """设置工具步骤回调"""
+        self.loop.on_tool_step = callback
+
+    def set_on_thinking_done(self, callback):
+        """设置推理轮次结束回调"""
+        self.loop.on_thinking_done = callback
+
+    def set_on_content_token(self, callback):
+        """设置最终回答 token 流式回调"""
+        self.loop.on_content_token = callback
+
     async def process_subtask(self, subtask: Any) -> Dict[str, Any]:
         """
         处理子任务（Swarm 模式）

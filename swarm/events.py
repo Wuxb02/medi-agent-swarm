@@ -18,6 +18,10 @@ class EventType(Enum):
     AGENT_ANSWER = "agent_answer"                # Agent 回答问题
     SWARM_STARTED = "swarm_started"              # Swarm 开始处理
     SWARM_COMPLETED = "swarm_completed"          # Swarm 完成处理
+    AGENT_THINKING = "agent_thinking"            # Agent 推理思考内容
+    AGENT_TOOL_STEP = "agent_tool_step"          # Agent 工具调用步骤
+    AGENT_THINKING_DONE = "agent_thinking_done"  # Agent 推理轮次结束（含耗时）
+    AGENT_CONTENT_DELTA = "agent_content_delta"  # Agent 最终回答 token 流式输出
 
 
 @dataclass

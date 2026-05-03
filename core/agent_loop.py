@@ -6,6 +6,7 @@ Agent循环引擎
 """
 import uuid
 import json
+import time
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
@@ -32,7 +33,9 @@ class AgentLoop:
     - 自动记录每轮的 user/assistant 消息
     """
 
-    def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 2):
+    def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 2,
+                 on_thinking: Optional[Any] = None, on_tool_step: Optional[Any] = None,
+                 on_thinking_done: Optional[Any] = None, on_content_token: Optional[Any] = None):
         """
         初始化Agent循环引擎
 
@@ -40,12 +43,20 @@ class AgentLoop:
             max_iterations: 最大迭代次数（防止无限循环）
             short_term_memory: 短期记忆管理器（可选）
             max_tool_calls: 最大 Skill 调用次数（硬性限制，默认2次）
+            on_thinking: thinking 内容回调（可选）
+            on_tool_step: 工具步骤回调（可选）
+            on_thinking_done: 推理轮次结束回调（可选）
+            on_content_token: 最终回答 token 流式回调（可选）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
         self.state_manager = StateManager()
         self.short_term_memory = short_term_memory
         self.tool_call_count = 0
+        self.on_thinking = on_thinking
+        self.on_tool_step = on_tool_step
+        self.on_thinking_done = on_thinking_done
+        self.on_content_token = on_content_token
 
         # Harness Engineering: 约束验证器和自动修复器
         self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
@@ -104,13 +115,42 @@ class AgentLoop:
                 logger.debug(f"=== Iteration {state.iteration}/{state.max_iterations} ===")
 
                 try:
-                    # 调用 LLM（可能返回 tool_calls）
-                    llm_response: LLMResponse = await agent.llm_client.chat_with_tools(
-                        messages=messages,
-                        tools=tools_openai_format,
-                        tool_choice="auto",
-                        temperature=agent.config.get('temperature', 0.7)
-                    )
+                    # 调用 LLM（流式或非流式）
+                    use_streaming = bool(self.on_thinking or self.on_content_token)
+
+                    if use_streaming:
+                        # 流式模式：逐 token 回调，动态路由到 thinking 或 content
+                        _has_tools = [False]  # 用 list 以在闭包中可变
+
+                        def _route_token(token: str):
+                            if _has_tools[0]:
+                                # 已检测到 tool_calls → token 是 thinking 内容
+                                if self.on_thinking:
+                                    self.on_thinking(content=token, iteration=state.iteration)
+                            else:
+                                # 尚未检测到 tool_calls → token 是最终回答
+                                if self.on_content_token:
+                                    self.on_content_token(token)
+
+                        def _on_stream_tools_detected():
+                            _has_tools[0] = True
+
+                        llm_response: LLMResponse = await agent.llm_client.chat_with_tools_stream(
+                            messages=messages,
+                            tools=tools_openai_format,
+                            tool_choice="auto",
+                            temperature=agent.config.get('temperature', 0.7),
+                            on_content_token=_route_token,
+                            on_tools_detected=_on_stream_tools_detected
+                        )
+                    else:
+                        # 非流式模式
+                        llm_response: LLMResponse = await agent.llm_client.chat_with_tools(
+                            messages=messages,
+                            tools=tools_openai_format,
+                            tool_choice="auto",
+                            temperature=agent.config.get('temperature', 0.7)
+                        )
 
                     # 记录中间结果
                     state.add_intermediate_result({
@@ -136,6 +176,16 @@ class AgentLoop:
                                 'content': f'已完成 {self.max_tool_calls} 次信息检索。请基于已获取的信息提供最终答复。'
                             })
                             continue
+
+                        # 推理开始：计时 + 回调 thinking 内容
+                        think_start = time.monotonic()
+                        tool_names = [tc.name for tc in llm_response.tool_calls]
+                        thinking_text = llm_response.content or f"正在分析问题，准备调用 {', '.join(tool_names)}..."
+                        if self.on_thinking:
+                            self.on_thinking(
+                                content=thinking_text,
+                                iteration=state.iteration
+                            )
 
                         logger.info(f"LLM requested {len(llm_response.tool_calls)} tool calls (当前已调用 {self.tool_call_count}/{self.max_tool_calls})")
 
@@ -173,6 +223,17 @@ class AgentLoop:
                                 arguments=tool_call.arguments
                             )
 
+                            # 回调工具步骤
+                            if self.on_tool_step:
+                                result_str = str(tool_result)
+                                self.on_tool_step(
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments,
+                                    result=result_str[:500],
+                                    iteration=state.iteration,
+                                    success="error" not in result_str.lower()
+                                )
+
                             # 添加结果消息
                             messages.append(
                                 agent.llm_client.create_tool_message(
@@ -190,6 +251,14 @@ class AgentLoop:
                                     role="tool",
                                     content=f"{tool_call.name}: {result_summary}"
                                 )
+
+                        # 推理轮次结束：回调耗时
+                        elapsed = time.monotonic() - think_start
+                        if self.on_thinking_done:
+                            self.on_thinking_done(
+                                iteration=state.iteration,
+                                elapsed_seconds=round(elapsed, 1)
+                            )
 
                         # 继续下一轮循环
                         continue

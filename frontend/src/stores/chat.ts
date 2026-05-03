@@ -40,6 +40,7 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: new Date().toISOString(),
       isStreaming: true,
       agentEvents: [],
+      thinkingBlocks: [],
       suggestions: [],
       disclaimer: '',
     }
@@ -94,6 +95,53 @@ export const useChatStore = defineStore('chat', () => {
             })
           }
         },
+        onAgentThinking(data) {
+          const msg = messages.value.find((m) => m.id === assistantMsg.id)
+          if (msg) {
+            if (!msg.thinkingBlocks) msg.thinkingBlocks = []
+            msg.thinkingBlocks.push({
+              id: `think-${Date.now()}`,
+              agentId: data.source_agent || 'unknown',
+              thinking: data.data?.content || '',
+              iteration: data.data?.iteration || 0,
+              toolSteps: [],
+              isCollapsed: false,
+            })
+          }
+        },
+        onAgentToolStep(data) {
+          const msg = messages.value.find((m) => m.id === assistantMsg.id)
+          if (msg?.thinkingBlocks && msg.thinkingBlocks.length > 0) {
+            const d = data.data || data
+            const iteration = d.iteration || 0
+            const block = msg.thinkingBlocks.findLast(b => b.iteration === iteration && b.agentId === (data.source_agent || 'unknown'))
+              || msg.thinkingBlocks[msg.thinkingBlocks.length - 1]
+            block.toolSteps.push({
+              toolName: d.tool_name || 'unknown',
+              arguments: d.arguments || {},
+              result: d.result || '',
+              success: d.success !== false,
+            })
+          }
+        },
+        onAgentThinkingDone(data) {
+          const msg = messages.value.find((m) => m.id === assistantMsg.id)
+          if (msg?.thinkingBlocks && msg.thinkingBlocks.length > 0) {
+            const d = data.data || data
+            const iteration = d.iteration || 0
+            const block = msg.thinkingBlocks.findLast(b => b.iteration === iteration && b.agentId === (data.source_agent || 'unknown'))
+              || msg.thinkingBlocks[msg.thinkingBlocks.length - 1]
+            block.elapsedSeconds = d.elapsed_seconds
+            block.isCollapsed = true
+          }
+        },
+        onAgentContentDelta(data) {
+          const msg = messages.value.find((m) => m.id === assistantMsg.id)
+          if (msg) {
+            const token = data.data?.token || ''
+            msg.content = (msg.content || '') + token
+          }
+        },
         onSuggestions(data) {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) msg.suggestions = data.suggestions
@@ -108,6 +156,10 @@ export const useChatStore = defineStore('chat', () => {
               swarmEnabled: data.swarm_enabled,
               agentsInvolved: data.agents_involved || [],
               totalTime: data.total_time,
+            }
+            // 兜底：折叠所有 thinking 块
+            if (msg.thinkingBlocks) {
+              msg.thinkingBlocks.forEach(b => { b.isCollapsed = true })
             }
           }
           isStreaming.value = false

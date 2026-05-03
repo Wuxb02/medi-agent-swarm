@@ -168,12 +168,21 @@ class SwarmCoordinator:
 
             logger.info(f"Route: Single Agent ({agent_id})")
             mode = "single_agent"
+
+            # 注入 thinking 回调（单 Agent 模式直接通过 event_callback 推送）
+            if self.event_callback and hasattr(agent, 'set_on_thinking'):
+                self._inject_thinking_callbacks(agent, lambda event: self.event_callback(event))
+
             result = await agent.process({
                 'question': question,
                 'context': enhanced_context,
                 'session_id': session_id
             })
             final_answer = result.get('answer', '')
+
+            # 清理 thinking 回调
+            if hasattr(agent, 'set_on_thinking'):
+                self._cleanup_thinking_callbacks(agent)
 
             result.update({
                 'swarm_enabled': False,
@@ -229,12 +238,20 @@ class SwarmCoordinator:
                 logger.info("Swarm disabled, fallback to ConsultationAgent")
                 mode = "disabled_swarm"
 
+            # 注入 thinking 回调
+            if self.event_callback and hasattr(self.consultation_agent, 'set_on_thinking'):
+                self._inject_thinking_callbacks(self.consultation_agent, lambda event: self.event_callback(event))
+
             result = await self.consultation_agent.process({
                 'question': question,
                 'context': enhanced_context,
                 'session_id': session_id
             })
             final_answer = result.get('answer', '')
+
+            # 清理 thinking 回调
+            if hasattr(self.consultation_agent, 'set_on_thinking'):
+                self._cleanup_thinking_callbacks(self.consultation_agent)
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id
@@ -297,9 +314,10 @@ class SwarmCoordinator:
         if self.event_callback:
             shared_context.on_event_callback = self.event_callback
 
-        # 附加 SharedContext 到所有 Worker
+        # 附加 SharedContext 到所有 Worker + 注入 thinking 回调
         for worker in self.worker_pool:
             worker.attach_shared_context(shared_context)
+            self._inject_thinking_callbacks(worker, shared_context.publish_event)
 
         # 发布 Swarm 启动事件
         shared_context.publish_event(Event(
@@ -478,6 +496,57 @@ class SwarmCoordinator:
             logger.info(f"Saved to long-term memory (session={session_id})")
         except Exception as e:
             logger.error(f"Background LTM save failed (session={session_id}): {e}")
+
+    def _inject_thinking_callbacks(self, worker, publish_fn):
+        """为 Worker Agent 注入 thinking/tool_step/thinking_done 回调"""
+        agent_id = worker.agent_id
+
+        def _on_thinking(content, iteration):
+            publish_fn(Event(
+                type=EventType.AGENT_THINKING,
+                source_agent=agent_id,
+                data={"content": content, "iteration": iteration}
+            ))
+
+        def _on_tool_step(tool_name, arguments, result, iteration, success):
+            publish_fn(Event(
+                type=EventType.AGENT_TOOL_STEP,
+                source_agent=agent_id,
+                data={
+                    "tool_name": tool_name,
+                    "arguments": {k: str(v)[:100] for k, v in arguments.items()} if isinstance(arguments, dict) else str(arguments)[:100],
+                    "result": result,
+                    "iteration": iteration,
+                    "success": success
+                }
+            ))
+
+        def _on_thinking_done(iteration, elapsed_seconds):
+            publish_fn(Event(
+                type=EventType.AGENT_THINKING_DONE,
+                source_agent=agent_id,
+                data={"iteration": iteration, "elapsed_seconds": elapsed_seconds}
+            ))
+
+        worker.set_on_thinking(_on_thinking)
+        worker.set_on_tool_step(_on_tool_step)
+        worker.set_on_thinking_done(_on_thinking_done)
+
+        def _on_content_token(token):
+            publish_fn(Event(
+                type=EventType.AGENT_CONTENT_DELTA,
+                source_agent=agent_id,
+                data={"token": token}
+            ))
+
+        worker.set_on_content_token(_on_content_token)
+
+    def _cleanup_thinking_callbacks(self, worker):
+        """清理 Worker Agent 的 thinking 回调"""
+        worker.set_on_thinking(None)
+        worker.set_on_tool_step(None)
+        worker.set_on_thinking_done(None)
+        worker.set_on_content_token(None)
 
     def _extract_suggestions(self, final_answer: str) -> List[str]:
         """从最终答案中提取建议（简化实现）"""

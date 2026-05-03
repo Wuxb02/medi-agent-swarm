@@ -9,6 +9,7 @@ export interface ChatMessage {
   suggestions?: string[]
   disclaimer?: string
   agentEvents?: AgentEvent[]
+  thinkingBlocks?: ThinkingBlock[]
   metadata?: {
     swarmEnabled: boolean
     agentsInvolved: string[]
@@ -27,6 +28,23 @@ export interface AgentEvent {
   toolName?: string
   timestamp: string
   data?: Record<string, any>
+}
+
+export interface ToolStep {
+  toolName: string
+  arguments: Record<string, any>
+  result: string
+  success: boolean
+}
+
+export interface ThinkingBlock {
+  id: string
+  agentId: string
+  thinking: string
+  iteration: number
+  toolSteps: ToolStep[]
+  elapsedSeconds?: number
+  isCollapsed: boolean
 }
 
 export interface SSEEvent {

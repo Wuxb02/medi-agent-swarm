@@ -207,6 +207,117 @@ class LLMClient:
             logger.error(f"LLM call with tools failed: {e}")
             raise
 
+    async def chat_with_tools_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        on_content_token: Optional[Any] = None,
+        on_tools_detected: Optional[Any] = None,
+        **kwargs
+    ) -> LLMResponse:
+        """
+        流式聊天接口，逐 token 回调
+
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表
+            tool_choice: 工具选择策略
+            on_content_token: 内容 token 回调 fn(token: str)
+            on_tools_detected: 首次检测到 tool_calls 时的回调 fn()
+
+        Returns:
+            LLMResponse 对象（与非流式兼容）
+        """
+        try:
+            temperature = temperature or self.temperature
+            max_tokens = max_tokens or self.max_tokens
+
+            request_params = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+                **kwargs
+            }
+
+            if tools:
+                request_params["tools"] = tools
+                if tool_choice != "auto":
+                    request_params["tool_choice"] = tool_choice
+
+            stream = await self.client.chat.completions.create(**request_params)
+
+            content_parts: List[str] = []
+            tool_call_accum: Dict[int, Dict[str, Any]] = {}
+            finish_reason = "stop"
+            tools_notified = False
+
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+                delta = choice.delta
+
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+                # 累积文本内容
+                if delta.content:
+                    content_parts.append(delta.content)
+                    if on_content_token:
+                        on_content_token(delta.content)
+
+                # 累积 tool_calls
+                if delta.tool_calls:
+                    if not tools_notified and on_tools_detected:
+                        on_tools_detected()
+                        tools_notified = True
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_call_accum:
+                            tool_call_accum[idx] = {"id": "", "name": "", "arguments": ""}
+
+                        entry = tool_call_accum[idx]
+                        if tc_delta.id:
+                            entry["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                entry["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                entry["arguments"] += tc_delta.function.arguments
+
+            # 解析累积的 tool_calls
+            parsed_tool_calls = []
+            for idx in sorted(tool_call_accum.keys()):
+                entry = tool_call_accum[idx]
+                try:
+                    args = json.loads(entry["arguments"]) if entry["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {}
+                parsed_tool_calls.append(ToolCall(
+                    id=entry["id"],
+                    name=entry["name"],
+                    arguments=args
+                ))
+
+            content = "".join(content_parts) or None
+
+            return LLMResponse(
+                content=content,
+                tool_calls=parsed_tool_calls,
+                finish_reason=finish_reason
+            )
+
+        except Exception as e:
+            logger.error(f"Streaming LLM call failed: {e}")
+            raise
+
     def create_tool_message(
         self,
         tool_call_id: str,

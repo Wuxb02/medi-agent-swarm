@@ -5,6 +5,7 @@ import type { ChatMessage } from '../../types'
 import AgentTimeline from '../agents/AgentTimeline.vue'
 import SuggestionChips from './SuggestionChips.vue'
 import DisclaimerBanner from './DisclaimerBanner.vue'
+import ThinkingBlock from './ThinkingBlock.vue'
 
 const props = defineProps<{
   message: ChatMessage
@@ -51,9 +52,24 @@ const isUser = computed(() => props.message.role === 'user')
                 <span class="w-1 h-1 bg-slate-400 rounded-full animate-bounce" style="animation-delay:300ms" />
               </span>
             </div>
+
+            <!-- Thinking 内容块（位于思考中下方） -->
+            <div v-if="message.thinkingBlocks && message.thinkingBlocks.length > 0" class="space-y-2 mt-2">
+              <ThinkingBlock
+                v-for="block in message.thinkingBlocks"
+                :key="block.id"
+                :thinking="block.thinking"
+                :agent-id="block.agentId"
+                :iteration="block.iteration"
+                :tool-steps="block.toolSteps"
+                :elapsed-seconds="block.elapsedSeconds"
+                :is-collapsed="block.isCollapsed"
+              />
+            </div>
+
             <div
-              v-else
-              class="markdown-body text-sm text-slate-700 leading-relaxed"
+              v-if="message.content"
+              class="markdown-body text-sm text-slate-700 leading-relaxed mt-2"
               v-html="renderedContent"
             />
 
