@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-MediZJ Agent Swarm — 基于 Skills-Agent 双层架构的多智能体医疗助手系统。采用去中心化 Swarm 模式协调多个 AI Agent，提供医疗咨询、症状诊断和研究支持。
+MediZJ Agent Swarm — 基于 Skill + Tool 双层架构的多智能体医疗助手系统。采用去中心化 Swarm 模式协调多个 AI Agent，提供医疗咨询、症状诊断和研究支持。
 
 ## 常用命令
 
@@ -50,9 +50,11 @@ python examples/test_all.py
 | 模块 | 职责 |
 |------|------|
 | `core/llm_client.py` | OpenAI 兼容的异步 LLM 客户端 |
-| `core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证和自动修复 |
-| `core/skill_registry.py` | 技能注册 + OpenAI function calling 格式转换 |
-| `core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能 |
+| `core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证、自动修复和动态工具刷新 |
+| `core/skill_registry.py` | 双层注册：Skill（能力包）+ Tool（底层函数），兼容模式自动检测 |
+| `core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能，提取 SKILL.md 正文作为指令 |
+| `core/skill_models.py` | SkillDefinition 数据模型 |
+| `core/base_tools.py` | 基础工具工厂（activate_skill） |
 | `agents/base_agent.py` | Agent 抽象基类 |
 | `swarm/swarm_coordinator.py` | 顶层协调器，路由决策 + 并行调度（90s 超时） |
 | `swarm/lead_agent.py` | 任务分解 + 结果综合 |
@@ -72,9 +74,15 @@ python examples/test_all.py
 - **共享黑板**：`SharedContext` 作为去中心化通信介质
 - **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentLoop
 
-### Claude Code Skills（9 个）
+### Skills（9 个）— Skill + Tool 双层架构
 
-位于 `.claude/skills/` 下，每个包含 `SKILL.md`（YAML 元数据）和 `script/`（Python 实现）：
+位于 `.claude/skills/` 下，每个 Skill 是一个能力包：
+
+- `SKILL.md`：YAML frontmatter（name、description、tools 声明）+ Markdown 正文（Skill 指令，激活时注入 system prompt）
+- `script/`：Python 实现（工具函数）
+
+调用流程：LLM 从 system prompt 看到所有 Skill 描述 → `activate_skill("name")` → 指令注入 + 工具加载 → 执行任务
+
 `search-knowledge`、`assess-risk`、`analyze-symptoms`、`recommend-lifestyle`、`disease-code`、`clinical-guideline`、`deep-research`、`search-history`、`search-similar-cases`
 
 ## 配置

@@ -1,17 +1,17 @@
 # MediZJ多智能体医疗助手
 
-基于 Skills-Agent 两层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
+基于 Skill + Tool 双层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
 ![alt text](assets/image.png)
 
 ## 📋 项目概述
 
-本项目采用创新的 **Skills-Agent 两层架构**，通过9个自包含的原子 Skills 和3个专业 Agent 协同工作，提供智能、专业的医疗服务。支持 **CLI 交互**和 **Web 界面**两种使用方式。
+本项目采用创新的 **Skill + Tool 双层架构**，通过9个原子 Skills（能力包：指令+工具）和3个专业 Agent 协同工作，提供智能、专业的医疗服务。支持 **CLI 交互**和 **Web 界面**两种使用方式。
 
 ### 🎯 核心特性
 
 - **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
 - **📡 流式响应**: 实时推送 Agent 协作过程，可视化多 Agent 并行执行 ✅
-- **🔧 Skills 直达架构**: 9个原子 Skills 自包含，直接转换为 OpenAI function calling 格式 ✅
+- **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
 - **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** + **LLM 语义摘要压缩** ✅
@@ -20,42 +20,82 @@
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 
-## 🎯 Skills 直达架构
+## 🎯 Skill + Tool 双层架构
 
 ### 架构设计
 
 ```
-Skills (函数) → 直接转换 → OpenAI Format → LLM 调用
-         ↓
-    Milvus/业务逻辑
+两层模型：
+  Skill    ── 能力包（name + description + instructions 指令正文 + 声明的 tools）
+  Tool     ── 底层可调用函数，属于某个 Skill
+
+启动时：
+  所有 Skill 的 name + description 写入 system prompt（LLM 启动即知可用能力）
+  base tools = [activate_skill]（仅需 1 个基础工具）
+
+运行时：
+  LLM 从 system prompt 知道有哪些 Skill
+  → 调用 activate_skill("search-knowledge")
+  → system prompt 追加该 Skill 的 instructions 指令正文
+  → tools 列表更新为该 Skill 声明的工具
+  → LLM 使用 Skill 的工具执行任务
+  → 给出最终回答
 ```
 
 ### 关键特性
 
-1. **Skills 直达 LLM**
-   - Skill 函数直接转换为 OpenAI function calling 格式
-   - SkillRegistry 统一管理：注册、执行、格式转换
+1. **Skill 与 Tool 分层**
+   - Skill 是能力包：包含描述、指令正文（SKILL.md body）、声明的工具列表
+   - Tool 是底层函数：从 Skill 的 `script/` 目录加载，仅在 Skill 激活时可用
+   - `activate_skill` 是唯一的基础工具，始终可用
 
-2. **简化的注册流程**
-   ```python
-   skill → OpenAI Format
-   ```
+2. **指令注入机制**
+   - SKILL.md 的 YAML frontmatter 提供 `name`、`description`、`tools` 字段
+   - SKILL.md 的 Markdown 正文作为 Skill 指令，激活时注入 system prompt
+   - Agent 获得 Skill 的上下文知识，而非仅获得工具
 
-3. **Agent 灵活选择**
-   - 每个 Agent 注册全部7个 Skills
-   - Agent Loop 根据任务自主选择合适的 Skills
-   - 一个 Agent 可以跨领域调用 Skills
+3. **动态工具加载**
+   - 未激活任何 Skill 时，LLM 只有 `activate_skill` 一个工具
+   - 激活 Skill 后，该 Skill 声明的工具动态加载到工具列表
+   - 激活新 Skill 自动停用前一个，避免工具膨胀
 
-4. **用户友好入口**
-   - 7个原子 Skills：快速查询，立即响应
-   - 1个复杂 Skill：触发 Swarm 协作
-   - 用户无需理解 Agent 架构
+4. **兼容模式自动检测**
+   - 全部 9 个 Skill 都有 `tools` 声明 → 启用双层模式
+   - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（10条消息）
    - 长期记忆：Mem0 跨会话记忆
    - **上下文利用率 100%**：追问能正确理解历史对话
    - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
+
+### SKILL.md 格式
+
+```yaml
+---
+name: search-knowledge
+description: 搜索医学知识库，通过语义检索查找相关医疗信息
+tools:
+  - search_knowledge
+---
+
+# 搜索医学知识
+[正文内容作为 Skill 指令，激活时注入 system prompt]
+...
+```
+
+### 数据模型
+
+```python
+@dataclass
+class SkillDefinition:
+    name: str                    # "deep-research"
+    description: str             # YAML frontmatter description
+    instructions: str            # SKILL.md body 正文
+    tool_names: List[str]        # YAML tools 列表
+    tool_functions: Dict[str, Callable]  # 实际加载的函数对象
+    migrated: bool               # 是否有 tools 声明
+```
 
 
 ## 🚀 从零开始运行
@@ -174,11 +214,13 @@ medix-agent-swarm/
 │   └── skill_registry_mixin.py        # Skill 注册混入
 │
 ├── core/                              # 核心引擎
-│   ├── agent_loop.py                  # Agent Loop（集成约束验证）
+│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新）
 │   ├── llm_client.py                  # LLM 客户端
 │   ├── prompt_loader.py               # Jinja2 Prompt 模板加载器
-│   ├── skill_loader.py                # 动态加载 Skills
-│   ├── skill_registry.py              # Skill 注册表（直接转 OpenAI format）
+│   ├── skill_loader.py                # 动态加载 Skills（支持多函数加载、指令提取）
+│   ├── skill_registry.py              # Skill 注册表（双层注册、compat_mode 自动检测）
+│   ├── skill_models.py                # SkillDefinition 数据模型
+│   ├── base_tools.py                  # 基础工具工厂（activate_skill）
 │   └── state_manager.py               # 状态管理
 │
 ├── prompt/                            # Prompt 模板（Jinja2，集中管理）
@@ -250,10 +292,10 @@ medix-agent-swarm/
 
 **架构说明**：
 - ✅ **Web + CLI 双入口**：`api_main.py`（Web）/ `main.py`（CLI）
-- ✅ **直达架构**：Skills → OpenAI Format
-- ✅ **Skills 自包含**：每个 Skill 在 `script/` 目录下实现，直接调用知识库
-- ✅ **动态加载**：`skill_loader.py` 扫描 `.claude/skills/` 目录动态加载
-- ✅ **SkillRegistry**：统一管理 Skill 注册、执行、格式转换
+- ✅ **Skill + Tool 双层架构**：Skill（能力包：指令+工具）与 Tool（底层函数）明确分层
+- ✅ **指令注入**：SKILL.md 正文作为 Skill 指令，激活时注入 system prompt
+- ✅ **动态工具加载**：`activate_skill` 激活后，该 Skill 的工具才可用
+- ✅ **兼容模式自动检测**：全部 Skill 迁移后自动启用双层模式
 - ✅ **统一配置**：使用项目根目录 `.env` 文件管理环境变量
 - ✅ **记忆分离**：Agent 身份文件和会话总结分别存储在 `memory/agents/` 和 `memory/swarm/`
 
@@ -299,12 +341,13 @@ medix-agent-swarm/
 
 ### Skills 架构特点
 
-- ✅ **直达架构**: Skills → OpenAI Format
-- ✅ **Skills 自包含**: 直接调用 Milvus 或内置逻辑
-- ✅ **Agent 灵活性**: 每个 Agent 注册全部9个 Skills，根据任务自主选择
-- ✅ **SkillRegistry**: 统一管理注册、执行、格式转换
+- ✅ **双层架构**: Skill（能力包）→ Tool（底层函数），activate_skill 激活后使用
+- ✅ **指令注入**: SKILL.md 正文作为 Skill 指令，激活时自动注入 system prompt
+- ✅ **动态工具**: 激活 Skill 后才加载其工具，避免工具列表膨胀
+- ✅ **Agent 灵活性**: 每个 Agent 注册全部9个 Skills，通过 activate_skill 自主选择
+- ✅ **SkillRegistry**: 统一管理双层注册、执行、格式转换、兼容模式检测
 - ✅ **统一知识库**: 医学知识统一存储在 Milvus 向量数据库，支持语义检索
-- ✅ **易于扩展**: 添加新 Skill 或新知识无需修改 Agent 代码
+- ✅ **易于扩展**: 添加新 Skill 只需在 `.claude/skills/` 下创建目录，无需修改 Agent 代码
 
 ## 🌐 Web 界面
 
@@ -634,14 +677,21 @@ python knowledge/scripts/deduplicate.py
      └───────────────────────────────┘
 ```
 
-### Skills 直达架构
+### Skill + Tool 双层架构流程
 
 ```
+启动时：
+  所有 Skill 的 name + description → system prompt（LLM 启动即知可用能力）
+  base tools = [activate_skill]
+
+运行时：
 用户问题
    ↓
-【原子查询】→ 直接调用 Skills → Milvus/业务逻辑
+【原子查询】→ activate_skill("xxx")
    │                ↓
-   │         OpenAI Format
+   │    Skill 指令注入 system prompt + 工具加载
+   │                ↓
+   │         LLM 使用工具执行 → Milvus/业务逻辑
    │
    └─【复杂问题】
           ↓
@@ -654,7 +704,7 @@ python knowledge/scripts/deduplicate.py
     ┌─────┴─────┬────────┐
     ↓           ↓        ↓
 ConsultAgent DiagAgent ResearchAgent
-（SkillRegistry）（直达 LLM）（并行执行）
+（各 Agent 独立 activate_skill + 执行）（并行）
     │           │        │
     └───────────┴────────┘
           ↓
@@ -664,11 +714,12 @@ ConsultAgent DiagAgent ResearchAgent
 ```
 
 **核心原理**：
-- ✅ Skills → OpenAI Format
-- ✅ SkillRegistry 统一管理（注册、执行、转换）
-- ✅ Agent 注册所有 Skills，根据任务自主选择
-- ✅ Agent 通过"信息素"（SharedContext）间接通信
-- ✅ 去中心化协作，整体能力涌现
+
+- ✅ Skill = 能力包（description + instructions + tools），Tool = 底层函数
+- ✅ `activate_skill` 是唯一基础工具，激活 Skill 后注入指令 + 加载工具
+- ✅ SkillRegistry 双层管理：Skill 层注册能力包，Tool 层注册函数
+- ✅ 兼容模式自动检测：全部 Skill 有 `tools` 声明 → 双层模式，否则 → 平铺模式
+- ✅ Agent 通过"信息素"（SharedContext）间接通信，去中心化协作
 
 ### Agent Swarm 群体智能
 
