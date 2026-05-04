@@ -6,7 +6,12 @@
 - 01-09: 生活方式建议
 - 10-19: ICD-10疾病编码
 - 20-29: 临床指南
+
+用法：
+  python knowledge/scripts/import_hardcoded_data.py          # 追加导入
+  python knowledge/scripts/import_hardcoded_data.py --clean  # 清空后重新导入
 """
+import hashlib
 import sys
 from pathlib import Path
 import re
@@ -76,7 +81,8 @@ def load_documents_from_directory(doc_dir: Path) -> list:
                     "type": doc_type,
                     "disease": disease_name,
                     "source": source,
-                    "filename": txt_file.name
+                    "filename": txt_file.name,
+                    "content_hash": hashlib.md5(content.encode("utf-8")).hexdigest(),
                 }
             }
 
@@ -97,6 +103,8 @@ def extract_documents_by_type(documents: list, doc_type: str) -> list:
 
 def main():
     """主函数：加载文档并导入到 Milvus"""
+    clean = "--clean" in sys.argv
+
     logger.info("=" * 70)
     logger.info("开始导入医学知识文档到 Milvus 知识库")
     logger.info("=" * 70)
@@ -131,6 +139,19 @@ def main():
 
     # 创建知识库实例
     kb = MedicalKnowledgeBase()
+
+    # 清空旧数据
+    if clean:
+        logger.info("\n🗑️  清空旧数据...")
+        kb.delete_collection()
+        # 重新创建 collection
+        kb.milvus_client.create_collection(
+            collection_name=kb.collection_name,
+            dimension=kb.embedding_dim,
+            metric_type="COSINE",
+            auto_id=True
+        )
+        logger.info("已清空并重建 collection")
 
     # 导入数据
     logger.info("\n💾 导入到 Milvus...")

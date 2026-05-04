@@ -15,7 +15,7 @@
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
 - **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** + **LLM 语义摘要压缩** ✅
-- **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）✅
+- **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
@@ -146,7 +146,7 @@ medix-agent-swarm/
 │
 ├── frontend/                          # Vue 3 前端项目
 │   ├── src/
-│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView
+│   │   ├── views/                     # 页面：ChatView, KnowledgeView（搜索/文档管理/上传）, SessionsView, DashboardView
 │   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/
 │   │   ├── stores/                    # Pinia 状态管理
 │   │   ├── api/                       # API 调用层
@@ -228,9 +228,11 @@ medix-agent-swarm/
 │   └── auto_fixer.py                  # 自动修复器
 │
 ├── knowledge/                         # Milvus 知识库
-│   ├── milvus_kb.py                   # 知识库封装
+│   ├── milvus_kb.py                   # 知识库封装（CRUD + 语义搜索）
 │   ├── data/documents/                # 医学知识文档
-│   └── scripts/import_hardcoded_data.py
+│   └── scripts/
+│       ├── import_hardcoded_data.py   # 批量导入文档
+│       └── deduplicate.py             # 数据去重脚本
 │
 ├── research/                          # DeepResearch 模块
 │   ├── deep_research_workflow.py
@@ -311,7 +313,7 @@ medix-agent-swarm/
 | 页面 | 功能 | 路由 |
 |------|------|------|
 | **智能问答** | 聊天式问答，实时展示 Agent 协作过程，Markdown 渲染 | `/chat` |
-| **知识库** | 医学知识语义搜索，按类型过滤（生活方式/症状/编码/指南） | `/knowledge` |
+| **知识库** | 医学知识语义搜索、文档管理（增删改查）、文件上传、chunk 查看 | `/knowledge` |
 | **历史会话** | 会话列表查看、恢复、删除 | `/sessions` |
 | **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
 
@@ -340,8 +342,13 @@ SharedContext.on_event_callback → 事件推送
 | POST | `/api/chat` | 非流式问答 |
 | POST | `/api/chat/stream` | 流式问答（换行分隔 JSON） |
 | GET | `/api/chat/history/{session_id}` | 获取会话历史 |
-| POST | `/api/knowledge/search` | 知识库搜索 |
+| POST | `/api/knowledge/search` | 知识库搜索（去重，返回完整文档） |
 | GET | `/api/knowledge/types` | 知识库类型列表 |
+| GET | `/api/knowledge/documents` | 文档列表 |
+| GET | `/api/knowledge/documents/{doc_id}/chunks` | 查看文档分块 |
+| DELETE | `/api/knowledge/documents/{doc_id}` | 删除文档 |
+| POST | `/api/knowledge/upload` | 上传文件（.txt） |
+| PUT | `/api/knowledge/documents/{doc_id}` | 更新文档内容 |
 | GET | `/api/sessions` | 会话列表 |
 | GET | `/api/sessions/{session_id}` | 会话详情 |
 | DELETE | `/api/sessions/{session_id}` | 删除会话 |
@@ -597,6 +604,22 @@ disclaimer = PromptLoader.render(
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
 - **数据存储**: `knowledge/data/documents/` (txt 文档)
 - **初始化**: `python knowledge/scripts/import_hardcoded_data.py`
+
+### 知识库管理功能
+
+Web 界面的知识库页面提供三个 Tab：
+
+- **搜索**: 语义搜索，按 `doc_id` 去重，返回完整文档内容
+- **文档管理**: 查看所有文档列表、每个文档的 chunk 详情、编辑和删除文档
+- **上传文件**: 拖拽上传 `.txt` 文件，选择文档类型和元数据
+
+### 数据去重
+
+如因多次导入导致数据重复，运行去重脚本：
+
+```bash
+python knowledge/scripts/deduplicate.py
+```
 
 
 ## 🤝 技术架构

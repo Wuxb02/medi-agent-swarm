@@ -196,12 +196,12 @@ class MedicalKnowledgeBase:
         if filter_type:
             filter_expr = f'metadata like "%\\"type\\": \\"{filter_type}\\"%"'
 
-        # 检索
+        # 检索（多取一些以支持去重）
         try:
             results = self.milvus_client.search(
                 collection_name=self.collection_name,
                 data=[query_vector.tolist()],
-                limit=top_k,
+                limit=top_k * 3,
                 filter=filter_expr,
                 output_fields=["content", "metadata"]
             )
@@ -209,23 +209,38 @@ class MedicalKnowledgeBase:
             logger.error(f"Search failed: {e}")
             return []
 
-        # 格式化结果
-        documents = []
+        # 格式化结果并按 doc_id 去重（保留最高分）
+        seen_docs: Dict[str, Dict[str, Any]] = {}
         for hits in results:
             for hit in hits:
                 try:
-                    documents.append({
-                        "id": hit["id"],
-                        "content": hit["entity"]["content"],
-                        "metadata": json.loads(hit["entity"]["metadata"]),
-                        "score": 1 - hit["distance"]  # 转换为相似度分数
-                    })
+                    meta = json.loads(hit["entity"]["metadata"])
+                    doc_id = meta.get("doc_id", str(hit["id"]))
+                    score = 1 - hit["distance"]
+                    if doc_id not in seen_docs or score > seen_docs[doc_id]["score"]:
+                        seen_docs[doc_id] = {
+                            "id": hit["id"],
+                            "content": hit["entity"]["content"],
+                            "metadata": meta,
+                            "score": score
+                        }
                 except Exception as e:
                     logger.warning(f"Failed to parse result: {e}")
                     continue
 
-        logger.debug(f"Found {len(documents)} documents")
-        return documents
+        # 按分数排序，取 top_k
+        top_docs = sorted(seen_docs.values(), key=lambda d: d["score"], reverse=True)[:top_k]
+
+        # 还原完整文档内容（拼接所有 chunk）
+        for doc in top_docs:
+            doc_id = doc["metadata"].get("doc_id")
+            if doc_id:
+                full_chunks = self.get_document_chunks(doc_id)
+                if full_chunks:
+                    doc["content"] = "\n".join(c["content"] for c in full_chunks)
+
+        logger.debug(f"Found {len(top_docs)} unique documents")
+        return top_docs
 
     def delete_collection(self):
         """删除 collection（用于测试）"""
@@ -242,3 +257,124 @@ class MedicalKnowledgeBase:
         except Exception as e:
             logger.warning(f"Failed to count documents: {e}")
             return 0
+
+    def list_documents(self) -> List[Dict[str, Any]]:
+        """列出知识库中所有去重后的文档摘要"""
+        try:
+            all_rows = self.milvus_client.query(
+                collection_name=self.collection_name,
+                filter="id >= 0",
+                output_fields=["metadata"],
+                limit=16384
+            )
+        except Exception as e:
+            logger.error(f"Failed to list documents: {e}")
+            return []
+
+        docs: Dict[str, Dict[str, Any]] = {}
+        for row in all_rows:
+            try:
+                meta = json.loads(row["metadata"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+            doc_id = meta.get("doc_id", "unknown")
+            if doc_id not in docs:
+                docs[doc_id] = {
+                    "doc_id": doc_id,
+                    "filename": meta.get("filename", ""),
+                    "type": meta.get("type", ""),
+                    "disease": meta.get("disease", ""),
+                    "source": meta.get("source", ""),
+                    "chunk_ids": set(),
+                }
+            chunk_id = meta.get("chunk_id")
+            if chunk_id is not None:
+                docs[doc_id]["chunk_ids"].add(chunk_id)
+
+        # 转换 chunk_ids set 为 chunk_count
+        result = []
+        for doc in docs.values():
+            doc["chunk_count"] = len(doc["chunk_ids"])
+            del doc["chunk_ids"]
+            result.append(doc)
+
+        return result
+
+    def document_exists_by_hash(self, content_hash: str) -> bool:
+        """根据内容 hash 检查文档是否已存在"""
+        filter_expr = f'metadata like "%\\"content_hash\\": \\"{content_hash}\\"%"'
+        try:
+            rows = self.milvus_client.query(
+                collection_name=self.collection_name,
+                filter=filter_expr,
+                output_fields=["metadata"],
+                limit=1
+            )
+            return len(rows) > 0
+        except Exception:
+            return False
+
+    def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
+        """获取指定文档的所有 chunk，按 chunk_id 排序"""
+        filter_expr = f'metadata like "%\\"doc_id\\": \\"{doc_id}\\"%"'
+        try:
+            rows = self.milvus_client.query(
+                collection_name=self.collection_name,
+                filter=filter_expr,
+                output_fields=["content", "metadata"],
+                limit=16384
+            )
+        except Exception as e:
+            logger.error(f"Failed to get chunks for {doc_id}: {e}")
+            return []
+
+        chunks = []
+        seen_chunk_ids = set()
+        for row in rows:
+            try:
+                meta = json.loads(row["metadata"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+            chunk_id = meta.get("chunk_id", 0)
+            if chunk_id in seen_chunk_ids:
+                continue
+            seen_chunk_ids.add(chunk_id)
+            chunks.append({
+                "milvus_id": row["id"],
+                "chunk_id": chunk_id,
+                "content": row["content"],
+                "total_chunks": meta.get("total_chunks", 0),
+            })
+
+        chunks.sort(key=lambda c: c["chunk_id"])
+        return chunks
+
+    def delete_document(self, doc_id: str) -> int:
+        """删除指定文档的所有 chunk，返回删除数量"""
+        chunks = self.get_document_chunks(doc_id)
+        if not chunks:
+            return 0
+
+        filter_expr = f'metadata like "%\\"doc_id\\": \\"{doc_id}\\"%"'
+        try:
+            self.milvus_client.delete(
+                collection_name=self.collection_name,
+                filter=filter_expr
+            )
+            logger.info(f"Deleted {len(chunks)} chunks for doc_id={doc_id}")
+            return len(chunks)
+        except Exception as e:
+            logger.error(f"Failed to delete document {doc_id}: {e}")
+            return 0
+
+    def update_document(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: Dict[str, Any],
+        chunk_size: int = 1024
+    ) -> int:
+        """更新文档：删除旧 chunk，重新分块插入"""
+        self.delete_document(doc_id)
+        doc = {"id": doc_id, "content": content, "metadata": metadata}
+        return self.add_documents([doc], chunk_size=chunk_size)

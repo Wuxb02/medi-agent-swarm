@@ -69,6 +69,22 @@ export interface KnowledgeItem {
   score: number
 }
 
+export interface DocumentSummary {
+  doc_id: string
+  filename: string
+  type: string
+  disease: string
+  source: string
+  chunk_count: number
+}
+
+export interface ChunkDetail {
+  milvus_id: number
+  chunk_id: number
+  content: string
+  total_chunks: number
+}
+
 export interface SessionItem {
   session_id: string
   first_question: string
