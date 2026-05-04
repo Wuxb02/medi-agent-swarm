@@ -1,6 +1,8 @@
 ---
 name: analyze-symptoms
 description: Analyze symptom patterns and potential disease associations. Use when user describes multiple symptoms and needs pattern analysis or differential diagnosis suggestions.
+tools:
+  - analyze_symptoms
 ---
 
 # Analyze Symptoms (症状分析)

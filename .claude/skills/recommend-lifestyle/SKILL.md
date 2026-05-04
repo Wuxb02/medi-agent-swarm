@@ -1,6 +1,8 @@
 ---
 name: recommend-lifestyle
 description: Provide lifestyle and medication guidance based on disease or symptoms. Use when user asks about diet, exercise, sleep advice, or basic medication guidance for specific conditions.
+tools:
+  - recommend_lifestyle
 ---
 
 # Recommend Lifestyle (生活方式建议)

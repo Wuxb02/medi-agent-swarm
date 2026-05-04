@@ -20,6 +20,7 @@ interface TimelineAgent {
 }
 
 const agentNameMap: Record<string, string> = {
+  swarm_coordinator: '汇总输出',
   lead_agent: 'LeadAgent',
   consultation_agent: '健康咨询 Agent',
   diagnostic_agent: '症状诊断 Agent',

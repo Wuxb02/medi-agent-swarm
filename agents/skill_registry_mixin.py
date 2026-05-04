@@ -1,9 +1,11 @@
 """
 统一的 Skills 注册（自动发现）
 所有 Worker Agents 共享
+支持双层架构：register_skill() 注册完整 Skill 定义
 """
 from core.skill_loader import discover_skills
 from core.skill_registry import SkillParameter
+from core.skill_models import SkillDefinition
 from pathlib import Path
 from loguru import logger
 import inspect
@@ -29,40 +31,59 @@ class SkillRegistryMixin:
 
         # 自动注册所有发现的 skills
         for skill_info in discovered:
-            function_name = skill_info["function_name"]
             metadata = skill_info["metadata"]
-            func = skill_info["function"]
+            tool_functions = skill_info.get("tool_functions", {})
+            migrated = skill_info.get("migrated", False)
 
-            # 从 metadata 获取描述
-            description = metadata.get("description", f"Skill: {skill_info['name']}")
+            # 为每个工具函数推断参数
+            tool_parameters = {}
+            for func_name, func in tool_functions.items():
+                params = self._infer_parameters_from_function(func)
+                tool_parameters[func_name] = params
 
-            # 根据函数签名自动推断参数
-            parameters = self._infer_skill_parameters(skill_info)
-
-            # 注册到 SkillRegistry
-            self.skill_registry.register(
-                name=function_name,
-                function=func,
-                description=description,
-                parameters=parameters
+            # 构建 SkillDefinition
+            skill_def = SkillDefinition(
+                name=skill_info["name"],
+                description=metadata.get("description", f"Skill: {skill_info['name']}"),
+                instructions=metadata.get("instructions", ""),
+                tool_names=list(tool_functions.keys()),
+                tool_functions=tool_functions,
+                tool_parameters=tool_parameters,
+                migrated=migrated
             )
-            logger.info(f"✅ Registered skill: {function_name}")
+
+            # 注册到 SkillRegistry（双层架构）
+            self.skill_registry.register_skill(skill_def)
+
+            # 兼容旧接口：同时平铺注册主函数（compat_mode 时使用）
+            if skill_info.get("function"):
+                function_name = skill_info["function_name"]
+                func = skill_info["function"]
+                description = metadata.get("description", f"Skill: {skill_info['name']}")
+                parameters = self._infer_parameters_from_function(func)
+
+                self.skill_registry.register(
+                    name=function_name,
+                    function=func,
+                    description=description,
+                    parameters=parameters
+                )
+
+            logger.info(f"✅ Registered skill: {skill_info['name']} "
+                        f"(tools={list(tool_functions.keys())}, migrated={migrated})")
 
         logger.info(f"Total {len(discovered)} skills registered")
 
-    def _infer_skill_parameters(self, skill_info: dict) -> list:
+    def _infer_parameters_from_function(self, func) -> list:
         """
-        从 skill 信息推断参数
+        从函数签名推断参数
 
         Args:
-            skill_info: skill 信息字典
+            func: Python 函数对象
 
         Returns:
             [SkillParameter(...), ...]
         """
-        func = skill_info["function"]
-
-        # 获取函数签名
         sig = inspect.signature(func)
         parameters = []
 

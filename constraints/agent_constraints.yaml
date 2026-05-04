@@ -10,6 +10,7 @@ agents:
 
     # 允许的工具（当前所有 Agent 都注册了全部工具，这里定义推荐使用的工具）
     allowed_tools:
+      - activate_skill
       - search_knowledge
       - recommend_lifestyle
       - assess_risk
@@ -36,6 +37,7 @@ agents:
       - multi_system_analysis
 
     allowed_tools:
+      - activate_skill
       - assess_risk
       - analyze_symptoms
       - disease_code
@@ -63,6 +65,7 @@ agents:
       - latest_information
 
     allowed_tools:
+      - activate_skill
       - clinical_guideline
       - deep_research
       - search_knowledge

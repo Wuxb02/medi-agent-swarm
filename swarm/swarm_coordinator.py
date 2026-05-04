@@ -498,19 +498,11 @@ class SwarmCoordinator:
                 logger.debug(f"{worker.agent_id}: No assigned tasks")
                 return
 
-            # 并行执行所有分配的任务
-            tasks = []
+            # 串行执行所有分配的任务（同一 worker 共享 agent 状态，不能并行）
             for subtask in assigned_tasks:
                 logger.info(f"{worker.agent_id}: Starting {subtask.type}")
                 shared_context.start_subtask(subtask.id)
-
-                task = asyncio.create_task(
-                    self._execute_single_subtask(worker, subtask, shared_context)
-                )
-                tasks.append(task)
-
-            # 等待所有任务完成
-            await asyncio.gather(*tasks, return_exceptions=True)
+                await self._execute_single_subtask(worker, subtask, shared_context)
 
         except Exception as e:
             logger.error(f"{worker.agent_id}: Error processing subtask: {e}")

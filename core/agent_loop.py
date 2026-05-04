@@ -87,6 +87,10 @@ class AgentLoop:
         # 重置计数
         self.tool_call_count = 0
 
+        # 重置 Skill 激活状态（每次 loop 开始时无激活的 Skill）
+        if hasattr(agent, 'skill_registry') and agent.skill_registry:
+            agent.skill_registry.active_skill = None
+
         # Token 用量累加器
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -295,6 +299,14 @@ class AgentLoop:
                                 )
                                 message_count += 1
 
+                        # Skill 激活后：动态刷新 tools 和 system prompt
+                        if tool_call.name == "activate_skill":
+                            tools_openai_format = agent.get_tools_for_llm()
+                            # 更新 system prompt（注入 Skill 指令正文）
+                            if messages and messages[0].get("role") == "system":
+                                messages[0]["content"] = agent.get_system_prompt()
+                            logger.info(f"🔄 Skill activated, refreshed tools and system prompt")
+
                         # 推理轮次结束：回调耗时
                         elapsed = time.monotonic() - think_start
                         if self.on_thinking_done:
@@ -377,6 +389,12 @@ class AgentLoop:
 
                 except Exception as e:
                     logger.error(f"Error in iteration {state.iteration}: {e}")
+                    # 异常时也要关闭当前迭代的 thinking dots
+                    if self.on_thinking_done:
+                        self.on_thinking_done(
+                            iteration=state.iteration,
+                            elapsed_seconds=0
+                        )
                     if state.iteration >= state.max_iterations:
                         state.mark_failed(str(e))
                         break

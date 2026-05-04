@@ -1,6 +1,8 @@
 ---
 name: search-similar-cases
 description: Search similar historical cases from long-term memory (Mem0). Use when user asks "有类似的案例吗", "之前有人问过", "相关病例", or when context from past sessions would be helpful.
+tools:
+  - search_similar_cases
 ---
 
 # Search Similar Cases (搜索相似案例)

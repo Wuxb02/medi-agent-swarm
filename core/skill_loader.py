@@ -1,6 +1,7 @@
 """
 Skill Loader 辅助函数
 用于动态加载 .claude/skills 目录下的 Skill 函数（自动发现）
+支持双层架构：Skill（能力包）= 指令正文 + 工具函数
 """
 from pathlib import Path
 import importlib.util
@@ -48,15 +49,70 @@ def load_skill_function(skill_name: str, script_name: str, function_name: str, p
     return getattr(module, function_name)
 
 
-def parse_skill_md(file_path: Path) -> Optional[Dict]:
+def load_functions_from_script(skill_name: str, function_names: List[str], project_root: Path = None) -> Dict[str, Callable]:
     """
-    解析 SKILL.md 或 skill.md 文件的 YAML frontmatter
+    从 skill 的 script/ 目录中加载指定的多个函数
 
     Args:
-        file_path: SKILL.md 文件路径
+        skill_name: Skill 目录名
+        function_names: 需要加载的函数名列表
+        project_root: 项目根目录
 
     Returns:
-        解析后的 frontmatter 字典，或 None
+        {函数名: 函数对象}
+    """
+    if project_root is None:
+        project_root = Path(__file__).parent.parent
+
+    skills_dir = project_root / ".claude" / "skills"
+    script_dir = skills_dir / skill_name / "script"
+
+    if not script_dir.exists():
+        raise FileNotFoundError(f"Script directory not found: {script_dir}")
+
+    # 加载 script/ 下所有 .py 模块
+    script_files = [f for f in script_dir.iterdir() if f.suffix == '.py' and f.name != '__init__.py']
+
+    if not script_files:
+        raise FileNotFoundError(f"No Python script found in {script_dir}")
+
+    # 加载所有模块
+    modules = []
+    for script_file in script_files:
+        module_name = f"skill_{skill_name.replace('-', '_')}_{script_file.stem}"
+        spec = importlib.util.spec_from_file_location(module_name, script_file)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules.append(module)
+
+    # 从模块中查找函数
+    functions = {}
+    for func_name in function_names:
+        found = False
+        for module in modules:
+            if hasattr(module, func_name):
+                functions[func_name] = getattr(module, func_name)
+                found = True
+                break
+        if not found:
+            logger.warning(f"Function '{func_name}' not found in {skill_name}/script/")
+
+    return functions
+
+
+def parse_skill_md(file_path: Path) -> Optional[Dict]:
+    """
+    解析 SKILL.md 或 skill.md 文件
+
+    提取 YAML frontmatter（name, description, tools）和 Markdown body 正文
+
+    Returns:
+        {
+            "name": "search-knowledge",
+            "description": "...",
+            "tools": ["search_knowledge"],    # 可选，未迁移时为空列表
+            "instructions": "# Search...\n"   # SKILL.md 正文
+        }
     """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -69,9 +125,24 @@ def parse_skill_md(file_path: Path) -> Optional[Dict]:
                 yaml_content = content[3:end_idx]
                 try:
                     data = yaml.safe_load(yaml_content)
-                    return data
                 except yaml.YAMLError as e:
                     logger.warning(f"Error parsing YAML in {file_path}: {e}")
+                    return None
+
+                # 提取正文（第二个 --- 之后的所有内容）
+                body_start = end_idx + 3
+                # 跳过 --- 后面的换行
+                if body_start < len(content) and content[body_start] == '\n':
+                    body_start += 1
+                instructions = content[body_start:].strip()
+
+                # 确保 tools 字段存在（兼容旧格式）
+                if 'tools' not in data:
+                    data['tools'] = []
+
+                data['instructions'] = instructions
+                return data
+
         return None
     except Exception as e:
         logger.warning(f"Error reading {file_path}: {e}")
@@ -89,9 +160,13 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
         [
             {
                 "name": "search-knowledge",
-                "function_name": "search_knowledge",
-                "script_name": "search",
-                "metadata": { "name": "search-knowledge", "description": "..." }
+                "function_name": "search_knowledge",     # 兼容旧格式
+                "script_name": "search",                  # 兼容旧格式
+                "metadata": { "name": "search-knowledge", "description": "...",
+                              "tools": [...], "instructions": "..." },
+                "function": <function>,                   # 兼容旧格式（主函数）
+                "tool_functions": {"func_name": <fn>},    # 新格式（多函数）
+                "migrated": True/False
             },
             ...
         ]
@@ -126,7 +201,7 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
             logger.debug(f"Skipping {skill_name}: no SKILL.md found")
             continue
 
-        # 解析 frontmatter
+        # 解析 frontmatter + body
         metadata = parse_skill_md(skill_md_path)
         if not metadata:
             logger.warning(f"Skipping {skill_name}: failed to parse SKILL.md")
@@ -138,34 +213,62 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
             logger.warning(f"Skipping {skill_name}: no script/ directory")
             continue
 
-        # 自动检测脚本文件和函数名
-        script_files = [f for f in script_dir.iterdir() if f.suffix == '.py' and f.name != '__init__.py']
+        # 检查是否有 tools 声明（新格式）
+        declared_tools = metadata.get('tools', [])
+        migrated = len(declared_tools) > 0
 
-        if not script_files:
-            logger.warning(f"Skipping {skill_name}: no Python script found in script/")
-            continue
+        if migrated:
+            # 新格式：加载 tools 列表中声明的所有函数
+            try:
+                tool_functions = load_functions_from_script(skill_name, declared_tools, project_root)
+                if not tool_functions:
+                    logger.warning(f"Skipping {skill_name}: no functions loaded from tools list")
+                    continue
 
-        # 默认取第一个脚本文件
-        script_file = script_files[0]
-        script_name = script_file.stem  # 文件名（不含 .py）
+                # 兼容旧字段：取第一个工具作为主函数
+                primary_func_name = declared_tools[0]
+                primary_func = tool_functions.get(primary_func_name)
 
-        # 尝试推断函数名（将 kebab-case 转为 snake_case）
-        function_name = skill_name.replace('-', '_')
+                discovered_skills.append({
+                    "name": skill_name,
+                    "function_name": primary_func_name,
+                    "script_name": None,  # 新格式不指定单个脚本
+                    "metadata": metadata,
+                    "function": primary_func,  # 兼容旧格式
+                    "tool_functions": tool_functions,
+                    "migrated": True
+                })
+                logger.info(f"✅ Discovered skill: {skill_name} (migrated, tools={declared_tools})")
+            except Exception as e:
+                logger.warning(f"⚠️ Skipping {skill_name}: {e}")
+                continue
+        else:
+            # 旧格式兼容：取第一个脚本文件，按目录名推断函数名
+            script_files = [f for f in script_dir.iterdir() if f.suffix == '.py' and f.name != '__init__.py']
 
-        # 验证函数是否存在
-        try:
-            func = load_skill_function(skill_name, script_name, function_name, project_root)
-            discovered_skills.append({
-                "name": skill_name,
-                "function_name": function_name,
-                "script_name": script_name,
-                "metadata": metadata,
-                "function": func
-            })
-            logger.info(f"✅ Discovered skill: {skill_name} (function={function_name})")
-        except (FileNotFoundError, AttributeError) as e:
-            logger.warning(f"⚠️ Skipping {skill_name}: {e}")
-            continue
+            if not script_files:
+                logger.warning(f"Skipping {skill_name}: no Python script found in script/")
+                continue
+
+            script_file = script_files[0]
+            script_name = script_file.stem
+            function_name = skill_name.replace('-', '_')
+
+            try:
+                func = load_skill_function(skill_name, script_name, function_name, project_root)
+                discovered_skills.append({
+                    "name": skill_name,
+                    "function_name": function_name,
+                    "script_name": script_name,
+                    "metadata": metadata,
+                    "function": func,
+                    "tool_functions": {function_name: func},
+                    "migrated": False
+                })
+                logger.info(f"✅ Discovered skill: {skill_name} (function={function_name}, legacy)")
+            except (FileNotFoundError, AttributeError) as e:
+                logger.warning(f"⚠️ Skipping {skill_name}: {e}")
+                continue
 
     logger.info(f"Discovered {len(discovered_skills)} skills in total")
     return discovered_skills

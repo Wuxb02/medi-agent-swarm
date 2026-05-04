@@ -1,6 +1,8 @@
 ---
 name: deep-research
 description: Conduct deep research combining web search, knowledge base, and evidence synthesis. Use for complex medical questions requiring latest research or comprehensive literature review.
+tools:
+  - deep_research
 ---
 
 # Deep Research (深度研究)

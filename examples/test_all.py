@@ -884,8 +884,8 @@ async def test_deep_research_tool_integration():
     agent = ResearchAgent()
 
     # 检查工具注册
-    tools = agent.tool_registry.get_all()
-    tool_names = [tool.name for tool in tools]
+    tools = agent.skill_registry.get_all()
+    tool_names = list(tools.keys())
 
     print(f"\n📋 已注册工具: {tool_names}")
 

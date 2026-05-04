@@ -1,6 +1,8 @@
 ---
 name: assess-risk
 description: Assess symptom risk level (low/medium/high/emergency). Use when user describes symptoms and needs risk evaluation to determine urgency of medical attention.
+tools:
+  - assess_risk
 ---
 
 # Assess Risk (风险评估)

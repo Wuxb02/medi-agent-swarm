@@ -1,6 +1,8 @@
 ---
 name: search-history
 description: Search current session conversation history (short-term memory). Use when user asks "我之前问过什么", "历史对话", "上次说了什么", or needs context from earlier in the same conversation.
+tools:
+  - search_history
 ---
 
 # Search Conversation History (搜索会话历史)

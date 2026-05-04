@@ -1,6 +1,8 @@
 ---
 name: clinical-guideline
 description: Search clinical practice guidelines and expert consensus documents. Use when user needs authoritative treatment standards or evidence-based medical recommendations.
+tools:
+  - clinical_guideline
 ---
 
 # Clinical Guideline (临床指南)

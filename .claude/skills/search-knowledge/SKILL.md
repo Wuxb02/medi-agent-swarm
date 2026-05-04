@@ -1,6 +1,8 @@
 ---
 name: search-knowledge
 description: Search medical knowledge base. Use when user asks about medical information, disease details, or general health knowledge. Fast semantic search powered by Milvus vector database.
+tools:
+  - search_knowledge
 ---
 
 # Search Medical Knowledge (搜索医学知识库)

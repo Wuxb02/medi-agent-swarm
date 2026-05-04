@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed, onUnmounted } from 'vue'
 import type { ToolStep } from '../../types'
 
 const props = defineProps<{
@@ -10,12 +10,6 @@ const props = defineProps<{
   elapsedSeconds?: number
   isCollapsed: boolean
 }>()
-
-const agentNameMap: Record<string, string> = {
-  consultation_agent: '健康咨询',
-  diagnostic_agent: '症状诊断',
-  research_agent: '医学研究',
-}
 
 const isExpanded = ref(!props.isCollapsed)
 
@@ -32,14 +26,50 @@ const expandedSteps = ref<Record<number, boolean>>({})
 function toggleStep(idx: number) {
   expandedSteps.value[idx] = !expandedSteps.value[idx]
 }
+
+// 实时耗时：迭代进行中时实时计时
+const liveElapsed = ref(0)
+const createdAt = ref(Date.now())
+let timer: ReturnType<typeof setInterval> | null = null
+
+function startTimer() {
+  if (timer) return
+  createdAt.value = Date.now()
+  timer = setInterval(() => {
+    liveElapsed.value = (Date.now() - createdAt.value) / 1000
+  }, 200)
+}
+
+function stopTimer() {
+  if (timer) {
+    clearInterval(timer)
+    timer = null
+  }
+}
+
+// 迭代未完成时启动计时，完成后停止
+watch(() => props.isCollapsed, (val) => {
+  if (val) {
+    stopTimer()
+  } else {
+    startTimer()
+  }
+}, { immediate: true })
+
+onUnmounted(() => stopTimer())
+
+const displayElapsed = computed(() => {
+  if (props.elapsedSeconds != null) return props.elapsedSeconds.toFixed(1)
+  return liveElapsed.value.toFixed(1)
+})
 </script>
 
 <template>
-  <div class="border border-slate-200 rounded-lg overflow-hidden text-xs">
+  <div class="border border-slate-200 rounded overflow-hidden text-xs">
     <!-- 标题栏 -->
     <button
       @click="toggle"
-      class="w-full flex items-center gap-2 px-3 py-2 bg-slate-50 hover:bg-slate-100 transition text-left"
+      class="w-full flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-slate-50 transition text-left"
     >
       <!-- 展开/折叠箭头 -->
       <svg
@@ -51,9 +81,7 @@ function toggleStep(idx: number) {
         <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
       </svg>
 
-      <span class="text-slate-500">思考过程</span>
-      <span class="text-slate-400">{{ agentNameMap[agentId] || agentId }}</span>
-      <span class="text-slate-400">(迭代{{ iteration }})</span>
+      <span class="text-slate-500">迭代{{ iteration }}</span>
 
       <!-- 推理中：跳动点动画 -->
       <span v-if="!isCollapsed" class="ml-auto flex gap-0.5">
@@ -115,8 +143,8 @@ function toggleStep(idx: number) {
       </div>
 
       <!-- 推理耗时 -->
-      <div v-if="elapsedSeconds != null" class="px-3 py-1.5 text-slate-400 border-t border-slate-100 text-right">
-        耗时 {{ elapsedSeconds }}s
+      <div class="px-3 py-1.5 text-slate-400 border-t border-slate-100 text-right">
+        耗时 {{ displayElapsed }}s
       </div>
     </div>
   </div>

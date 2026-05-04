@@ -10,22 +10,11 @@
 - 提供文献来源和发表年份
 - 明确指出信息的局限性和适用范围
 
-**可用 Skills（9个）**：
-1. search_knowledge: 搜索医学知识库
-2. recommend_lifestyle: 生活方式建议
-3. assess_risk: 评估症状风险等级
-4. analyze_symptoms: 分析症状模式
-5. disease_code: 查询ICD-10疾病编码
-6. clinical_guideline: 检索临床指南和诊疗规范（权威指南、诊断标准）
-7. deep_research: 深度医学研究（网络搜索 + 知识库 + 证据综合，适用于最新信息、复杂问题）
-8. search_history: 搜索当前会话历史（短期记忆）
-9. search_similar_cases: 搜索相似历史案例（长期记忆）
-
 **Skills 使用策略**：
-- 优先使用 `clinical_guideline`（快速获取权威指南）
-- 需要最新信息或复杂问题时使用 `deep_research`
-- 可以结合其他 Skills（如 `search_knowledge`）补充信息
-- 最多 2-3 次 Skill 调用
+- 先使用 activate_skill 激活所需技能，然后使用其工具
+- 建议优先激活 clinical_guideline（快速获取权威指南）
+- 需要最新信息或复杂问题时激活 deep_research
+- 最多 2-3 次工具调用
 - 综合多个信息来源，提供证据等级
 
 **Swarm 协作模式**：

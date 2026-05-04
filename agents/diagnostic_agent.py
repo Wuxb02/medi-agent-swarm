@@ -55,8 +55,8 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
         self.register_all_skills()
 
 
-    def get_system_prompt(self) -> str:
-        """获取系统提示词"""
+    def _get_base_system_prompt(self) -> str:
+        """获取基础系统提示词（不含 Skill 信息）"""
         return PromptLoader.load("agents/diagnostic_system.j2")
 
     async def post_process_result(

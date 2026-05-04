@@ -94,6 +94,8 @@ function reconstructFromEvents(rawEvents: any[]): {
       case 'agent_thinking': {
         const d = data.data || data
         const agentId = data.source_agent || 'unknown'
+        // swarm_coordinator 不展示思考过程
+        if (agentId === 'swarm_coordinator') break
         const iteration = d.iteration || 0
         agentsWithThinking.add(agentId)
         thinkingAgents.add(agentId)
@@ -175,8 +177,10 @@ function reconstructFromEvents(rawEvents: any[]): {
   }
 
   // 为没有显式 thinking 的 Agent 补充摘要 thinking block
+  // 跳过 swarm_coordinator（智能路由不需要展示迭代 0 摘要）
   for (const evt of agentEvents) {
     if (evt.type === 'start' && !agentsWithThinking.has(evt.agentId)) {
+      if (evt.agentId === 'swarm_coordinator') continue
       const completeEvt = agentEvents.find(
         e => e.type === 'complete' && e.agentId === evt.agentId
       )
@@ -296,6 +300,8 @@ export const useChatStore = defineStore('chat', () => {
           if (msg) {
             if (!msg.thinkingBlocks) msg.thinkingBlocks = []
             const agentId = data.source_agent || 'unknown'
+            // swarm_coordinator 不展示思考过程
+            if (agentId === 'swarm_coordinator') return
             const iteration = data.data?.iteration || 0
             // 查找同 agent + 同 iteration 的最后一个未折叠 block，追加内容而非创建新 block
             const existing = msg.thinkingBlocks.findLast(
@@ -318,6 +324,7 @@ export const useChatStore = defineStore('chat', () => {
         onAgentToolStep(data) {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg?.thinkingBlocks && msg.thinkingBlocks.length > 0) {
+            if (data.source_agent === 'swarm_coordinator') return
             const d = data.data || data
             const iteration = d.iteration || 0
             const block = msg.thinkingBlocks.findLast(b => b.iteration === iteration && b.agentId === (data.source_agent || 'unknown'))
@@ -333,6 +340,7 @@ export const useChatStore = defineStore('chat', () => {
         onAgentThinkingDone(data) {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg?.thinkingBlocks && msg.thinkingBlocks.length > 0) {
+            if (data.source_agent === 'swarm_coordinator') return
             const d = data.data || data
             const iteration = d.iteration || 0
             const block = msg.thinkingBlocks.findLast(b => b.iteration === iteration && b.agentId === (data.source_agent || 'unknown'))
