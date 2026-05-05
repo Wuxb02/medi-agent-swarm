@@ -34,6 +34,18 @@ def setup_logger(verbose: bool = False):
             level="INFO"
         )
 
+    # 文件日志
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    logger.add(
+        log_dir / "app_{time:YYYY-MM-DD}.log",
+        rotation="00:00",
+        retention="30 days",
+        encoding="utf-8",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
+    )
+
 
 async def interactive_mode():
     """交互式对话模式"""

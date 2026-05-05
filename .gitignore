@@ -37,6 +37,7 @@ env/
 
 # 日志
 *.log
+logs/
 
 # 测试
 .pytest_cache/
@@ -58,5 +59,6 @@ knowledge/scripts/knowledge/data/milvus_lite.db
 
 # 对话记录
 memory/swarm/session_summaries/*
+memory/swarm/session_summaries/*memory/PERSONAL.md
 
 .claude/settings.local.json

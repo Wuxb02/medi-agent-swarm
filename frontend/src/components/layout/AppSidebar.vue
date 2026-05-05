@@ -61,8 +61,24 @@ function newChat() {
       </router-link>
     </nav>
 
-    <!-- 底部信息 -->
-    <div class="p-3 border-t border-slate-700 text-xs text-slate-500">
+    <!-- 底部：个人中心 -->
+    <div class="p-3 border-t border-slate-700">
+      <router-link
+        to="/personal"
+        class="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition"
+        :class="route.path === '/personal'
+          ? 'bg-slate-700 text-white'
+          : 'text-slate-400 hover:bg-slate-700/50 hover:text-white'"
+      >
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+        </svg>
+        个人中心
+      </router-link>
+    </div>
+
+    <!-- 版本信息 -->
+    <div class="px-3 pb-3 text-xs text-slate-600">
       MediZJ Agent Swarm v0.1.0
     </div>
   </aside>

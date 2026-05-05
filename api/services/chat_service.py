@@ -125,11 +125,73 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
 
+    # 6.5 等待 LTM 保存任务完成（done 已 yield，客户端已收到数据）
+    ltm_task = getattr(coordinator, 'ltm_save_task', None)
+    if ltm_task and not ltm_task.done():
+        try:
+            await asyncio.wait_for(ltm_task, timeout=90.0)
+            logger.info(f"LTM save completed for session={session_id}")
+        except asyncio.TimeoutError:
+            logger.warning(f"LTM save timeout in chat_stream for session={session_id}")
+        except Exception as e:
+            logger.error(f"LTM save error in chat_stream: {e}")
+
     # 7. 持久化事件到 JSON 文件（后台不阻塞返回）
     try:
         _save_session_events(session_id, collected_events, result)
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
+
+
+def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """将流式 agent_thinking token 事件按 (source_agent, iteration) 合并为完整文本"""
+    merged: List[Dict[str, Any]] = []
+    buf_agent: Optional[str] = None
+    buf_iteration: Optional[int] = None
+    buf_parts: List[str] = []
+    buf_first_ts: Optional[str] = None
+
+    def _flush():
+        """将缓冲区中的 token 拼接为一条完整事件"""
+        if not buf_parts:
+            return
+        merged.append({
+            "event": "agent_thinking",
+            "data": {
+                "source_agent": buf_agent,
+                "content": "".join(buf_parts),
+                "iteration": buf_iteration,
+                "timestamp": buf_first_ts,
+            }
+        })
+
+    for ev in events:
+        if ev.get("event") != "agent_thinking":
+            _flush()
+            buf_parts.clear()
+            buf_agent = buf_iteration = buf_first_ts = None
+            merged.append(ev)
+            continue
+
+        data = ev.get("data", {})
+        agent = data.get("source_agent")
+        iteration = data.get("data", {}).get("iteration") if "data" in data else data.get("iteration")
+
+        if agent == buf_agent and iteration == buf_iteration:
+            # 同一轮 thinking，追加 token
+            content = data.get("data", {}).get("content") if "data" in data else data.get("content", "")
+            buf_parts.append(content)
+        else:
+            # 新的一轮 thinking，先 flush 旧的
+            _flush()
+            buf_agent = agent
+            buf_iteration = iteration
+            content = data.get("data", {}).get("content") if "data" in data else data.get("content", "")
+            buf_parts = [content]
+            buf_first_ts = data.get("timestamp") or (data.get("data", {}).get("timestamp") if "data" in data else None)
+
+    _flush()
+    return merged
 
 
 def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: Dict[str, Any]):
@@ -139,6 +201,8 @@ def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: 
     # 过滤掉流式内容增量事件（历史回放不需要）
     _SKIP_TYPES = {"agent_content_delta"}
     filtered = [e for e in events if e.get("event") not in _SKIP_TYPES]
+    # 合并流式 thinking token 为完整文本
+    filtered = _merge_thinking_events(filtered)
     payload = {
         "session_id": session_id,
         "events": filtered,

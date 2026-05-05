@@ -1,8 +1,22 @@
 """FastAPI 应用入口"""
+from pathlib import Path
+from loguru import logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import chat, knowledge, sessions, dashboard
+# 文件日志配置
+log_dir = Path("logs")
+log_dir.mkdir(exist_ok=True)
+logger.add(
+    log_dir / "app_{time:YYYY-MM-DD}.log",
+    rotation="00:00",
+    retention="30 days",
+    encoding="utf-8",
+    level="DEBUG",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
+)
+
+from api.routers import chat, knowledge, sessions, dashboard, personal
 
 app = FastAPI(
     title="MediZJ Agent Swarm API",
@@ -24,6 +38,7 @@ app.include_router(chat.router)
 app.include_router(knowledge.router)
 app.include_router(sessions.router)
 app.include_router(dashboard.router)
+app.include_router(personal.router)
 
 
 @app.get("/")

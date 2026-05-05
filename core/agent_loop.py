@@ -210,7 +210,7 @@ class AgentLoop:
                         }
                     })
 
-                    # 情况1: LLM 返回 tool_calls，执行 Skills
+                    # 情况1: LLM 返回 tool_calls，执行 tool
                     if llm_response.has_tool_calls():
                         # 硬性限制：检查是否已达到最大调用次数
                         if self.tool_call_count >= self.max_tool_calls:

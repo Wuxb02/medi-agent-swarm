@@ -9,6 +9,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 类比：交通信号灯，决定车辆走哪条路，但不控制车辆如何行驶
 """
 import asyncio
+import json
 import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Callable
@@ -20,7 +21,7 @@ from .shared_context import SharedContext
 from .lead_agent import LeadAgent
 from .events import Event, EventType
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
-from memory import SessionSummaryManager, SessionSummary, ShortTermMemory, LongTermMemory
+from memory import SessionSummaryManager, SessionSummary, ShortTermMemory, LongTermMemory, PersonalProfile
 
 
 class SwarmCoordinator:
@@ -66,6 +67,8 @@ class SwarmCoordinator:
         self.session_manager = SessionSummaryManager()
         self.short_term_memory = ShortTermMemory(storage_type="memory", llm_client=self.llm_client)  # 或 "redis"
         self.long_term_memory = LongTermMemory()
+        self.personal_profile = PersonalProfile()
+        self.ltm_save_task = None
 
         # 将短期记忆注入到所有 Worker Agent 的 Loop
         # 注意：LeadAgent 不继承 BaseAgent，没有 loop 属性，不需要注入
@@ -125,6 +128,12 @@ class SwarmCoordinator:
 
         # 3. 构建增强上下文（先注入短期记忆）
         enhanced_context = context or {}
+
+        # 注入个人信息
+        personal_text = self.personal_profile.to_text()
+        if personal_text != "暂无":
+            enhanced_context["personal_info"] = personal_text
+            logger.info(f"Loaded personal info for session {session_id}")
 
         # 添加短期记忆
         if recent_history:
@@ -225,6 +234,7 @@ class SwarmCoordinator:
             # 多任务 → 启动 Swarm
             logger.info(f"Route: Swarm (Multi-Agent Collaboration) - {len(subtasks)} tasks")
             mode = "swarm"
+            self.ltm_save_task = None
             result = await self._process_with_swarm(
                 question=question,
                 context=enhanced_context,
@@ -233,8 +243,7 @@ class SwarmCoordinator:
                 start_time=start_time
             )
             final_answer = result.get('answer', '')
-
-            # Swarm 模式已经在 _process_with_swarm 中保存了长期记忆，直接返回
+            # ltm_save_task 已在 _process_with_swarm 中设置
             return result
 
         else:
@@ -290,8 +299,8 @@ class SwarmCoordinator:
 
         # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
 
-        # 后台异步保存到长期记忆（不阻塞返回）
-        asyncio.ensure_future(self._save_long_term_memory(
+        # fire-and-forget：由 chat_stream 的 finalizer 负责等待完成
+        self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
             session_id=session_id,
             question=question,
             answer=final_answer,
@@ -422,8 +431,8 @@ class SwarmCoordinator:
         # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
         # Agent Loop 保存了完整的对话历史（user + assistant + tool messages）
 
-        # 后台异步保存到 Mem0 长期记忆（不阻塞返回）
-        asyncio.ensure_future(self._save_long_term_memory(
+        # 保存长期记忆任务（fire-and-forget，由 chat_stream finalizer 等待）
+        self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
             session_id=session_id,
             question=question,
             answer=final_answer,
@@ -516,18 +525,149 @@ class SwarmCoordinator:
         except Exception as e:
             logger.error(f"{worker.agent_id}: Error in {subtask.type}: {e}")
 
-    async def _save_long_term_memory(self, session_id, question, answer, metadata):
-        """后台异步保存长期记忆"""
+    async def _evaluate_and_extract_memory(
+        self, session_id: str, question: str, answer: str
+    ) -> Optional[Dict[str, Any]]:
+        """使用 LLM 评估对话质量并提取信息（个人信息 + 可复用事实）。
+
+        Returns:
+            {"personal_info": [...], "reusable_facts": [...], "score": N, "reason": "..."}
+            或 None（降级）
+        """
+        # 1. 获取已有信息
+        existing_personal_text = self.personal_profile.to_text()
+
+        session = self.short_term_memory.get_session(session_id)
+        existing_facts = []
+        if session:
+            existing_facts = session.metadata.get("extracted_facts", [])
+
+        if existing_facts:
+            existing_facts_text = "\n".join(
+                f"- [{f.get('category', '')}] {f.get('fact', '')}"
+                for f in existing_facts
+            )
+        else:
+            existing_facts_text = "暂无"
+
+        # 2. 渲染 prompt
+        prompt = PromptLoader.render(
+            "memory/quality_eval.j2",
+            existing_personal=existing_personal_text,
+            existing_facts=existing_facts_text,
+            current_question=question,
+            current_answer=answer[:2000],
+        )
+
+        # 3. 异步调用 LLM（10 秒超时）
         try:
+            response = await asyncio.wait_for(
+                self.llm_client.chat(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    max_tokens=1024,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Memory eval LLM timeout (60s), session={session_id}")
+            return None
+        except Exception as e:
+            logger.warning(f"Memory eval LLM failed: {e}, session={session_id}")
+            return None
+
+        # 4. 解析 JSON
+        try:
+            text = response.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+                text = text.rsplit("```", 1)[0]
+            result = json.loads(text.strip())
+        except (json.JSONDecodeError, IndexError) as e:
+            logger.warning(f"Memory eval JSON parse failed: {e}, session={session_id}")
+            return None
+
+        # 5. 兼容旧格式（只有 facts 字段）
+        if "reusable_facts" not in result and "facts" in result:
+            result["reusable_facts"] = result.pop("facts")
+        if "personal_info" not in result:
+            result["personal_info"] = []
+
+        # 6. 将新可复用事实追加到 session metadata
+        new_facts = result.get("reusable_facts", [])
+        if session and new_facts:
+            existing_facts.extend(new_facts)
+            session.metadata["extracted_facts"] = existing_facts
+
+        return result
+
+    async def _save_long_term_memory(self, session_id, question, answer, metadata):
+        """异步保存长期记忆（LLM 评估 + 信息分类存储）"""
+        try:
+            eval_result = await self._evaluate_and_extract_memory(
+                session_id, question, answer
+            )
+
+            if eval_result is not None:
+                # 个人信息 → 本地 PERSONAL.md
+                personal_info = eval_result.get("personal_info", [])
+                if personal_info:
+                    self.personal_profile.update(personal_info)
+                    for item in personal_info:
+                        logger.info(f"  [Personal] {item['key']}：{item['value']}")
+
+                score = eval_result.get("score", 0)
+                if score < 5:
+                    logger.info(
+                        f"Memory gate: SKIP Mem0 (score={score}) "
+                        f"reason={eval_result.get('reason', '')} session={session_id}"
+                    )
+                    # 打印本轮存储摘要
+                    session = self.short_term_memory.get_session(session_id)
+                    msg_count = len(session.messages) if session else 0
+                    logger.info(
+                        f"Memory turn summary — short_term={msg_count} msgs | "
+                        f"personal={len(personal_info)} items saved | mem0=SKIP"
+                    )
+                    return
+
+                # 可复用事实 → Mem0
+                reusable_facts = eval_result.get("reusable_facts", [])
+                if reusable_facts:
+                    memory_text = "; ".join(f["fact"] for f in reusable_facts)
+                    for f in reusable_facts:
+                        logger.info(f"  [Mem0] [{f.get('category', '')}] {f['fact']}")
+                else:
+                    memory_text = f"Q: {question[:200]} A: {answer[:300]}"
+                logger.info(
+                    f"Memory gate: PASS score={score} "
+                    f"facts={len(reusable_facts)} personal={len(personal_info)} session={session_id}"
+                )
+            else:
+                memory_text = f"Q: {question[:200]} A: {answer[:300]}"
+                logger.info(f"Memory gate: FALLBACK (LLM eval unavailable) session={session_id}")
+                logger.info(f"  [Mem0] (raw) {memory_text[:100]}...")
+
             await self.long_term_memory.add_session_summary(
                 session_id=session_id,
-                question=question,
-                answer=answer,
-                metadata=metadata
+                question=memory_text,
+                answer="",
+                metadata={
+                    **metadata,
+                    "quality_score": eval_result.get("score") if eval_result else None,
+                },
             )
-            logger.info(f"Saved to long-term memory (session={session_id})")
+
+            # 打印本轮存储摘要
+            session = self.short_term_memory.get_session(session_id)
+            msg_count = len(session.messages) if session else 0
+            logger.info(
+                f"Memory turn summary — short_term={msg_count} msgs | "
+                f"personal={len(eval_result.get('personal_info', [])) if eval_result else 0} items saved | "
+                f"mem0={'PASS' if eval_result else 'FALLBACK'}"
+            )
         except Exception as e:
-            logger.error(f"Background LTM save failed (session={session_id}): {e}")
+            logger.error(f"LTM save failed (session={session_id}): {e}")
 
     def _inject_thinking_callbacks(self, worker, publish_fn):
         """为 Worker Agent 注入 thinking/tool_step/thinking_done 回调"""

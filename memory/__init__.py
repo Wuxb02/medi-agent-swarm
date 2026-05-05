@@ -36,6 +36,9 @@ from .session_summary import (
     Lesson,
     PerformanceMetrics
 )
+from .personal_profile import (
+    PersonalProfile
+)
 
 __all__ = [
     # 短期和长期记忆
@@ -56,4 +59,5 @@ __all__ = [
     'KeyFinding',
     'Lesson',
     'PerformanceMetrics',
+    'PersonalProfile',
 ]

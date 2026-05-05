@@ -14,7 +14,7 @@
 - **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
-- **🧠 记忆系统**: 短期记忆（会话级对话历史）+ 长期记忆（Mem0跨会话记忆）+ **多轮对话上下文利用** + **LLM 语义摘要压缩** ✅
+- **🧠 记忆系统**: 短期记忆（会话级）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -65,7 +65,8 @@
 
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（10条消息）
-   - 长期记忆：Mem0 跨会话记忆
+   - 个人档案：全局 `memory/PERSONAL.md`，LLM 自动提取 + 手动编辑
+   - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤）
    - **上下文利用率 100%**：追问能正确理解历史对话
    - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
 
@@ -179,14 +180,15 @@ medix-agent-swarm/
 │   │   ├── chat.py                    # /api/chat 问答接口（含流式）
 │   │   ├── knowledge.py               # /api/knowledge 知识库检索
 │   │   ├── sessions.py                # /api/sessions 会话管理
-│   │   └── dashboard.py               # /api/dashboard 仪表盘 + 健康检查
+│   │   ├── dashboard.py               # /api/dashboard 仪表盘 + 健康检查
+│   │   └── personal.py                # /api/personal 个人健康档案
 │   ├── models/                        # Pydantic 请求/响应模型
 │   ├── services/                      # 业务逻辑封装
 │   └── dependencies.py               # 依赖注入
 │
 ├── frontend/                          # Vue 3 前端项目
 │   ├── src/
-│   │   ├── views/                     # 页面：ChatView, KnowledgeView（搜索/文档管理/上传）, SessionsView, DashboardView
+│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView
 │   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/
 │   │   ├── stores/                    # Pinia 状态管理
 │   │   ├── api/                       # API 调用层
@@ -237,9 +239,10 @@ medix-agent-swarm/
 │   ├── research/                      # 研究模块提示词
 │   │   ├── evidence_synthesis.j2
 │   │   └── query_planning.j2
-│   ├── memory/                        # 记忆压缩提示词
+│   ├── memory/                        # 记忆相关提示词
 │   │   ├── compression_system.j2
-│   │   └── compression_user.j2
+│   │   ├── compression_user.j2
+│   │   └── quality_eval.j2            # 质量评估 + 信息分类
 │   ├── agent_loop/                    # Agent Loop 控制消息
 │   │   ├── tool_limit.j2
 │   │   └── force_answer.j2
@@ -258,6 +261,7 @@ medix-agent-swarm/
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
 │   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要）
+│   ├── personal_profile.py            # 个人健康档案（全局 memory/PERSONAL.md）
 │   ├── session_summary.py             # 会话总结
 │   └── entropy_manager.py             # 熵管理器（LLM 摘要 + 截断降级）
 │
@@ -359,6 +363,7 @@ medix-agent-swarm/
 | **知识库** | 医学知识语义搜索、文档管理（增删改查）、文件上传、chunk 查看 | `/knowledge` |
 | **历史会话** | 会话列表查看、恢复、删除 | `/sessions` |
 | **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
+| **个人中心** | 查看/编辑个人健康档案（年龄、性别、病史等） | `/personal` |
 
 ### Web 架构
 
@@ -396,6 +401,8 @@ SharedContext.on_event_callback → 事件推送
 | GET | `/api/sessions/{session_id}` | 会话详情 |
 | DELETE | `/api/sessions/{session_id}` | 删除会话 |
 | GET | `/api/dashboard/stats` | 仪表盘统计 |
+| GET | `/api/personal` | 获取个人健康档案 |
+| PUT | `/api/personal` | 更新个人健康档案 |
 | GET | `/api/health` | 健康检查 |
 
 
@@ -419,7 +426,7 @@ MEM0_API_KEY=m0-your-api-key-here
 
 ### 记忆系统配置
 
-本系统支持两层记忆机制：**短期记忆（会话级）** 和 **长期记忆（跨会话）**。
+本系统支持三层记忆机制：**短期记忆（会话级）**、**个人档案（本地持久化）** 和 **长期记忆（Mem0 跨会话）**，通过 LLM 质量门控实现信息分类存储。
 
 #### 短期记忆（ShortTermMemory）
 
@@ -435,19 +442,6 @@ memory = ShortTermMemory(session_id="user_123", storage_type="memory")
 memory = ShortTermMemory(session_id="user_123", storage_type="redis")
 ```
 
-**使用示例**：
-```python
-# 添加消息
-memory.add_message(role="user", content="我有高血压")
-memory.add_message(role="assistant", content="高血压需要...")
-
-# 获取对话历史（最近10条）
-history = memory.get_messages(limit=10)
-
-# 会话结束时清空
-memory.clear()
-```
-
 **存储方式**：
 - **内存**（默认）：无需配置，保留时间60分钟
 - **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
@@ -457,47 +451,68 @@ memory.clear()
 
 短期记忆集成了熵管理器，在消息积累过多时自动压缩早期对话：
 
-```python
-# 初始化时传入 llm_client 启用 LLM 语义摘要
-from memory.short_term import ShortTermMemory
-from core.llm_client import LLMClient
-
-memory = ShortTermMemory(storage_type="memory", llm_client=LLMClient())
-```
-
 - **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留症状、诊断、用药等关键医学信息
 - **截断降级**（自动）：LLM 不可用或调用失败时，自动降级为截断模式
 - **去重**：基于 MD5 哈希检测并移除重复消息
 
-#### 长期记忆（Mem0）
+#### 个人档案（PersonalProfile）
 
-**作用**：跨会话记忆，通过向量相似度检索历史案例和经验。
+**作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），全局单文件。
 
-**配置**：
+**存储路径**：`memory/PERSONAL.md`
 
-```env
-# 在 .env 文件中配置
-MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
+**工作方式**：
+- LLM 每轮对话自动提取个人信息，增量合并写入
+- 对话开始时自动注入到 Agent 上下文
+- 前端「个人中心」支持手动查看和编辑
+
+**文件格式**：
+```markdown
+# 患者个人信息
+
+- 年龄：28岁
+- 性别：男性
+- 过敏史：青霉素过敏
 ```
 
-**使用示例**：
-```python
-from memory.long_term import LongTermMemory
-memory = LongTermMemory(user_id="user_123")
+#### 长期记忆（Mem0）
 
-# 存储会话总结
-memory.add("患者有高血压，给出了生活方式建议")
+**作用**：跨会话记忆，存储可复用的医学知识和事实。
 
-# 检索相关记忆
-results = memory.search("高血压患者如何管理？")
-# → 返回历史相似案例
+**配置**：
+```env
+MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
 ```
 
 **存储方式**：
 - **Mem0 云服务**：自动处理向量化和相似度搜索
 - 存储范围：跨会话持久化
-- 存储内容：会话总结
-- 无需本地部署向量数据库
+- 存储内容：可复用的医学事实（症状关联、治疗方案、风险评估等）
+
+#### LLM 质量门控 + 信息分类存储
+
+每轮对话结束后，系统调用 LLM 对对话内容进行评估和分类：
+
+```
+对话完成
+  ↓
+LLM 评估（prompt/memory/quality_eval.j2）
+  ├─ 质量评分（1-10）
+  ├─ 提取个人信息 → memory/PERSONAL.md
+  └─ 提取可复用事实 → Mem0
+```
+
+**评分规则**：
+- score < 5：跳过 Mem0 存储（低质量闲聊等），但个人信息仍会保存
+- score ≥ 5：个人信息 + 可复用事实均入库
+
+**日志输出**（每个 turn）：
+```
+  [Personal] 年龄：28岁
+  [Mem0] [症状与疾病的关联] 前额胀痛是紧张性头痛的典型表现
+Memory gate: PASS score=9 facts=5 personal=1 session=xxx
+Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
+```
 
 #### 记忆系统如何融入对话
 
@@ -506,42 +521,25 @@ results = memory.search("高血压患者如何管理？")
 ```
 1. 会话开始
    ↓
-2. 从 Mem0 检索相关长期记忆（历史案例）
+2. 短期记忆：加载当前会话历史（最近10条消息）
    ↓
-3. 初始化短期记忆（对话历史）
+3. 长期记忆：异步检索 Mem0 相似案例
    ↓
-4. Agent 执行
-   - 读取短期记忆：获取当前会话上下文
-   - 写入短期记忆：记录本轮对话
-   - 参考长期记忆：利用历史经验
+4. 个人档案：加载 PERSONAL.md 注入上下文
    ↓
-5. 会话结束
+5. Agent 执行（参考三层记忆）
    ↓
-6. 短期记忆转换为结构化数据 → 存入 Mem0 长期记忆
-   ↓
-7. 清空短期记忆
-```
-
-**多轮对话示例**：
-
-```python
-# 第1轮
-用户: "我有高血压"
-系统: [短期记忆添加用户消息]
-系统: [Agent 处理] "高血压需要注意..."
-系统: [短期记忆添加助手消息]
-
-# 第2轮
-用户: "那我应该吃什么药？"  # 追问
-系统: [读取短期记忆] → 获取上一轮"高血压"上下文
-系统: [Agent 处理] "根据您的高血压情况，建议..."  # 正确理解追问
+6. 对话结束 → LLM 质量评估 + 信息分类
+   ├─ 个人信息 → PERSONAL.md
+   ├─ 可复用事实 → Mem0
+   └─ 短期记忆 → Agent Loop 中自动保存
 ```
 
 **注意事项**：
 
-- 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆继续工作
+- 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆和个人档案
 - 短期记忆默认使用内存存储，无需配置 Redis
-- 长期记忆依赖 Mem0 云服务，需注册账号获取 API Key
+- 个人档案始终可用（本地文件，无外部依赖）
 
 ## 🏗️ Harness Engineering 融合
 
@@ -598,7 +596,7 @@ prompt/
 ├── agents/                # Agent 系统提示词（4 个）
 ├── swarm/                 # Swarm 协调提示词（4 个）
 ├── research/              # 研究模块提示词（2 个）
-├── memory/                # 记忆压缩提示词（2 个）
+├── memory/                # 记忆相关提示词（3 个）
 ├── agent_loop/            # Agent Loop 控制消息（2 个）
 └── validation/            # 输出验证模板（4 个）
 ```
@@ -636,6 +634,7 @@ disclaimer = PromptLoader.render(
 | `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
 | `research/query_planning.j2` | `question` | 查询拆解 |
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
+| `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
 | `agent_loop/tool_limit.j2` | `max_tool_calls` | 工具调用上限 |
 | `validation/swarm_disclaimer.j2` | `timeout_occurred`, `completed_agents_count` | Swarm 免责声明 |
 
@@ -748,12 +747,22 @@ ConsultAgent DiagAgent ResearchAgent
 │  - LLM 语义摘要（压缩早期对话）    │
 │  - 截断降级（LLM 不可用时）        │
 └────────────────────────────────────┘
-           ↕ (会话结束时)
+           ↕ (每轮对话后)
 ┌────────────────────────────────────┐
-│  长期记忆（跨会话，Mem0云服务）    │
-│  - 会话总结                        │
-│  存储：Mem0 API + 向量数据库       │
-└────────────────────────────────────┘
+│  LLM 质量评估 + 信息分类           │
+│  - 质量评分（1-10）                │
+│  - 信息提取与分类                  │
+│  - 去重（已有事实跳过）            │
+└──────┬─────────────┬───────────────┘
+       │             │
+       ▼             ▼
+┌─────────────┐ ┌────────────────────┐
+│ 个人档案    │ │ 长期记忆（Mem0）   │
+│ PERSONAL.md │ │ 可复用医学事实     │
+│ （本地文件）│ │ （向量数据库）     │
+│ 年龄/性别/  │ │ 症状关联/治疗方案/ │
+│ 病史/过敏史 │ │ 风险评估/生活建议  │
+└─────────────┘ └────────────────────┘
 ```
 
 ## ⚠️ 免责声明
