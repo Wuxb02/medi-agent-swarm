@@ -14,7 +14,7 @@
 - **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
-- **🧠 记忆系统**: 短期记忆（会话级）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
+- **🧠 记忆系统**: 短期记忆（会话级，**子会话隔离**）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储 + 记忆分层共享** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -64,9 +64,10 @@
    - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
-   - 短期记忆：会话级对话历史（10条消息）
-   - 个人档案：全局 `memory/PERSONAL.md`，LLM 自动提取 + 手动编辑
-   - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤）
+   - 短期记忆：会话级对话历史（10条消息），Worker 自行加载最近 5 轮
+   - **子会话隔离**：Swarm 并行模式下，每个 Worker 使用独立的子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），避免历史交叉污染；执行完毕后将最终回答合并回主会话
+   - 个人档案：全局 `memory/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
+   - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话
    - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
 
@@ -216,7 +217,7 @@ medix-agent-swarm/
 │   └── skill_registry_mixin.py        # Skill 注册混入
 │
 ├── core/                              # 核心引擎
-│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新）
+│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新，用户档案注入）
 │   ├── llm_client.py                  # LLM 客户端
 │   ├── prompt_loader.py               # Jinja2 Prompt 模板加载器
 │   ├── skill_loader.py                # 动态加载 Skills（支持多函数加载、指令提取）
@@ -260,7 +261,7 @@ medix-agent-swarm/
 │
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
-│   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要）
+│   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要 + 子会话隔离）
 │   ├── personal_profile.py            # 个人健康档案（全局 memory/PERSONAL.md）
 │   ├── session_summary.py             # 会话总结
 │   └── entropy_manager.py             # 熵管理器（LLM 摘要 + 截断降级）
@@ -523,17 +524,33 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    ↓
 2. 短期记忆：加载当前会话历史（最近10条消息）
    ↓
-3. 长期记忆：异步检索 Mem0 相似案例
+3. 长期记忆：检索 Mem0 相似案例
    ↓
-4. 个人档案：加载 PERSONAL.md 注入上下文
+4. LeadAgent 任务分解（携带短期记忆 + 长期记忆）
+   - 短期记忆 → 理解多轮对话意图
+   - 长期记忆 → 基于历史案例做更好的任务分配
+   - 相关记忆嵌入子任务 description → 传递给 Worker
    ↓
-5. Agent 执行（参考三层记忆）
+5. Worker Agent 执行（子会话隔离）
+   - 每个 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），历史互不干扰
+   - 个人档案：通过 AgentLoop 自动注入为 system message（所有 Agent 共享）
+   - 短期记忆：Worker 从自己的子会话加载最近 5 轮对话
+   - 子任务 description：包含 LeadAgent 筛选的相关记忆上下文
+   - 执行完毕后：最终回答合并回主会话，子会话清除
    ↓
 6. 对话结束 → LLM 质量评估 + 信息分类
    ├─ 个人信息 → PERSONAL.md
    ├─ 可复用事实 → Mem0
    └─ 短期记忆 → Agent Loop 中自动保存
 ```
+
+**记忆分层机制**：
+
+| 记忆类型 | 谁来读取 | 注入方式 |
+| --- | --- | --- |
+| 个人档案（personal_info） | 每个 Worker Agent | AgentLoop 注入为独立 system message |
+| 短期记忆（recent_history） | Worker 自行加载 | AgentLoop 中 `get_history(limit=5)` |
+| 长期记忆（historical_cases） | LeadAgent 筛选后传递 | 嵌入子任务 description 中 |
 
 **注意事项**：
 
@@ -613,7 +630,8 @@ system_prompt = PromptLoader.load("agents/consultation_system.j2")
 user_msg = PromptLoader.render(
     "swarm/assessment_user.j2",
     question="高血压怎么办？",
-    context="无"
+    recent_history=[{"role": "user", "content": "..."}],
+    historical_cases=[{"summary": "...", "score": 0.95}]
 )
 
 # 带条件分支的模板
@@ -630,7 +648,7 @@ disclaimer = PromptLoader.render(
 | --- | --- | --- |
 | `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
 | `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
-| `swarm/assessment_user.j2` | `question`, `context` | LeadAgent 任务评估 |
+| `swarm/assessment_user.j2` | `question`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
 | `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
 | `research/query_planning.j2` | `question` | 查询拆解 |
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
@@ -762,7 +780,15 @@ ConsultAgent DiagAgent ResearchAgent
 │ （本地文件）│ │ （向量数据库）     │
 │ 年龄/性别/  │ │ 症状关联/治疗方案/ │
 │ 病史/过敏史 │ │ 风险评估/生活建议  │
-└─────────────┘ └────────────────────┘
+└──────┬──────┘ └─────────┬──────────┘
+       │                  │
+       ▼                  ▼
+┌──────────────┐  ┌───────────────────┐
+│ AgentLoop    │  │ LeadAgent         │
+│ 注入为       │  │ 筛选相关案例      │
+│ system msg   │  │ 嵌入 description  │
+│ (所有Agent)  │  │ (传给 Worker)     │
+└──────────────┘  └───────────────────┘
 ```
 
 ## ⚠️ 免责声明

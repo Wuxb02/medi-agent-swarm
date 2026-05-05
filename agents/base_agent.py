@@ -221,19 +221,29 @@ class BaseAgent(ABC):
         """设置最终回答 token 流式回调"""
         self.loop.on_content_token = callback
 
-    async def process_subtask(self, subtask: Any, session_id: Optional[str] = None) -> Dict[str, Any]:
+    async def process_subtask(
+        self,
+        subtask: Any,
+        session_id: Optional[str] = None,
+        sub_session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         处理子任务（Swarm 模式）
 
         子类可以重写以实现自定义逻辑
         默认实现：运行 Agent Loop
+
+        Args:
+            sub_session_id: 隔离的子会话 ID，避免 Worker 间历史污染
         """
-        # 使用 subtask.description 作为输入
+        # 使用 sub_session_id 进行隔离，若未提供则回退到 session_id（向后兼容）
+        effective_session_id = sub_session_id or session_id
+
         input_data = {
             'question': subtask.description,
             'subtask_id': subtask.id,
             'subtask_type': subtask.type,
-            'session_id': session_id,
+            'session_id': effective_session_id,
         }
 
         return await self.run_loop(input_data)

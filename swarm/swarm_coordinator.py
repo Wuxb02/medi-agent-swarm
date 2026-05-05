@@ -394,6 +394,12 @@ class SwarmCoordinator:
             timeout_occurred=timeout_occurred
         )
 
+        # Step 3.5: 合并 Worker 子会话到主会话
+        await self._merge_worker_subsessions(
+            main_session_id=session_id,
+            shared_context=shared_context
+        )
+
         end_time = datetime.now()
 
         # 聚合所有 Worker 的 token 用量和消息数
@@ -519,13 +525,78 @@ class SwarmCoordinator:
             logger.error(f"{worker.agent_id}: Error processing subtask: {e}")
 
     async def _execute_single_subtask(self, worker, subtask, shared_context):
-        """执行单个子任务"""
+        """执行单个子任务（使用子会话隔离）"""
         try:
-            result = await worker.process_subtask(subtask, session_id=shared_context.session_id)
+            # 生成子会话 ID：{main_session_id}:{agent_id}:{subtask_id}
+            # 保证同一 worker 的多个子任务也不互相污染
+            sub_session_id = f"{shared_context.session_id}:{worker.agent_id}:{subtask.id}"
+
+            logger.info(
+                f"{worker.agent_id}: Executing {subtask.type} "
+                f"(sub_session={sub_session_id})"
+            )
+
+            result = await worker.process_subtask(
+                subtask,
+                session_id=shared_context.session_id,
+                sub_session_id=sub_session_id
+            )
             shared_context.complete_subtask(subtask.id, worker.agent_id, result)
             logger.info(f"{worker.agent_id}: Completed {subtask.type}")
         except Exception as e:
             logger.error(f"{worker.agent_id}: Error in {subtask.type}: {e}")
+
+    async def _merge_worker_subsessions(
+        self,
+        main_session_id: str,
+        shared_context
+    ):
+        """
+        将所有 Worker 的子会话历史合并到主会话
+
+        策略：每个 Worker 的最终回答作为一条 assistant 消息写入主会话，
+        格式为 [{agent_name} - {task_type}] {answer}
+        然后清除所有子会话
+        """
+        agent_name_map = {
+            "consultation_agent": "问诊Agent",
+            "diagnostic_agent": "诊断Agent",
+            "research_agent": "研究Agent",
+        }
+
+        for agent_id, contributions in shared_context.agent_contributions.items():
+            for contrib in contributions:
+                subtask = shared_context.get_subtask(contrib.subtask_id)
+                sub_session_id = f"{main_session_id}:{agent_id}:{contrib.subtask_id}"
+
+                # 从结果中提取最终回答
+                answer = contrib.result.get("answer", "")
+                if not answer:
+                    answer = f"[{agent_id}] 未能完成 {contrib.subtask_id}"
+
+                agent_name = agent_name_map.get(agent_id, agent_id)
+                task_type = subtask.type if subtask else "analysis"
+
+                # 构建合并消息，保留完整内容
+                summary = f"[{agent_name} - {task_type}] {answer}"
+
+                self.short_term_memory.merge_sub_session(
+                    main_session_id=main_session_id,
+                    sub_session_id=sub_session_id,
+                    summary_text=summary,
+                    role="assistant"
+                )
+
+                logger.info(
+                    f"Merged sub-session {sub_session_id} "
+                    f"({len(answer)} chars) into main session"
+                )
+
+        # 清理残留的子会话（超时或异常的 Worker）
+        orphaned = self.short_term_memory.get_sub_sessions(main_session_id)
+        for sub_session in orphaned:
+            logger.warning(f"Cleaning up orphaned sub-session: {sub_session.session_id}")
+            self.short_term_memory.clear_session(sub_session.session_id)
 
     async def _evaluate_and_extract_memory(
         self, session_id: str, question: str, answer: str

@@ -322,3 +322,69 @@ class ShortTermMemory:
             logger.error(f"Failed to load from Redis: {e}")
 
         return None
+
+    def get_sub_sessions(self, main_session_id: str) -> List[ConversationHistory]:
+        """
+        获取主会话下的所有子会话
+
+        Args:
+            main_session_id: 主会话 ID
+
+        Returns:
+            子会话的 ConversationHistory 列表
+        """
+        prefix = f"{main_session_id}:"
+        if self.storage_type == "memory":
+            return [
+                h for sid, h in self.sessions.items()
+                if sid.startswith(prefix)
+            ]
+        return []
+
+    def merge_sub_session(
+        self,
+        main_session_id: str,
+        sub_session_id: str,
+        summary_text: str,
+        role: str = "assistant"
+    ):
+        """
+        将子会话的摘要合并到主会话，然后清除子会话
+
+        Args:
+            main_session_id: 主会话 ID
+            sub_session_id: 子会话 ID
+            summary_text: 合并的摘要文本
+            role: 消息角色（默认 assistant）
+        """
+        # 确保主会话存在
+        main_session = self.get_session(main_session_id)
+        if main_session is None:
+            main_session = self.create_session(main_session_id)
+
+        # 追加摘要到主会话
+        main_session.add_message(role, summary_text)
+
+        # 持久化（如果用 Redis）
+        if self.storage_type == "redis" and self.redis_client:
+            self._save_to_redis(main_session)
+
+        # 清除子会话
+        self.clear_session(sub_session_id)
+
+        logger.debug(f"Merged sub-session {sub_session_id} into {main_session_id}")
+
+    def get_all_messages(self, session_id: str) -> List[Dict[str, str]]:
+        """
+        获取会话的所有消息（含 tool 类型，不做格式过滤）
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            完整消息列表
+        """
+        history = self.get_session(session_id)
+        if history:
+            return list(history.messages)
+        return []
