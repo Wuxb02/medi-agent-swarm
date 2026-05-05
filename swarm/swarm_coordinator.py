@@ -70,11 +70,14 @@ class SwarmCoordinator:
         self.personal_profile = PersonalProfile()
         self.ltm_save_task = None
 
-        # 将短期记忆注入到所有 Worker Agent 的 Loop
+        # 将短期记忆和用户档案注入到所有 Worker Agent 的 Loop
         # 注意：LeadAgent 不继承 BaseAgent，没有 loop 属性，不需要注入
+        personal_text = self.personal_profile.to_text()
         for worker in self.worker_pool:
             if hasattr(worker, 'loop'):
                 worker.loop.short_term_memory = self.short_term_memory
+                if personal_text != "暂无":
+                    worker.loop.user_context = personal_text
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
         logger.info(f"Memory system: short_term={self.short_term_memory.storage_type}, long_term={'enabled' if self.long_term_memory.enabled else 'disabled'}")
@@ -111,6 +114,13 @@ class SwarmCoordinator:
 
         logger.info(f"Processing question (session={session_id}): {question[:50]}...")
 
+        # 刷新 Worker Agent 的用户档案（可能在会话中被更新）
+        personal_text = self.personal_profile.to_text()
+        if personal_text != "暂无":
+            for worker in self.worker_pool:
+                if hasattr(worker, 'loop'):
+                    worker.loop.user_context = personal_text
+
         # ===== 统一的记忆检索（所有模式都使用）=====
         # 1. 检索短期记忆（当前会话历史）
         recent_history = await self.short_term_memory.get_recent_messages(
@@ -118,24 +128,16 @@ class SwarmCoordinator:
             limit=10  # 最近5轮对话（10条消息）
         )
 
-        # 2. 异步启动长期记忆检索（与路由并行，不阻塞）
-        search_task = asyncio.create_task(
-            self.long_term_memory.search_similar_sessions(
-                query=question,
-                limit=3
-            )
+        # 2. 检索长期记忆（相似历史案例）
+        similar_memories = await self.long_term_memory.search_similar_sessions(
+            query=question,
+            limit=3
         )
 
-        # 3. 构建增强上下文（先注入短期记忆）
+        # 3. 构建增强上下文（传给 LeadAgent 做任务分解）
         enhanced_context = context or {}
 
-        # 注入个人信息
-        personal_text = self.personal_profile.to_text()
-        if personal_text != "暂无":
-            enhanced_context["personal_info"] = personal_text
-            logger.info(f"Loaded personal info for session {session_id}")
-
-        # 添加短期记忆
+        # 注入短期记忆
         if recent_history:
             enhanced_context["recent_history"] = [
                 {"role": msg.get("role", ""), "content": msg.get("content", "")}
@@ -143,11 +145,7 @@ class SwarmCoordinator:
             ]
             logger.info(f"Loaded {len(recent_history)} recent messages from short-term memory")
 
-        # Step 1: LeadAgent 分解任务（与长期记忆检索并行）
-        assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
-
-        # 等待长期记忆检索完成（若还未完成），注入到上下文
-        similar_memories = await search_task
+        # 注入长期记忆（LeadAgent 基于此做更好的任务分解）
         if similar_memories:
             enhanced_context["historical_cases"] = [
                 {
@@ -157,6 +155,10 @@ class SwarmCoordinator:
                 for mem in similar_memories
             ]
             logger.info(f"Found {len(similar_memories)} similar historical cases from long-term memory")
+
+        # Step 1: LeadAgent 分解任务
+        assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
+
         subtasks = assessment.get("subtasks", [])
 
         logger.info(f"LeadAgent 分解任务：{len(subtasks)} 个")

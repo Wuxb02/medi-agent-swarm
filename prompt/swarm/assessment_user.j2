@@ -1,3 +1,7 @@
 问题：{{ question }}
 
-背景：{{ context }}
+{% if recent_history %}## 近期对话历史
+{% for msg in recent_history %}[{{ msg.role }}] {{ msg.content }}
+{% endfor %}{% endif %}{% if historical_cases %}## 历史相似案例
+{% for case in historical_cases %}- {{ case.summary }}（相似度: {{ "%.2f"|format(case.score) }})
+{% endfor %}{% endif %}

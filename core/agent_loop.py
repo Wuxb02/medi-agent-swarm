@@ -36,7 +36,8 @@ class AgentLoop:
 
     def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 2,
                  on_thinking: Optional[Any] = None, on_tool_step: Optional[Any] = None,
-                 on_thinking_done: Optional[Any] = None, on_content_token: Optional[Any] = None):
+                 on_thinking_done: Optional[Any] = None, on_content_token: Optional[Any] = None,
+                 user_context: Optional[str] = None):
         """
         初始化Agent循环引擎
 
@@ -48,11 +49,13 @@ class AgentLoop:
             on_tool_step: 工具步骤回调（可选）
             on_thinking_done: 推理轮次结束回调（可选）
             on_content_token: 最终回答 token 流式回调（可选）
+            user_context: 用户档案文本（可选，由 Coordinator 注入）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
         self.state_manager = StateManager()
         self.short_term_memory = short_term_memory
+        self.user_context = user_context
         self.tool_call_count = 0
         self.on_thinking = on_thinking
         self.on_tool_step = on_tool_step
@@ -480,6 +483,13 @@ class AgentLoop:
             messages.append({
                 'role': 'system',
                 'content': system_prompt
+            })
+
+        # 注入用户档案（由 Coordinator 统一注入，所有 Agent 共享）
+        if self.user_context:
+            messages.append({
+                'role': 'system',
+                'content': f"## 用户档案\n{self.user_context}"
             })
 
         # 加载历史对话（短期记忆）
