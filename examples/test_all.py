@@ -1167,10 +1167,31 @@ async def test_harness_entropy_manager():
     assert len(compressed) < len(long_messages), "应该压缩消息"
     assert compressed[-1]["content"] == "回答 29", "应该保留最新消息"
 
-    # 测试 2: 熵估算 (estimate_entropy)
+    # 测试 2: 熵估算 - 两级判定 (estimate_entropy)
     entropy_result = manager.estimate_entropy(long_messages)
-    assert entropy_result["entropy_level"] in ["low", "medium", "high"], "应该返回熵等级"
+    assert entropy_result["entropy_level"] in ["low", "high"], "应该返回两级熵等级"
     assert "total_messages" in entropy_result, "应该包含总消息数"
+
+    # 测试 2b: 多指标判定 - 消息数少但重复率高
+    dup_messages = [
+        {"role": "user", "content": "头疼怎么办？"},
+        {"role": "assistant", "content": "建议休息。"},
+        {"role": "user", "content": "头疼怎么办？"},  # 重复
+        {"role": "assistant", "content": "建议休息。"},  # 重复
+        {"role": "user", "content": "头疼怎么办？"},  # 重复
+        {"role": "assistant", "content": "建议休息。"},  # 重复
+    ]
+    dup_entropy = manager.estimate_entropy(dup_messages)
+    assert dup_entropy["entropy_level"] == "high", "重复率高应判定为 high"
+    assert dup_entropy["duplicate_rate"] > 0.15, "重复率应超过阈值"
+
+    # 测试 2c: 多指标判定 - 消息数少但平均长度大
+    long_content_messages = [
+        {"role": "user", "content": "症状描述" * 100},  # 600字
+        {"role": "assistant", "content": "详细建议" * 100},
+    ]
+    long_entropy = manager.estimate_entropy(long_content_messages)
+    assert long_entropy["entropy_level"] == "high", "平均长度大应判定为 high"
 
     # 测试 3: 会话去重 (deduplicate_sessions)
     from datetime import datetime
@@ -1207,6 +1228,33 @@ async def test_harness_entropy_manager():
     assert len(cleaned) < len(old_memories), "应该清理过期记忆"
     assert cleaned[0]["memory_id"] == "m3", "应该保留最新的记忆"
     print(f"  ✓ 清理前: {len(old_memories)} 条记忆，清理后: {len(cleaned)} 条")
+
+    # 测试 5: auto_clean 熵驱动行为
+    # 5a: 低熵 → 不清理
+    low_entropy_messages = [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好，有什么可以帮你的？"},
+    ]
+    result = await manager.auto_clean(low_entropy_messages, max_messages=10)
+    assert result is low_entropy_messages, "低熵应直接返回，不做清理"
+
+    # 5b: 高重复率 → 去重后可能跳过 LLM
+    high_dup_messages = [
+        {"role": "user", "content": "头疼"},
+        {"role": "assistant", "content": "休息"},
+        {"role": "user", "content": "头疼"},
+        {"role": "assistant", "content": "休息"},
+        {"role": "user", "content": "头疼"},
+        {"role": "assistant", "content": "休息"},
+        {"role": "user", "content": "胃疼"},
+        {"role": "assistant", "content": "吃药"},
+        {"role": "user", "content": "胃疼"},
+        {"role": "assistant", "content": "吃药"},
+        {"role": "user", "content": "感冒"},
+        {"role": "assistant", "content": "多喝水"},
+    ]
+    result = await manager.auto_clean(high_dup_messages, max_messages=10)
+    assert len(result) <= len(high_dup_messages), "去重后消息数应减少或不变"
 
     print(f"✅ 熵管理器测试通过（熵等级: {entropy_result['entropy_level']}）")
 

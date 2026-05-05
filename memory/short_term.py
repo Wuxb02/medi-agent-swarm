@@ -230,7 +230,7 @@ class ShortTermMemory:
 
             # Harness Engineering: 统一熵管理
             if self.entropy_manager and len(messages) > 0:
-                # 估算熵（用于监控系统健康）
+                # 熵估算（仅用于日志监控）
                 if len(messages) >= 10:
                     entropy_info = self.entropy_manager.estimate_entropy(messages)
                     if entropy_info["entropy_level"] == "high":
@@ -240,12 +240,9 @@ class ShortTermMemory:
                             f"重复率: {entropy_info['duplicate_rate']:.1%})"
                         )
 
-                # 统一使用 auto_clean: 自动去重+压缩
+                # auto_clean 内部自行做熵判断
                 messages = await self.entropy_manager.auto_clean(
-                    messages,
-                    enable_deduplication=True,
-                    enable_compression=True,
-                    max_messages=limit
+                    messages, max_messages=limit
                 )
 
             return messages

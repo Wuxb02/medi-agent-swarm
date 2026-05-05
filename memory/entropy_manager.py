@@ -170,7 +170,8 @@ class MemoryEntropyManager:
     async def compress_session_history(
         self,
         messages: List[Dict],
-        max_messages: int = 10
+        max_messages: int = 10,
+        entropy: Optional[Dict[str, Any]] = None
     ) -> List[Dict]:
         """
         压缩会话历史
@@ -182,6 +183,7 @@ class MemoryEntropyManager:
         Args:
             messages: 消息列表
             max_messages: 保留的最大消息数
+            entropy: 熵估算结果（可选），用于动态约束 LLM 摘要
 
         Returns:
             压缩后的消息列表
@@ -194,7 +196,7 @@ class MemoryEntropyManager:
 
         # 压缩更早的消息
         older = messages[:-max_messages]
-        compressed = await self._compress_older_messages(older)
+        compressed = await self._compress_older_messages(older, entropy=entropy)
 
         logger.info(
             f"📦 Compressed {len(older)} messages to {len(compressed)} summaries"
@@ -202,7 +204,9 @@ class MemoryEntropyManager:
 
         return compressed + recent
 
-    async def _compress_older_messages(self, messages: List[Dict]) -> List[Dict]:
+    async def _compress_older_messages(
+        self, messages: List[Dict], entropy: Optional[Dict[str, Any]] = None
+    ) -> List[Dict]:
         """
         压缩更早的消息
 
@@ -210,23 +214,27 @@ class MemoryEntropyManager:
 
         Args:
             messages: 消息列表
+            entropy: 熵估算结果（可选），用于动态约束 LLM 摘要
 
         Returns:
             压缩后的摘要列表
         """
         if self.llm_client:
             try:
-                return await self._compress_with_llm(messages)
+                return await self._compress_with_llm(messages, entropy=entropy)
             except Exception as e:
                 logger.warning(f"LLM 压缩失败，降级为截断模式: {e}")
         return self._compress_by_truncation(messages)
 
-    async def _compress_with_llm(self, messages: List[Dict]) -> List[Dict]:
+    async def _compress_with_llm(
+        self, messages: List[Dict], entropy: Optional[Dict[str, Any]] = None
+    ) -> List[Dict]:
         """
         使用 LLM 生成语义摘要
 
         Args:
             messages: 待压缩的消息列表
+            entropy: 熵估算结果（可选），用于注入动态约束到 prompt
 
         Returns:
             包含单条语义摘要的列表
@@ -247,10 +255,32 @@ class MemoryEntropyManager:
 
         dialogue_text = "\n".join(dialogue_lines)
 
+        # 根据熵指标构造额外约束
+        base_system = PromptLoader.load("memory/compression_system.j2")
+        if entropy:
+            constraints = []
+            if entropy.get("duplicate_rate", 0) > 0.2:
+                constraints.append("对话中存在大量重复内容，请高度去重，相似问题只保留一个")
+            if entropy.get("avg_message_length", 0) > 500:
+                constraints.append("单条消息较长，请重点提炼核心信息")
+            if entropy.get("total_messages", 0) > 30:
+                constraints.append("对话轮次较多，请高度概括，聚焦最后的关键结论")
+
+            if constraints:
+                constraint_text = "额外要求：\n" + "\n".join(f"- {c}" for c in constraints)
+                system_content = f"{base_system}\n\n{constraint_text}"
+            else:
+                system_content = base_system
+        else:
+            system_content = base_system
+
+        # 动态 max_tokens
+        max_tokens = 512 if entropy and entropy.get("entropy_level") == "high" else 256
+
         prompt_messages = [
             {
                 "role": "system",
-                "content": PromptLoader.load("memory/compression_system.j2"),
+                "content": system_content,
             },
             {
                 "role": "user",
@@ -264,7 +294,7 @@ class MemoryEntropyManager:
         summary_text = await self.llm_client.chat(
             messages=prompt_messages,
             temperature=0.3,
-            max_tokens=512,
+            max_tokens=max_tokens,
         )
 
         logger.debug(f"📝 LLM 生成摘要: {summary_text[:80]}...")
@@ -340,7 +370,9 @@ class MemoryEntropyManager:
         if not messages:
             return {
                 "total_messages": 0,
+                "unique_messages": 0,
                 "estimated_duplicates": 0,
+                "duplicate_rate": 0,
                 "avg_message_length": 0,
                 "entropy_level": "low",
                 "recommendations": []
@@ -360,21 +392,20 @@ class MemoryEntropyManager:
         estimated_duplicates = total_messages - unique_count
         duplicate_rate = estimated_duplicates / total_messages if total_messages > 0 else 0
 
-        # 评估熵等级
+        # 评估熵等级（多指标，任一触发即 high）
         entropy_level = "low"
         recommendations = []
 
-        if total_messages > 50:
+        if total_messages > 20:
             entropy_level = "high"
-            recommendations.append("建议压缩历史消息（当前 > 50 条）")
-        elif total_messages > 20:
-            entropy_level = "medium"
-            recommendations.append("考虑压缩历史消息（当前 > 20 条）")
+            recommendations.append("建议压缩历史消息（当前 > 20 条）")
 
-        if duplicate_rate > 0.2:
+        if duplicate_rate > 0.15:
+            entropy_level = "high"
             recommendations.append(f"检测到 {duplicate_rate:.1%} 重复消息，建议去重")
 
-        if avg_length > 1000:
+        if avg_length > 500:
+            entropy_level = "high"
             recommendations.append(f"平均消息长度较大（{avg_length:.0f}字），考虑摘要")
 
         return {
@@ -390,32 +421,46 @@ class MemoryEntropyManager:
     async def auto_clean(
         self,
         messages: List[Dict],
-        enable_deduplication: bool = True,
-        enable_compression: bool = True,
         max_messages: int = 10
     ) -> List[Dict]:
         """
-        自动清理（一键式）
+        自动清理（一键式，熵驱动）
 
-        依次执行：去重 → 压缩
+        流程：
+        1. 熵估算 → low 直接返回
+        2. 去重 → 复检 → low 则跳过 LLM
+        3. 压缩（将熵指标注入 LLM 约束）
 
         Args:
             messages: 消息列表
-            enable_deduplication: 是否启用去重
-            enable_compression: 是否启用压缩
             max_messages: 压缩后保留的最大消息数
 
         Returns:
             清理后的消息列表
         """
+        if not messages:
+            return messages
+
+        # 1. 熵估算
+        entropy = self.estimate_entropy(messages)
+
+        # 2. 低熵不清理
+        if entropy["entropy_level"] == "low":
+            return messages
+
+        # 3. 去重（重复率 > 0.1 才执行）
         cleaned = messages
-
-        # 去重
-        if enable_deduplication:
+        if entropy["duplicate_rate"] > 0.1:
             cleaned = self.deduplicate_messages(cleaned)
+            # 去重后复检
+            recheck_entropy = self.estimate_entropy(cleaned)
+            if recheck_entropy["entropy_level"] == "low":
+                return cleaned
 
-        # 压缩
-        if enable_compression and len(cleaned) > max_messages:
-            cleaned = await self.compress_session_history(cleaned, max_messages)
+        # 4. 压缩
+        if len(cleaned) > max_messages:
+            cleaned = await self.compress_session_history(
+                cleaned, max_messages, entropy=entropy
+            )
 
         return cleaned
