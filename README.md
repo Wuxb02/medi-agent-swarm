@@ -593,6 +593,47 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 python examples/test_all.py
 ```
 
+## 📊 评估框架
+
+端到端评估框架，验证 5 项核心指标是否达标。
+
+### 评估指标
+
+| 指标 | 目标 | 评估方法 |
+|------|------|----------|
+| 智能路由准确率 | ≥ 95% | 50 题标注数据集，多次运行多数投票，比对模式 + Agent 分配 |
+| 知识库检索准确率 | ≥ 87% | 30 查询数据集，Precision@5 / Recall@5 / MRR / Hit Rate |
+| 响应时间 | 单 Agent ≤15s, Swarm ≤30s | P50/P90/P95 统计 + 超时率 |
+| 多轮对话上下文理解 | ≥ 92% | 20 组对话 68 轮，关键词命中 + LLM-as-Judge 评分 |
+| 整体回答质量 | 系统 4.5 vs Baseline 3.9 | 30 题 AB 盲评，三维度（准确性/完整性/安全性）评分 |
+
+### 运行评估
+
+```bash
+# 运行全部评估
+python -m eval.runner --metrics all
+
+# 单指标
+python -m eval.runner --metrics routing
+python -m eval.runner --metrics retrieval
+python -m eval.runner --metrics latency
+python -m eval.runner --metrics multiturn
+python -m eval.runner --metrics abtest
+
+# 多指标
+python -m eval.runner --metrics routing,retrieval
+
+# AB 测试评分计算（需要先填写 scores 字段）
+python -m eval.runner --score-abtest
+```
+
+### 评估报告
+
+运行后自动生成：
+- `eval/reports/eval_report_{timestamp}.md` — Markdown 评估报告
+- `eval/reports/eval_result_{timestamp}.json` — JSON 结构化结果
+- `eval/reports/abtest_blind_review.json` — AB 盲评数据（待人工评分）
+
 ---
 
 ## 📝 Prompt 集中管理

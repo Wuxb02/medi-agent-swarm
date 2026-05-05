@@ -62,3 +62,8 @@ memory/swarm/session_summaries/*
 memory/swarm/session_summaries/*memory/PERSONAL.md
 
 .claude/settings.local.json
+
+# 测评
+eval/data/*.json
+eval/reports/*.md
+eval/reports/*.json
