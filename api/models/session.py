@@ -22,6 +22,13 @@ class SessionListResponse(BaseModel):
     total: int = 0
 
 
+class SessionTurn(BaseModel):
+    """多轮会话中的单轮对话"""
+    turn_index: int = 0
+    user_message: Dict[str, Any] = {}       # {role, content, timestamp}
+    assistant_message: Dict[str, Any] = {}  # {role, content, timestamp, agent_events, ...}
+
+
 class SessionDetail(BaseModel):
     """会话详情"""
     session_id: str
@@ -42,3 +49,5 @@ class SessionDetail(BaseModel):
     parallel_efficiency: float = 0.0
     information_coverage: float = 0.0
     redundancy: float = 0.0
+    # 多轮会话支持（旧会话为空列表）
+    turns: List[SessionTurn] = []

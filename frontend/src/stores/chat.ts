@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { ChatMessage, ThinkingBlock, AgentEvent } from '../types'
+import type { ChatMessage, ThinkingBlock, AgentEvent, SessionTurn } from '../types'
 import { useSSE } from '../composables/useSSE'
 import { getSessionDetail } from '../api/session'
 
@@ -422,9 +422,49 @@ export const useChatStore = defineStore('chat', () => {
   async function loadHistory(sid: string) {
     try {
       const detail = await getSessionDetail(sid)
-      if (detail) {
-        sessionId.value = detail.session_id
-        messages.value = []
+      if (!detail) return
+
+      sessionId.value = detail.session_id
+      messages.value = []
+
+      if (detail.turns && detail.turns.length > 0) {
+        // 多轮会话：遍历所有 turns
+        for (const turn of detail.turns as SessionTurn[]) {
+          // 用户消息
+          if (turn.user_message?.content) {
+            messages.value.push({
+              id: genId(),
+              role: 'user',
+              content: turn.user_message.content,
+              timestamp: turn.user_message.timestamp || new Date().toISOString(),
+            })
+          }
+          // 助手消息
+          if (turn.assistant_message?.content) {
+            const rawEvents = turn.assistant_message.agent_events || []
+            const { agentEvents, thinkingBlocks } = reconstructFromEvents(rawEvents)
+            const am = turn.assistant_message
+            messages.value.push({
+              id: genId(),
+              role: 'assistant',
+              content: am.content,
+              timestamp: am.timestamp || new Date().toISOString(),
+              isStreaming: false,
+              suggestions: am.suggestions || [],
+              disclaimer: am.disclaimer || '',
+              agentEvents,
+              thinkingBlocks,
+              metadata: {
+                swarmEnabled: am.mode === 'swarm',
+                agentsInvolved: am.agents_involved || [],
+                totalTime: am.total_time,
+                subtasksCompleted: am.subtasks_completed,
+              },
+            })
+          }
+        }
+      } else {
+        // 旧版单轮会话兼容逻辑
         if (detail.question) {
           messages.value.push({
             id: genId(),
@@ -434,7 +474,6 @@ export const useChatStore = defineStore('chat', () => {
           })
         }
         if (detail.answer) {
-          // 从持久化事件重建 agentEvents 和 thinkingBlocks
           const rawEvents = detail.agent_events || []
           const { agentEvents, thinkingBlocks } = reconstructFromEvents(rawEvents)
 

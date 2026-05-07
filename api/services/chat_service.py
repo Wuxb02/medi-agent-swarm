@@ -17,6 +17,13 @@ _SUMMARY_DIR = os.path.join(
     "memory", "swarm", "session_summaries"
 )
 
+# SQLite + Milvus 持久化
+from memory.session_db import SessionDB
+from memory.session_vector_store import SessionVectorStore
+
+_session_db = SessionDB()
+_session_vectors = SessionVectorStore()
+
 
 class EventBridge:
     """事件桥接器：拦截 SharedContext 的事件，推送到流"""
@@ -36,6 +43,15 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         context=request.context,
         session_id=request.session_id
     )
+
+    # 持久化到 SQLite + Milvus
+    session_id = result.get("session_id", request.session_id or "")
+    if session_id:
+        try:
+            _persist_session_turn(session_id, request, result, [])
+        except Exception as e:
+            logger.warning(f"Failed to persist non-stream session turn: {e}")
+
     return ChatResponse(
         answer=result.get("answer", ""),
         suggestions=result.get("suggestions", []),
@@ -142,6 +158,12 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
 
+    # 8. 持久化到 SQLite + Milvus
+    try:
+        _persist_session_turn(session_id, request, result, collected_events)
+    except Exception as e:
+        logger.warning(f"Failed to persist session turn: {e}")
+
 
 def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """将流式 agent_thinking token 事件按 (source_agent, iteration) 合并为完整文本"""
@@ -243,3 +265,65 @@ def _map_event_type(event_type: str) -> str:
         "swarm_completed": "agent_complete",
     }
     return mapping.get(event_type, event_type)
+
+
+def _persist_session_turn(
+    session_id: str,
+    request: ChatRequest,
+    result: Dict[str, Any],
+    collected_events: List[Dict[str, Any]],
+):
+    """将本轮对话持久化到 SQLite，并索引到 Milvus"""
+    now = datetime.now().isoformat()
+    turn_index = _session_db.get_turn_count(session_id)
+
+    # 过滤掉流式内容增量事件（与 _save_session_events 一致）
+    _SKIP_TYPES = {"agent_content_delta"}
+    filtered_events = [
+        e for e in collected_events if e.get("event") not in _SKIP_TYPES
+    ]
+    filtered_events = _merge_thinking_events(filtered_events)
+
+    _session_db.save_turn(
+        session_id=session_id,
+        turn_index=turn_index,
+        user_msg={
+            "role": "user",
+            "content": request.question,
+            "timestamp": now,
+        },
+        assistant_msg={
+            "role": "assistant",
+            "content": result.get("answer", ""),
+            "timestamp": now,
+            "agent_events": filtered_events,
+            "suggestions": result.get("suggestions", []),
+            "disclaimer": result.get("disclaimer", ""),
+            "agents_involved": result.get("agents_involved", []),
+            "total_time": result.get("total_time", 0.0),
+            "total_tokens": result.get("usage", {}).get("total_tokens", 0),
+            "subtasks_completed": result.get("subtasks_completed", 0),
+            "mode": "swarm" if request.enable_swarm else "single",
+        },
+    )
+
+    # 索引到 Milvus（每次更新摘要，用于语义搜索）
+    try:
+        session_data = _session_db.get_session(session_id)
+        if session_data:
+            messages = session_data.get("messages", [])
+            user_msgs = [m for m in messages if m["role"] == "user"]
+            first_q = user_msgs[0]["content"][:100] if user_msgs else ""
+            turn_count = session_data.get("turn_count", 0)
+            summary = (
+                f"会话共 {turn_count} 轮。首问：{first_q}"
+            )
+            _session_vectors.index_session(
+                session_id=session_id,
+                summary_text=summary,
+                mode=session_data.get("mode", "single"),
+                created_at=session_data.get("created_at", ""),
+                total_tokens=session_data.get("total_tokens", 0),
+            )
+    except Exception as e:
+        logger.warning(f"Failed to index session to Milvus: {e}")

@@ -5,6 +5,8 @@
 - ShortTermMemory：会话级对话历史（内存/Redis）
 - LongTermMemory：跨会话记忆（Mem0）
 - MemoryEntropyManager：熵管理器（去重和压缩）
+- SessionDB：SQLite 会话数据库
+- SessionVectorStore：Milvus 会话向量索引
 """
 
 # 短期和长期记忆
@@ -40,6 +42,10 @@ from .personal_profile import (
     PersonalProfile
 )
 
+# SQLite + Milvus 会话持久化
+from .session_db import SessionDB
+from .session_vector_store import SessionVectorStore
+
 __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
@@ -60,4 +66,7 @@ __all__ = [
     'Lesson',
     'PerformanceMetrics',
     'PersonalProfile',
+    # SQLite + Milvus 会话持久化
+    'SessionDB',
+    'SessionVectorStore',
 ]

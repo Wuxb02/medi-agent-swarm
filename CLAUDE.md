@@ -21,6 +21,10 @@ cp .env.example .env  # 编辑填入 LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME �
 # 初始化知识库（Milvus 向量数据库）
 python knowledge/scripts/import_hardcoded_data.py
 
+# 初始化会话数据库（SQLite + Milvus）
+python memory/scripts/init_session_db.py          # 首次初始化
+python memory/scripts/init_session_db.py --clean  # 清除后重新初始化
+
 # 运行应用
 python main.py          # 交互模式
 python main.py -v       # 详细日志模式
@@ -62,6 +66,8 @@ python examples/test_all.py
 | `memory/short_term.py` | 会话级短期记忆（支持内存/Redis） |
 | `memory/long_term.py` | 跨会话长期记忆（Mem0 云服务） |
 | `memory/entropy_manager.py` | 记忆去重、压缩、熵估计 |
+| `memory/session_db.py` | SQLite 会话数据库：持久化多轮对话消息（sessions + messages 表） |
+| `memory/session_vector_store.py` | Milvus 会话向量索引：会话摘要语义搜索（session_summaries 集合） |
 | `knowledge/milvus_kb.py` | Milvus Lite 向量知识库（BAAI/bge-small-zh-v1.5 嵌入模型） |
 | `research/deep_research_workflow.py` | 多步骤研究流水线 |
 | `constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
@@ -69,10 +75,25 @@ python examples/test_all.py
 
 ### 关键设计模式
 
-- **单例模式**：`MedicalKnowledgeBase`、`ShortTermMemory`
+- **单例模式**：`MedicalKnowledgeBase`、`ShortTermMemory`、`SessionDB`、`SessionVectorStore`
 - **Mixin 模式**：`SkillRegistryMixin` 为所有 Worker Agent 提供共享的技能注册
 - **共享黑板**：`SharedContext` 作为去中心化通信介质
 - **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentLoop
+
+### 会话持久化（SQLite + Milvus 双引擎）
+
+每轮对话完成后自动持久化，支持重启后完整回放多轮历史。
+
+```text
+chat_stream() 完成
+  ├─ SQLite (memory/data/sessions.db)     ← sessions + messages 表，事务原子写入
+  ├─ Milvus (memory/data/session_vectors.db) ← session_summaries 向量索引，语义搜索
+  └─ .md / .json 文件                      ← 保持不变（向后兼容）
+```
+
+- **SQLite**：存结构化消息（user/assistant 内容、agent_events、suggestions 等），三层回退加载（SQLite → .json → .md）
+- **Milvus**：存会话摘要向量，复用 `BAAI/bge-small-zh-v1.5` 模型，支持跨会话语义搜索
+- **数据文件**：`memory/data/*.db`，通过 `python memory/scripts/init_session_db.py` 初始化
 
 ### Skills（9 个）— Skill + Tool 双层架构
 

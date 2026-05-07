@@ -97,6 +97,28 @@ export interface SessionItem {
   redundancy: number
 }
 
+export interface SessionTurn {
+  turn_index: number
+  user_message: {
+    role: string
+    content: string
+    timestamp?: string
+  }
+  assistant_message: {
+    role: string
+    content: string
+    timestamp?: string
+    agent_events?: any[]
+    suggestions?: string[]
+    disclaimer?: string
+    mode?: string
+    agents_involved?: string[]
+    total_time?: number
+    total_tokens?: number
+    subtasks_completed?: number
+  }
+}
+
 export interface DashboardStats {
   total_sessions: number
   total_messages: number

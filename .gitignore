@@ -56,6 +56,10 @@ agent_identities/*.md
 knowledge/data/milvus_lite.db
 knowledge/data/.milvus_lite.db.lock
 knowledge/scripts/knowledge/data/milvus_lite.db
+memory/data/*.db
+memory/data/*.db-shm
+memory/data/*.db-wal
+memory/data/.milvus_lite.db.lock
 
 # 对话记录
 memory/swarm/session_summaries/*
