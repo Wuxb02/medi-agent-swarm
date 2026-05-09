@@ -37,14 +37,22 @@ python examples/test_all.py
 
 ### 请求处理流程
 
-```
+```text
 用户输入 → main.py → SwarmCoordinator
-  ├─ 简单问题 → 单个 Agent 直接处理
-  └─ 复杂问题 → LeadAgent 任务分解
-                  ├─ ConsultationAgent (健康咨询)
-                  ├─ DiagnosticAgent (症状诊断)
-                  └─ ResearchAgent (医学研究)
-                  → LeadAgent 结果综合 → 最终回答
+  │
+  ├─ 检索长短期记忆，构建增强上下文
+  │
+  ├─ LeadAgent.assess_and_decompose()  ← 始终先由 LeadAgent 判断复杂度并分解
+  │
+  ├─ 1 个子任务 → 对应 Agent 直接处理 → 最终回答
+  │
+  └─ ≥2 个子任务 → Swarm 模式
+       ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
+       ├─ Worker 自主认领并行执行
+       │    ├─ ConsultationAgent (健康咨询)
+       │    ├─ DiagnosticAgent (症状诊断)
+       │    └─ ResearchAgent (医学研究)
+       └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
 
 每个 Worker Agent 内部运行 `AgentLoop`（Think-Act-Observe 循环），每次最多执行 2 次工具调用。
@@ -60,8 +68,8 @@ python examples/test_all.py
 | `core/skill_models.py` | SkillDefinition 数据模型 |
 | `core/base_tools.py` | 基础工具工厂（activate_skill） |
 | `agents/base_agent.py` | Agent 抽象基类 |
-| `swarm/swarm_coordinator.py` | 顶层协调器，路由决策 + 并行调度（90s 超时） |
-| `swarm/lead_agent.py` | 任务分解 + 结果综合 |
+| `swarm/swarm_coordinator.py` | 顶层协调器，记忆检索 + 路由分发 + 并行调度（90s 超时） |
+| `swarm/lead_agent.py` | 复杂度评估、任务分解（assess_and_decompose）+ SubTask 创建（create_subtasks）+ 结果综合（synthesize_results） |
 | `swarm/shared_context.py` | 共享黑板系统（SubTask/Contribution 生命周期管理） |
 | `memory/short_term.py` | 会话级短期记忆（支持内存/Redis） |
 | `memory/long_term.py` | 跨会话长期记忆（Mem0 云服务） |

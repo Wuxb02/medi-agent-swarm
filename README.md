@@ -838,30 +838,20 @@ python knowledge/scripts/deduplicate.py
 运行时：
 用户问题
    ↓
-【原子查询】→ activate_skill("xxx")
-   │                ↓
-   │    Skill 指令注入 system prompt + 工具加载
-   │                ↓
-   │         LLM 使用工具执行 → Milvus/业务逻辑
+SwarmCoordinator
+   ├─ 检索长短期记忆，构建增强上下文
    │
-   └─【复杂问题】
-          ↓
-   SwarmCoordinator（智能路由）
-          ↓
-     LeadAgent（分解任务）
-          ↓
-    发布到 SharedContext（共享环境）
-          ↓
-    ┌─────┴─────┬────────┐
-    ↓           ↓        ↓
-ConsultAgent DiagAgent ResearchAgent
-（各 Agent 独立 activate_skill + 执行）（并行）
-    │           │        │
-    └───────────┴────────┘
-          ↓
-    LeadAgent（汇总结果）
-          ↓
-   SessionSummary（学习）
+   ├─ LeadAgent.assess_and_decompose()  ← 始终先由 LeadAgent 判断复杂度并分解
+   │
+   ├─ 1 个子任务 → 对应 Agent 直接处理 → 最终回答
+   │
+   └─ ≥2 个子任务 → Swarm 模式
+        ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
+        ├─ Worker 自主认领并行执行
+        │    ├─ ConsultAgent（独立 activate_skill + 执行）
+        │    ├─ DiagAgent（独立 activate_skill + 执行）
+        │    └─ ResearchAgent（独立 activate_skill + 执行）
+        └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
 
 **核心原理**：
@@ -877,12 +867,13 @@ ConsultAgent DiagAgent ResearchAgent
 **关键特性**：去中心化、自组织、涌现智能
 
 **工作流程**：
-1. 简单问题 → 单 Agent（快速响应）
-2. 复杂问题 → LeadAgent 分解任务
-3. Worker Agents 自主认领（基于能力匹配）
-4. 并行执行（每个 Agent 自主选择 Skills）
-5. LeadAgent 汇总结果
-6. SessionSummary 学习总结
+1. SwarmCoordinator 检索长短期记忆，构建增强上下文
+2. **LeadAgent 始终先介入**，评估复杂度并分解任务（所有问题都走这一步）
+3. 1 个子任务 → 单 Agent 直接处理（快速响应）
+4. ≥2 个子任务 → LeadAgent 创建 SubTask 写入 SharedContext
+5. Worker Agents 自主认领并行执行（基于能力匹配，每个 Agent 自主选择 Skills）
+6. LeadAgent 汇总结果
+7. SessionSummary 学习总结
 
 ### 记忆系统架构
 

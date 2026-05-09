@@ -249,11 +249,9 @@ class MedicalKnowledgeBase:
             logger.info(f"Deleted collection: {self.collection_name}")
 
     def count_documents(self) -> int:
-        """统计文档数量"""
+        """统计去重后的文档数量（按 doc_id 聚合）"""
         try:
-            stats = self.milvus_client.describe_collection(self.collection_name)
-            # Note: Milvus Lite may not return accurate count, this is a best-effort
-            return stats.get("num_entities", 0)
+            return len(self.list_documents())
         except Exception as e:
             logger.warning(f"Failed to count documents: {e}")
             return 0
