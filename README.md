@@ -591,6 +591,94 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 - 动态 max_tokens：高熵 512 / 普通 256，平衡摘要质量与成本
 - 自动降级：LLM 不可用时自动切换为截断模式
 
+### 熵管理全流程
+
+熵管理器是系统的"垃圾回收器"，借鉴信息论中"熵"的概念，自动清理和压缩会话历史中的冗余信息，让 LLM 始终聚焦于有效内容。
+
+#### 设计原则
+
+- **读时清理，非写时清理**：消息以原始形态存储，每次读取时透明地执行去重+压缩，对 Agent 核心逻辑零侵入
+- **熵驱动**：先评估信息熵，低熵时零开销跳过，高熵时按需执行去重和压缩
+- **自动降级**：LLM 不可用时自动切换为截断模式，嵌入模型加载失败时直接返回原始消息
+
+#### auto_clean 流水线
+
+`auto_clean()` 是熵管理的主入口，调用方只需传入消息列表和上限：
+
+```
+输入: messages[], max_messages
+  │
+  ▼
+Step 1: estimate_entropy()          计算多维熵指标
+  │
+  ├── entropy_level == "low" → 返回原始消息（零开销）
+  │
+  ▼
+Step 2: duplicate_rate > 0.1?       判断是否值得去重
+  │
+  ├── YES → deduplicate_messages()  贪心语义去重
+  │         └── 复检熵 → "low" 则返回（跳过 LLM）
+  │
+  ▼
+Step 3: total > max_messages?       判断是否需要压缩
+  │
+  ├── YES → compress_session_history()
+  │         ├── LLM 语义摘要（含动态熵约束）
+  │         └── 截断降级（LLM 不可用时）
+```
+
+#### 熵评估（多指标判定）
+
+| 指标 | 计算方式 | 高熵阈值 |
+|------|----------|----------|
+| `total_messages` | 消息总数 | > 20 |
+| `duplicate_rate` | 两两余弦相似度 > 0.9 的对数 / 总对数 | > 15% |
+| `avg_message_length` | 平均字符数 | > 500 |
+
+**判定规则**：任一指标触发即标记为 `entropy_level = "high"`。
+
+`duplicate_rate` 计算示例：5 条消息共有 `5×4/2 = 10` 对组合，其中 2 对的余弦相似度 > 0.9，则 `duplicate_rate = 2/10 = 20%`。
+
+#### 语义去重
+
+基于 `BAAI/bge-small-zh-v1.5` 嵌入模型（512 维中文向量），采用贪心策略：
+
+- 从新到旧逐条比对，与已保留条目的余弦相似度 > 0.9 则标记为重复
+- 语义相同但措辞不同的消息也能被识别（如"高血压怎么办"与"得了高血压该怎么处理"）
+
+#### LLM 语义压缩
+
+当 `llm_client` 可用时，调用 LLM 将早期对话压缩为 200 字以内的结构化摘要。关键设计：**熵指标驱动动态约束注入**——
+
+| 熵特征 | 注入的 LLM 约束 |
+|--------|----------------|
+| `duplicate_rate > 20%` | "对话中存在大量重复内容，请高度去重，相似问题只保留一个" |
+| `avg_message_length > 500` | "单条消息较长，请重点提炼核心信息" |
+| `total_messages > 30` | "对话轮次较多，请高度概括，聚焦最后的关键结论" |
+
+LLM 的 `max_tokens` 也受熵等级影响：高熵 512 tokens，普通 256 tokens。
+
+LLM 不可用或调用失败时，自动降级为截断模式：将 user + assistant 配对，截取前 50/100 字符生成摘要。
+
+#### 集成位置
+
+| 集成点 | 位置 | 作用 |
+|--------|------|------|
+| **ShortTermMemory** | `memory/short_term.py` | 主力战场：在 `get_recent_messages()` 中调用 `auto_clean()`，携带 LLM 客户端 |
+| **LongTermMemory** | `memory/long_term.py` | 轻量使用：在 `search_similar_sessions()` 中仅调用 `deduplicate_sessions()`，无 LLM 客户端 |
+| **AgentLoop** | `core/agent_loop.py` | 通过 `get_history()` 间接调用，无直接依赖 |
+| **SwarmCoordinator** | `swarm/swarm_coordinator.py` | 传入 LLM 客户端，使短期记忆具备 LLM 压缩能力 |
+
+核心流程：
+
+```
+AgentLoop._initialize_messages()
+  → ShortTermMemory.get_history(session_id, limit=5)
+    → get_recent_messages()
+      → entropy_manager.auto_clean(messages, max_messages=5)
+        → 去重 + 压缩后的干净消息返回给 Agent
+```
+
 ### 验证
 
 运行完整测试套件（包含 Harness 测试）：
