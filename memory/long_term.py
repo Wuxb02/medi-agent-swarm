@@ -20,6 +20,7 @@ import os
 # Harness Engineering: 熵管理
 try:
     from .entropy_manager import MemoryEntropyManager
+    from .embedding import load_embedding_model
     ENTROPY_ENABLED = True
 except ImportError:
     logger.warning("EntropyManager not found, running without entropy management")
@@ -61,9 +62,12 @@ class LongTermMemory:
         self.enabled = True
 
         # Harness Engineering: 熵管理器
-        self.entropy_manager = MemoryEntropyManager() if ENTROPY_ENABLED else None
         if ENTROPY_ENABLED:
+            embedding_client = load_embedding_model()
+            self.entropy_manager = MemoryEntropyManager(embedding_client=embedding_client)
             logger.debug("✅ Entropy management enabled for long-term memory")
+        else:
+            self.entropy_manager = None
 
         try:
             # 获取 API key（优先级：config参数 > 环境变量）

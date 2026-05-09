@@ -16,6 +16,7 @@ from loguru import logger
 # Harness Engineering: 熵管理
 try:
     from .entropy_manager import MemoryEntropyManager
+    from .embedding import load_embedding_model
     ENTROPY_ENABLED = True
 except ImportError:
     logger.warning("EntropyManager not found, running without entropy management")
@@ -113,9 +114,12 @@ class ShortTermMemory:
         self._initialized = True
 
         # Harness Engineering: 熵管理器
-        self.entropy_manager = MemoryEntropyManager(llm_client=llm_client) if ENTROPY_ENABLED else None
         if ENTROPY_ENABLED:
+            embedding_client = load_embedding_model()
+            self.entropy_manager = MemoryEntropyManager(embedding_client=embedding_client, llm_client=llm_client)
             logger.debug("✅ Entropy management enabled for short-term memory")
+        else:
+            self.entropy_manager = None
 
         if storage_type == "redis":
             try:

@@ -19,6 +19,7 @@ sys.path.insert(0, str(project_root))
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from swarm import SwarmCoordinator, process_with_swarm, SharedContext, EventType
 from memory import AgentIdentityManager, ShortTermMemory, LongTermMemory, MemoryEntropyManager
+from memory.embedding import load_embedding_model
 
 # Harness Engineering 模块
 try:
@@ -1144,18 +1145,34 @@ async def test_harness_entropy_manager():
     print("测试 8.3: Harness 熵管理器")
     print("="*70)
 
-    manager = MemoryEntropyManager()
+    embedding_client = load_embedding_model()
+    manager = MemoryEntropyManager(embedding_client=embedding_client)
 
-    # 测试 1: 消息去重 (deduplicate_messages)
+    # 测试 1: 消息去重 - 精确重复 (deduplicate_messages)
     messages = [
         {"role": "user", "content": "高血压怎么办？"},
         {"role": "assistant", "content": "建议低盐饮食。"},
-        {"role": "user", "content": "高血压怎么办？"},  # 重复
-        {"role": "assistant", "content": "建议低盐饮食。"},  # 重复
+        {"role": "user", "content": "高血压怎么办？"},  # 精确重复
+        {"role": "assistant", "content": "建议低盐饮食。"},  # 精确重复
     ]
 
     deduplicated = manager.deduplicate_messages(messages)
-    assert len(deduplicated) == 2, "应该去除2条重复消息"
+    assert len(deduplicated) == 2, f"应该去除2条重复消息，实际得到{len(deduplicated)}条"
+
+    # 测试 1b: 消息去重 - 语义相似（措辞不同但意思相同）
+    semantic_dup_messages = [
+        {"role": "user", "content": "高血压应该怎么办？"},
+        {"role": "assistant", "content": "建议减少盐的摄入量，保持低盐饮食习惯。"},
+        {"role": "user", "content": "得了高血压该怎么处理？"},  # 语义相似
+        {"role": "assistant", "content": "建议控制饮食中的盐分，采取低盐饮食方式。"},  # 语义相似
+        {"role": "user", "content": "今天天气真好，出去散步吧。"},  # 无关内容
+    ]
+
+    semantic_dedup = manager.deduplicate_messages(semantic_dup_messages)
+    assert len(semantic_dedup) < len(semantic_dup_messages), (
+        f"语义相似消息应被去重，预期 < {len(semantic_dup_messages)}，实际 {len(semantic_dedup)}"
+    )
+    print(f"  ✓ 语义去重: {len(semantic_dup_messages)} → {len(semantic_dedup)} 条")
 
     # 测试会话历史压缩
     long_messages = []
@@ -1172,7 +1189,7 @@ async def test_harness_entropy_manager():
     assert entropy_result["entropy_level"] in ["low", "high"], "应该返回两级熵等级"
     assert "total_messages" in entropy_result, "应该包含总消息数"
 
-    # 测试 2b: 多指标判定 - 消息数少但重复率高
+    # 测试 2b: 多指标判定 - 消息数少但重复率高（语义重复）
     dup_messages = [
         {"role": "user", "content": "头疼怎么办？"},
         {"role": "assistant", "content": "建议休息。"},
@@ -1185,37 +1202,51 @@ async def test_harness_entropy_manager():
     assert dup_entropy["entropy_level"] == "high", "重复率高应判定为 high"
     assert dup_entropy["duplicate_rate"] > 0.15, "重复率应超过阈值"
 
-    # 测试 2c: 多指标判定 - 消息数少但平均长度大
+    # 测试 2c: 多指标判定 - 消息数少但平均长度大（>500字触发阈值）
     long_content_messages = [
-        {"role": "user", "content": "症状描述" * 100},  # 600字
-        {"role": "assistant", "content": "详细建议" * 100},
+        {"role": "user", "content": "症状描述" * 150},  # 600字
+        {"role": "assistant", "content": "详细建议" * 150},
     ]
     long_entropy = manager.estimate_entropy(long_content_messages)
     assert long_entropy["entropy_level"] == "high", "平均长度大应判定为 high"
 
-    # 测试 3: 会话去重 (deduplicate_sessions)
+    # 测试 3: 会话去重 - 语义相似 (deduplicate_sessions)
     from datetime import datetime
     sessions = [
         {
-            "memory_id": "1",
-            "content": "问题：高血压怎么办？\n回答：建议低盐饮食...",
+            "session_id": "1",
+            "question": "高血压应该怎么办？",
+            "summary": "建议低盐饮食，定期监测血压，适当运动",
             "timestamp": datetime(2026, 1, 1)
         },
         {
-            "memory_id": "2",
-            "content": "问题：高血压怎么办？\n回答：建议低盐饮食...",  # 重复
+            "session_id": "2",
+            "question": "得了高血压应该如何处理？",
+            "summary": "建议低盐饮食，经常测量血压，保持适量运动",  # 语义相似
             "timestamp": datetime(2026, 1, 2)
         },
         {
-            "memory_id": "3",
-            "content": "问题：感冒了怎么办？\n回答：建议多喝水...",
+            "session_id": "3",
+            "question": "感冒了怎么办？",
+            "summary": "建议多喝水，注意休息",
             "timestamp": datetime(2026, 1, 3)
         },
     ]
 
     deduplicated_sessions = manager.deduplicate_sessions(sessions)
-    assert len(deduplicated_sessions) < len(sessions), "应该去除重复会话"
-    print(f"  ✓ 去重前: {len(sessions)} 个会话，去重后: {len(deduplicated_sessions)} 个")
+    assert len(deduplicated_sessions) == 2, (
+        f"语义相似会话应被去重，预期2个，实际{len(deduplicated_sessions)}个"
+    )
+    print(f"  ✓ 会话去重: {len(sessions)} → {len(deduplicated_sessions)} 个")
+
+    # 测试 3b: 语义不同的会话不应被误判
+    distinct_sessions = [
+        {"session_id": "1", "question": "高血压怎么办？", "summary": "低盐饮食"},
+        {"session_id": "2", "question": "糖尿病注意事项？", "summary": "控制血糖"},
+        {"session_id": "3", "question": "失眠怎么调理？", "summary": "规律作息"},
+    ]
+    distinct_dedup = manager.deduplicate_sessions(distinct_sessions)
+    assert len(distinct_dedup) == 3, "语义不同的会话不应被去重"
 
     # 测试 4: 清理过期记忆 (cleanup_old_memories)
     old_memories = [
@@ -1230,10 +1261,10 @@ async def test_harness_entropy_manager():
     print(f"  ✓ 清理前: {len(old_memories)} 条记忆，清理后: {len(cleaned)} 条")
 
     # 测试 5: auto_clean 熵驱动行为
-    # 5a: 低熵 → 不清理
+    # 5a: 低熵 → 不清理（语义不同的短消息）
     low_entropy_messages = [
-        {"role": "user", "content": "你好"},
-        {"role": "assistant", "content": "你好，有什么可以帮你的？"},
+        {"role": "user", "content": "今天天气怎么样？"},
+        {"role": "assistant", "content": "今天晴天，气温25度，适合外出。"},
     ]
     result = await manager.auto_clean(low_entropy_messages, max_messages=10)
     assert result is low_entropy_messages, "低熵应直接返回，不做清理"

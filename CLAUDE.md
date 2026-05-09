@@ -119,7 +119,5 @@ chat_stream() 完成
 
 ## 已知问题
 
-- `validation/__init__.py` 导入 `from .auto_fixer`，但实际文件名为 `auto_fixer_20260428_231043.py`，会导致 ImportError（Harness 功能优雅降级）
-- `swarm/__init__.py` 导入 `from .events`，但实际文件名为 `events_20260428_231035.py`，会导致事件系统不可用
 - 测试使用 raw assert 而非 pytest/unittest，无正式测试框架
 - 无 linting/formatting/CI 配置

@@ -4,43 +4,93 @@
 
 基于 Harness Engineering 原则：
 - 系统复杂度的"垃圾回收"
-- 自动去重和压缩
+- 自动去重和压缩（基于向量语义相似度）
 - 保持系统简洁
 """
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from loguru import logger
-import hashlib
-import json
+import numpy as np
 
 from core.prompt_loader import PromptLoader
+from .embedding import batch_cosine_similarity
 
 
 class MemoryEntropyManager:
     """记忆熵管理器"""
 
-    def __init__(self, llm_client=None):
+    def __init__(self, embedding_client, llm_client=None):
         """
         初始化熵管理器
 
         Args:
+            embedding_client: SentenceTransformer 实例，用于语义相似度计算
             llm_client: LLM 客户端实例（可选），用于生成语义摘要。
                         为 None 时降级为截断模式。
         """
+        self.embedding_client = embedding_client
         self.llm_client = llm_client
-        self.deduplication_threshold = 0.9  # 相似度阈值
+        self.deduplication_threshold = 0.9  # 语义相似度阈值
         self.max_age_days = 90  # 记忆最大保留天数
         self.compression_threshold = 10  # 超过10条消息开始压缩
 
         mode = "LLM语义摘要" if llm_client else "截断降级"
         logger.debug(f"📦 MemoryEntropyManager initialized (压缩模式: {mode})")
 
+    def _encode_contents(self, contents: List[str]) -> np.ndarray:
+        """批量编码文本为向量"""
+        return self.embedding_client.encode(contents, show_progress_bar=False)
+
+    def _greedy_dedup(
+        self,
+        items: List[Dict[str, Any]],
+        contents: List[str],
+    ) -> List[Dict[str, Any]]:
+        """
+        基于向量相似度的贪心去重。
+
+        计算完整相似度矩阵后，逐条与已保留条目比较，相似度 > threshold 则跳过。
+
+        Args:
+            items: 原始条目列表
+            contents: 对应的文本内容列表（用于编码）
+
+        Returns:
+            去重后的条目列表
+        """
+        if not items:
+            return []
+
+        vectors = self._encode_contents(contents)
+        sim_matrix = batch_cosine_similarity(vectors)
+
+        unique_items = []
+        kept_indices = []
+
+        for i, item in enumerate(items):
+            is_duplicate = False
+            for j in kept_indices:
+                sim = float(sim_matrix[i, j])
+                if sim > self.deduplication_threshold:
+                    is_duplicate = True
+                    logger.debug(
+                        f"🗑️ Deduplicated (sim={sim:.2f}): {contents[i][:30]}..."
+                    )
+                    break
+
+            if not is_duplicate:
+                unique_items.append(item)
+                kept_indices.append(i)
+
+        removed_count = len(items) - len(unique_items)
+        if removed_count > 0:
+            logger.info(f"🗑️ Removed {removed_count} duplicate entries")
+
+        return unique_items
+
     def deduplicate_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        去重消息列表
-
-        使用内容哈希检测完全重复的消息
-        保留最新的一条
+        去重消息列表（基于语义相似度）
 
         Args:
             messages: 消息列表
@@ -51,34 +101,12 @@ class MemoryEntropyManager:
         if not messages:
             return []
 
-        unique_messages = []
-        seen_hashes = {}
-
-        for msg in messages:
-            content = msg.get("content", "")
-            role = msg.get("role", "")
-
-            # 生成内容哈希
-            content_hash = hashlib.md5(f"{role}:{content}".encode()).hexdigest()
-
-            if content_hash not in seen_hashes:
-                unique_messages.append(msg)
-                seen_hashes[content_hash] = msg
-            else:
-                logger.debug(f"🗑️ Deduplicated message: {content[:30]}...")
-
-        removed_count = len(messages) - len(unique_messages)
-        if removed_count > 0:
-            logger.info(f"🗑️ Removed {removed_count} duplicate messages")
-
-        return unique_messages
+        contents = [msg.get("content", "") for msg in messages]
+        return self._greedy_dedup(messages, contents)
 
     def deduplicate_sessions(self, sessions: List[Dict[str, Any]]) -> List[Dict]:
         """
-        去重相似会话
-
-        使用内容哈希检测完全重复的会话总结
-        使用向量相似度检测高度相似的会话（未实现）
+        去重相似会话（基于语义相似度）
 
         Args:
             sessions: 会话列表
@@ -89,31 +117,11 @@ class MemoryEntropyManager:
         if not sessions:
             return []
 
-        unique_sessions = []
-        seen_hashes = set()
-
-        for session in sessions:
-            # 提取关键内容
-            question = session.get("question", "")
-            summary = session.get("summary", "")
-            content = f"{question}:{summary}"
-
-            # 生成哈希
-            content_hash = hashlib.md5(content.encode()).hexdigest()
-
-            if content_hash not in seen_hashes:
-                unique_sessions.append(session)
-                seen_hashes.add(content_hash)
-            else:
-                logger.debug(
-                    f"🗑️ Deduplicated session: {session.get('session_id', 'unknown')}"
-                )
-
-        removed_count = len(sessions) - len(unique_sessions)
-        if removed_count > 0:
-            logger.info(f"🗑️ Removed {removed_count} duplicate sessions")
-
-        return unique_sessions
+        contents = [
+            f"{s.get('question', '')}:{s.get('summary', '')}"
+            for s in sessions
+        ]
+        return self._greedy_dedup(sessions, contents)
 
     def cleanup_old_memories(
         self,
@@ -357,7 +365,7 @@ class MemoryEntropyManager:
 
         指标：
         - 消息总数
-        - 重复率（近似）
+        - 重复率（基于语义相似度）
         - 平均消息长度
         - 建议操作
 
@@ -383,14 +391,12 @@ class MemoryEntropyManager:
         total_length = sum(len(msg.get("content", "")) for msg in messages)
         avg_length = total_length / total_messages if total_messages > 0 else 0
 
-        # 估算重复率（简单版本：基于内容哈希）
-        content_hashes = [
-            hashlib.md5(msg.get("content", "").encode()).hexdigest()
-            for msg in messages
-        ]
-        unique_count = len(set(content_hashes))
+        # 估算重复率（基于向量语义相似度）
+        contents = [msg.get("content", "") for msg in messages]
+        duplicate_rate = self._estimate_duplicate_rate(contents)
+
+        unique_count = int(total_messages * (1 - duplicate_rate))
         estimated_duplicates = total_messages - unique_count
-        duplicate_rate = estimated_duplicates / total_messages if total_messages > 0 else 0
 
         # 评估熵等级（多指标，任一触发即 high）
         entropy_level = "low"
@@ -417,6 +423,32 @@ class MemoryEntropyManager:
             "entropy_level": entropy_level,
             "recommendations": recommendations
         }
+
+    def _estimate_duplicate_rate(self, contents: List[str]) -> float:
+        """
+        基于向量相似度估算重复率。
+
+        计算 pairwise 余弦相似度，相似度 > threshold 的对数占总对数的比例。
+
+        Args:
+            contents: 文本内容列表
+
+        Returns:
+            重复率（0.0 ~ 1.0）
+        """
+        n = len(contents)
+        if n <= 1:
+            return 0.0
+
+        vectors = self._encode_contents(contents)
+        sim_matrix = batch_cosine_similarity(vectors)
+
+        # 统计上三角中 > threshold 的对数（排除对角线）
+        total_pairs = n * (n - 1) / 2
+        upper_tri = np.triu(sim_matrix, k=1)
+        duplicate_pairs = int(np.sum(upper_tri > self.deduplication_threshold))
+
+        return duplicate_pairs / total_pairs if total_pairs > 0 else 0.0
 
     async def auto_clean(
         self,

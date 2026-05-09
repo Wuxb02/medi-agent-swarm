@@ -264,7 +264,8 @@ medix-agent-swarm/
 │   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要 + 子会话隔离）
 │   ├── personal_profile.py            # 个人健康档案（全局 memory/PERSONAL.md）
 │   ├── session_summary.py             # 会话总结
-│   └── entropy_manager.py             # 熵管理器（LLM 摘要 + 截断降级）
+│   ├── entropy_manager.py             # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
+│   └── embedding.py                   # 共享 embedding 工具（模型加载 + 余弦相似度）
 │
 ├── constraints/                       # 约束系统
 │   ├── agent_constraints.yaml         # Agent 能力边界
@@ -454,7 +455,7 @@ memory = ShortTermMemory(session_id="user_123", storage_type="redis")
 
 - **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留症状、诊断、用药等关键医学信息
 - **截断降级**（自动）：LLM 不可用或调用失败时，自动降级为截断模式
-- **去重**：基于 MD5 哈希检测并移除重复消息
+- **去重**：基于向量语义相似度（BAAI/bge-small-zh-v1.5）检测并移除语义重复消息，阈值 0.9
 
 #### 个人档案（PersonalProfile）
 
@@ -583,8 +584,9 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 
 **3. 熵管理**（`memory/entropy_manager.py`）
 
-- 熵驱动自动清理：先估熵→低熵跳过（零开销）→去重复检→LLM 压缩
+- 熵驱动自动清理：先估熵→低熵跳过（零开销）→向量语义去重复检→LLM 压缩
 - 多指标两级判定（low/high）：消息数 >20、重复率 >15%、平均长度 >500 任一触发即 high
+- 基于向量语义相似度的去重：使用 BAAI/bge-small-zh-v1.5 嵌入模型，余弦相似度 > 0.9 判定为重复
 - LLM 压缩注入熵约束：高重复→去重要求、长消息→提炼核心、多轮→高度概括
 - 动态 max_tokens：高熵 512 / 普通 256，平衡摘要质量与成本
 - 自动降级：LLM 不可用时自动切换为截断模式
@@ -805,7 +807,7 @@ ConsultAgent DiagAgent ResearchAgent
 │  存储：内存（默认）或 Redis        │
 ├────────────────────────────────────┤
 │  熵管理器（自动优化）              │
-│  - MD5 去重（检测重复消息）        │
+│  - 向量语义去重（检测重复消息）    │
 │  - LLM 语义摘要（压缩早期对话）    │
 │  - 截断降级（LLM 不可用时）        │
 └────────────────────────────────────┘
