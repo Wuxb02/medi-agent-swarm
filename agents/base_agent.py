@@ -70,8 +70,9 @@ class BaseAgent(ABC):
 
     def _register_base_tools(self):
         """注册始终可用的基础工具"""
-        from core.base_tools import create_activate_skill_tool
+        from core.tools import create_activate_skill_tool, create_question_for_user_tool
 
+        # 注册 activate_skill
         activate_skill_func = create_activate_skill_tool(self.skill_registry)
 
         self.skill_registry.register_base_tool(
@@ -82,6 +83,34 @@ class BaseAgent(ABC):
                 name="name",
                 type="string",
                 description="Skill 名称（如 search-knowledge, deep-research）",
+                required=True
+            )]
+        )
+
+        # 注册 question_for_user（交互式问卷工具）
+        def _get_manager():
+            return getattr(self.loop, 'questionnaire_manager', None)
+
+        q_func = create_question_for_user_tool(_get_manager)
+
+        self.skill_registry.register_base_tool(
+            name="question_for_user",
+            function=q_func,
+            description=(
+                "向用户发送结构化问卷，收集诊断所需信息。"
+                "支持单选(enum)、多选(multi)、文本输入(input)三种题型。"
+                "在诊断前收集患者背景信息时使用此工具。"
+            ),
+            parameters=[SkillParameter(
+                name="questionnaire",
+                type="string",
+                description=(
+                    "XML 格式的问卷，包含 <questions> 标签包裹的 <question> 元素。"
+                    "每个问题有 header（标题）、type（enum/multi/input）、"
+                    "text（问题文本）和 suggest（选项）。"
+                    "例：<questions><question header='年龄' type='input'>"
+                    "<text>您的年龄是？</text></question></questions>"
+                ),
                 required=True
             )]
         )
@@ -220,6 +249,10 @@ class BaseAgent(ABC):
     def set_on_content_token(self, callback):
         """设置最终回答 token 流式回调"""
         self.loop.on_content_token = callback
+
+    def set_on_questionnaire(self, callback):
+        """设置问卷事件回调"""
+        self.loop.on_questionnaire = callback
 
     async def process_subtask(
         self,

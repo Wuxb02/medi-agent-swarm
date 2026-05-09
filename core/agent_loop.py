@@ -37,7 +37,8 @@ class AgentLoop:
     def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 2,
                  on_thinking: Optional[Any] = None, on_tool_step: Optional[Any] = None,
                  on_thinking_done: Optional[Any] = None, on_content_token: Optional[Any] = None,
-                 user_context: Optional[str] = None):
+                 user_context: Optional[str] = None, questionnaire_manager: Optional[Any] = None,
+                 on_questionnaire: Optional[Any] = None):
         """
         初始化Agent循环引擎
 
@@ -50,6 +51,8 @@ class AgentLoop:
             on_thinking_done: 推理轮次结束回调（可选）
             on_content_token: 最终回答 token 流式回调（可选）
             user_context: 用户档案文本（可选，由 Coordinator 注入）
+            questionnaire_manager: 问卷管理器（可选，用于交互式提问）
+            on_questionnaire: 问卷事件回调（可选）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
@@ -61,6 +64,9 @@ class AgentLoop:
         self.on_tool_step = on_tool_step
         self.on_thinking_done = on_thinking_done
         self.on_content_token = on_content_token
+        self.questionnaire_manager = questionnaire_manager
+        self.on_questionnaire = on_questionnaire
+        self.session_id: Optional[str] = None
 
         # Harness Engineering: 约束验证器和自动修复器
         self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
@@ -89,6 +95,7 @@ class AgentLoop:
 
         # 重置计数
         self.tool_call_count = 0
+        self.session_id = session_id
 
         # 重置 Skill 激活状态（每次 loop 开始时无激活的 Skill）
         if hasattr(agent, 'skill_registry') and agent.skill_registry:
@@ -271,6 +278,14 @@ class AgentLoop:
                                 tool_name=tool_call.name,
                                 arguments=tool_call.arguments
                             )
+
+                            # 检测是否需要用户输入（问卷模式）
+                            if (isinstance(tool_result, dict)
+                                    and tool_result.get("needs_user_input")
+                                    and self.questionnaire_manager):
+                                tool_result = await self._handle_questionnaire_result(
+                                    tool_call, tool_result, agent
+                                )
 
                             # 回调工具步骤
                             if self.on_tool_step:
@@ -530,3 +545,61 @@ class AgentLoop:
             ]
 
         return message
+
+    async def _handle_questionnaire_result(
+        self, tool_call, tool_result: Dict[str, Any], agent
+    ) -> Dict[str, Any]:
+        """处理需要用户输入的工具结果（问卷暂停/恢复）
+
+        流程：
+        1. 通过 on_tool_step 回调发射 AGENT_QUESTIONNAIRE 事件
+        2. await QuestionnaireManager 的 Future（阻塞等待用户回答）
+        3. 收到答案后格式化为 tool_result 返回
+
+        Args:
+            tool_call: LLM 请求的工具调用
+            tool_result: 工具返回的 needs_user_input 标记数据
+            agent: Agent 实例
+
+        Returns:
+            格式化后的 tool_result 字典
+        """
+        from swarm.events import Event, EventType
+        from core.tools.questionnaire import format_answers_for_llm
+
+        questionnaire_id = tool_result.get("questionnaire_id")
+        questionnaire_data = tool_result.get("questionnaire_data")
+        questions_ref = tool_result.get("_questions_ref", [])
+
+        logger.info(f"问卷 {questionnaire_id} 等待用户输入...")
+
+        # 通过 on_questionnaire 回调发射问卷事件
+        if self.on_questionnaire:
+            self.on_questionnaire(
+                questionnaire_id=questionnaire_id,
+                questionnaire_data=questionnaire_data,
+            )
+
+        try:
+            # 等待用户回答（阻塞，最多 300 秒）
+            answers = await self.questionnaire_manager.create_pending(
+                questionnaire_id, timeout=300.0
+            )
+
+            # 格式化答案为 LLM 可读文本
+            formatted_text = format_answers_for_llm(questions_ref, answers)
+
+            logger.info(f"问卷 {questionnaire_id} 收到回答: {formatted_text[:100]}...")
+
+            return {
+                "success": True,
+                "answers": answers,
+                "formatted_text": formatted_text,
+            }
+
+        except asyncio.TimeoutError:
+            logger.warning(f"问卷 {questionnaire_id} 超时，继续执行")
+            return {
+                "success": False,
+                "error": "用户未在规定时间内回答问卷，继续分析",
+            }

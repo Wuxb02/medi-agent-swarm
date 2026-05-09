@@ -11,6 +11,7 @@
 
 - **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
 - **📡 流式响应**: 实时推送 Agent 协作过程，可视化多 Agent 并行执行 ✅
+- **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），实现"先问后诊" ✅
 - **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
@@ -98,6 +99,102 @@ class SkillDefinition:
     tool_functions: Dict[str, Callable]  # 实际加载的函数对象
     migrated: bool               # 是否有 tools 声明
 ```
+
+
+## 🩺 交互式问诊（question_for_user）
+
+系统在将用户问题分发给 Worker Agent 之前，由 **LeadAgent 先执行信息澄清阶段**，通过结构化问卷收集用户背景信息，实现"先问后诊"。
+
+### 工作流程
+
+```
+用户输入: "我最近头疼"
+    │
+    ▼
+LeadAgent.clarify()
+    │
+    ├─ LLM 判断: 需要更多信息（症状细节、持续时间、病史等）
+    │
+    ├─ 调用 question_for_user 工具 → 构建 XML 问卷
+    │
+    ├─ 发射 AGENT_QUESTIONNAIRE 事件 → SSE 推送到前端
+    │
+    ├─ AgentLoop 暂停（await Future）←─ ─ ─ ─ ─ ─ ─ ┐
+    │                                           │
+    ▼                                           │
+前端 QuestionnaireCard 渲染                       │
+  ┌──────────────────────┐                        │
+  │  年龄 | 性别 | 症状    │  ← Tab 切换式          │
+  │ ┌──────────────────┐ │                        │
+  │ │ 症状持续了多久？   │ │                        │
+  │ │ ○ 不到1天         │ │                        │
+  │ │ ● 1-3天          │ │                        │
+  │ │ ○ 1周左右        │ │                        │
+  │ │ 其他：[____]      │ │  ← 自由输入框           │
+  │ └──────────────────┘ │                        │
+  │    < 上一题  ●●○  下一题 >                       │
+  └──────────────────────┘                        │
+    │                                             │
+    ├─ 用户填写并提交                               │
+    │                                             │
+    ├─ POST /api/chat/answer ──── resolve Future ─┘
+    │
+    ├─ AgentLoop 恢复，收集到的信息作为 tool_result
+    │
+    ▼
+LeadAgent.assess_and_decompose(问题 + collected_info)
+    │
+    ├─ 单任务 → Agent 处理（已有完整背景信息）
+    └─ 多任务 → Swarm 分发（子任务描述已包含背景信息）
+```
+
+### 核心组件
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| **question_for_user 工具** | `core/tools/questionnaire.py` | XML 问卷解析 + 结构化数据构建 |
+| **QuestionnaireManager** | `core/questionnaire_manager.py` | asyncio.Future 暂停/恢复管理 |
+| **LeadAgent.clarify()** | `swarm/lead_agent.py` | LLM tool calling 收集信息 |
+| **AGENT_QUESTIONNAIRE 事件** | `swarm/events.py` | 向前端推送问卷 |
+| **QuestionnaireCard 组件** | `frontend/src/components/chat/QuestionnaireCard.vue` | Tab 切换式问卷 UI |
+| **答案提交端点** | `api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 |
+
+### XML 问卷格式
+
+```xml
+<questions>
+  <question header="年龄" type="input" required="true">
+    <text>请问您的年龄是？</text>
+  </question>
+  <question header="性别" type="enum" required="true">
+    <text>您的性别是？</text>
+    <suggest>男</suggest>
+    <suggest>女</suggest>
+  </question>
+  <question header="既往病史" type="multi" required="false">
+    <text>您是否有以下既往病史？</text>
+    <suggest>高血压</suggest>
+    <suggest>糖尿病</suggest>
+    <suggest>心脏病</suggest>
+  </question>
+</questions>
+```
+
+**题型说明**：
+
+| type | 渲染方式 | 说明 |
+|------|---------|------|
+| `enum` | 单选按钮 + 其他输入框 | 单选，用户也可在"其他"框自由输入 |
+| `multi` | 复选框 + 其他输入框 | 多选，"其他"内容提交时追加到已选项 |
+| `input` | 文本输入框 | 自由文本，如年龄、症状描述等 |
+
+### 关键设计
+
+1. **LeadAgent 统一收集**：澄清阶段仅在 LeadAgent 层面执行，Worker Agent 不再自行提问
+2. **暂停/恢复机制**：基于 `asyncio.Future`，工具返回 `needs_user_input` 标记后 AgentLoop 自动 await，前端提交后 resolve 继续
+3. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
+4. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
+5. **最多 2 轮澄清**：LeadAgent 最多进行 2 轮问卷交互，避免无限循环
 
 
 ## 🚀 从零开始运行
@@ -217,13 +314,17 @@ medix-agent-swarm/
 │   └── skill_registry_mixin.py        # Skill 注册混入
 │
 ├── core/                              # 核心引擎
-│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新，用户档案注入）
+│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新，用户档案注入，问卷暂停/恢复）
 │   ├── llm_client.py                  # LLM 客户端
 │   ├── prompt_loader.py               # Jinja2 Prompt 模板加载器
 │   ├── skill_loader.py                # 动态加载 Skills（支持多函数加载、指令提取）
 │   ├── skill_registry.py              # Skill 注册表（双层注册、compat_mode 自动检测）
 │   ├── skill_models.py                # SkillDefinition 数据模型
-│   ├── base_tools.py                  # 基础工具工厂（activate_skill）
+│   ├── questionnaire_manager.py       # 问卷 Future 暂停/恢复管理器
+│   ├── tools/                         # 统一基础工具目录
+│   │   ├── __init__.py                # 统一导出
+│   │   ├── activate_skill.py          # activate_skill 工具工厂
+│   │   └── questionnaire.py           # question_for_user 工具（XML 解析 + 格式化）
 │   └── state_manager.py               # 状态管理
 │
 ├── prompt/                            # Prompt 模板（Jinja2，集中管理）
@@ -234,6 +335,8 @@ medix-agent-swarm/
 │   │   └── research_system.j2
 │   ├── swarm/                         # Swarm 协调相关提示词
 │   │   ├── lead_system.j2
+│   │   ├── lead_clarify.j2            # LeadAgent 澄清阶段系统提示词
+│   │   ├── lead_clarify_user.j2       # LeadAgent 澄清阶段用户提示词
 │   │   ├── synthesis.j2
 │   │   ├── assessment_user.j2
 │   │   └── timeout_fallback.j2
@@ -254,10 +357,10 @@ medix-agent-swarm/
 │       └── swarm_disclaimer.j2
 │
 ├── swarm/                             # Swarm 协调器
-│   ├── events.py                      # 事件驱动通信
-│   ├── lead_agent.py                  # 任务分解和汇总
+│   ├── events.py                      # 事件驱动通信（含 AGENT_QUESTIONNAIRE）
+│   ├── lead_agent.py                  # 信息澄清 + 任务分解 + 结果汇总
 │   ├── shared_context.py              # 共享环境（信息素）
-│   └── swarm_coordinator.py           # 智能路由
+│   └── swarm_coordinator.py           # 智能路由（clarify → decompose → route）
 │
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
@@ -391,6 +494,7 @@ SharedContext.on_event_callback → 事件推送
 |------|------|------|
 | POST | `/api/chat` | 非流式问答 |
 | POST | `/api/chat/stream` | 流式问答（换行分隔 JSON） |
+| POST | `/api/chat/answer` | 提交问卷答案（交互式问诊） |
 | GET | `/api/chat/history/{session_id}` | 获取会话历史 |
 | POST | `/api/knowledge/search` | 知识库搜索（去重，返回完整文档） |
 | GET | `/api/knowledge/types` | 知识库类型列表 |
@@ -841,7 +945,9 @@ python knowledge/scripts/deduplicate.py
 SwarmCoordinator
    ├─ 检索长短期记忆，构建增强上下文
    │
-   ├─ LeadAgent.assess_and_decompose()  ← 始终先由 LeadAgent 判断复杂度并分解
+   ├─ LeadAgent.clarify()  ← 信息澄清：通过问卷收集背景信息
+   │
+   ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 判断复杂度并分解
    │
    ├─ 1 个子任务 → 对应 Agent 直接处理 → 最终回答
    │

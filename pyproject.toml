@@ -23,6 +23,7 @@ dependencies = [
     "transformers>=4.41.0",
     "pydantic==2.10.0",
     "pydantic-settings==2.7.0",
+    "pydantic-xml>=2.20.0",
     "mem0ai==0.1.0",
     "redis==5.2.0",
     "qdrant-client==1.12.0",

@@ -44,14 +44,19 @@ class SwarmCoordinator:
         self,
         llm_client: Optional[LLMClient] = None,
         enable_swarm: bool = True,
-        event_callback: Optional[Any] = None
+        event_callback: Optional[Any] = None,
+        questionnaire_manager: Optional[Any] = None
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
         self.event_callback = event_callback
+        self.questionnaire_manager = questionnaire_manager
 
         # 初始化 Agent
-        self.lead_agent = LeadAgent(llm_client=self.llm_client)
+        self.lead_agent = LeadAgent(
+            llm_client=self.llm_client,
+            questionnaire_manager=self.questionnaire_manager,
+        )
         self.consultation_agent = ConsultationAgent()
         self.diagnostic_agent = DiagnosticAgent()
         self.research_agent = ResearchAgent()
@@ -78,6 +83,9 @@ class SwarmCoordinator:
                 worker.loop.short_term_memory = self.short_term_memory
                 if personal_text != "暂无":
                     worker.loop.user_context = personal_text
+                # 注入问卷管理器（用于交互式提问）
+                if self.questionnaire_manager:
+                    worker.loop.questionnaire_manager = self.questionnaire_manager
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
         logger.info(f"Memory system: short_term={self.short_term_memory.storage_type}, long_term={'enabled' if self.long_term_memory.enabled else 'disabled'}")
@@ -155,6 +163,19 @@ class SwarmCoordinator:
                 for mem in similar_memories
             ]
             logger.info(f"Found {len(similar_memories)} similar historical cases from long-term memory")
+
+        # Step 0: LeadAgent 信息澄清（在任务分解之前）
+        clarify_result = await self.lead_agent.clarify(
+            question=question,
+            context=enhanced_context,
+            session_id=session_id,
+            event_callback=self.event_callback,
+        )
+
+        if clarify_result.get("clarified"):
+            collected_info = clarify_result["collected_info"]
+            enhanced_context["collected_info"] = collected_info
+            logger.info(f"LeadAgent 澄清完成，收集信息: {collected_info[:100]}...")
 
         # Step 1: LeadAgent 分解任务
         assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
@@ -786,12 +807,25 @@ class SwarmCoordinator:
 
         worker.set_on_content_token(_on_content_token)
 
+        def _on_questionnaire(questionnaire_id, questionnaire_data):
+            publish_fn(Event(
+                type=EventType.AGENT_QUESTIONNAIRE,
+                source_agent=agent_id,
+                data={
+                    "questionnaire_id": questionnaire_id,
+                    "questionnaire_data": questionnaire_data,
+                }
+            ))
+
+        worker.set_on_questionnaire(_on_questionnaire)
+
     def _cleanup_thinking_callbacks(self, worker):
         """清理 Worker Agent 的 thinking 回调"""
         worker.set_on_thinking(None)
         worker.set_on_tool_step(None)
         worker.set_on_thinking_done(None)
         worker.set_on_content_token(None)
+        worker.set_on_questionnaire(None)
 
     def _extract_suggestions(self, final_answer: str) -> List[str]:
         """从最终答案中提取建议（简化实现）"""

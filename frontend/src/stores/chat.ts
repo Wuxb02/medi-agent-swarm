@@ -357,6 +357,16 @@ export const useChatStore = defineStore('chat', () => {
             msg.content = (msg.content || '') + token
           }
         },
+        onAgentQuestionnaire(data) {
+          const msg = messages.value.find((m) => m.id === assistantMsg.id)
+          if (msg) {
+            const d = data.data || data
+            msg.questionnaire = {
+              questionnaire_id: d.questionnaire_id,
+              questions: d.questionnaire_data?.questions || [],
+            }
+          }
+        },
         onSuggestions(data) {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) msg.suggestions = data.suggestions
@@ -514,5 +524,28 @@ export const useChatStore = defineStore('chat', () => {
     isStreaming.value = false
   }
 
-  return { sessionId, messages, isStreaming, swarmMode, error, sendMessage, loadHistory, clearChat }
+  async function submitAnswers(questionnaireId: string, answers: Record<string, any>) {
+    // 提交问卷答案到后端
+    try {
+      await fetch('/api/chat/answer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionnaire_id: questionnaireId,
+          answers,
+          session_id: sessionId.value,
+        }),
+      })
+    } catch (e: any) {
+      error.value = `提交答案失败：${e.message}`
+    }
+
+    // 清除问卷，显示已提交状态
+    const msg = messages.value.find(m => m.questionnaire?.questionnaire_id === questionnaireId)
+    if (msg) {
+      msg.questionnaire = undefined
+    }
+  }
+
+  return { sessionId, messages, isStreaming, swarmMode, error, sendMessage, loadHistory, clearChat, submitAnswers }
 })

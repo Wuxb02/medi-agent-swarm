@@ -1,0 +1,8 @@
+用户问题：{{ question }}
+{% if context and context != "无" %}
+已有背景信息：
+{{ context }}
+{% endif %}
+
+请分析用户的问题。如果需要收集更多信息以进行准确的医疗咨询，请使用 question_for_user 工具发送问卷。
+如果已有信息足够，直接回复"无需额外信息"。

@@ -8,13 +8,51 @@ LeadAgent：任务分解和结果汇总
 - Worker 自主认领任务并执行
 """
 import uuid
+import json
+import re
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
 from core.llm_client import LLMClient
 from core.prompt_loader import PromptLoader
+from core.tools.questionnaire import (
+    create_question_for_user_tool,
+    parse_questionnaire,
+    format_answers_for_llm,
+    _build_questionnaire_data,
+)
 from .shared_context import SharedContext, SubTask, TaskStatus
 from .events import Event, EventType
+
+
+# question_for_user 的 OpenAI function calling schema
+_QUESTION_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "question_for_user",
+        "description": (
+            "向用户发送结构化问卷，收集诊断所需信息。"
+            "支持单选(enum)、多选(multi)、文本输入(input)三种题型。"
+            "在诊断前收集患者背景信息时使用此工具。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "questionnaire": {
+                    "type": "string",
+                    "description": (
+                        "XML 格式的问卷，包含 <questions> 标签包裹的 <question> 元素。"
+                        "每个问题有 header（标题）、type（enum/multi/input）、"
+                        "text（问题文本）和 suggest（选项）。"
+                        "例：<questions><question header='年龄' type='input'>"
+                        "<text>您的年龄是？</text></question></questions>"
+                    ),
+                }
+            },
+            "required": ["questionnaire"],
+        },
+    },
+}
 
 
 class LeadAgent:
@@ -22,6 +60,7 @@ class LeadAgent:
     Lead Agent：任务协调者
 
     职责：
+    0. **信息澄清（clarify）**：通过结构化问卷收集用户背景信息
     1. 评估问题复杂度
     2. 分解复杂任务为独立子任务
     3. 等待 Worker 完成
@@ -33,13 +72,175 @@ class LeadAgent:
     - 不控制 Worker 行为
     """
 
-    def __init__(self, llm_client: Optional[LLMClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None,
+                 questionnaire_manager: Optional[Any] = None):
         self.agent_id = "lead_agent"
         self.llm_client = llm_client or LLMClient()
+        self.questionnaire_manager = questionnaire_manager
 
     def _get_system_prompt(self) -> str:
         """获取系统提示词"""
         return PromptLoader.load("swarm/lead_system.j2")
+
+    def _get_clarify_system_prompt(self) -> str:
+        """获取澄清阶段的系统提示词"""
+        return PromptLoader.load("swarm/lead_clarify.j2")
+
+    async def clarify(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+        event_callback: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        信息澄清阶段：通过结构化问卷收集用户背景信息
+
+        在任务分解之前执行。如果 LLM 判断需要更多信息，
+        会调用 question_for_user 工具发送问卷给用户。
+
+        Args:
+            question: 用户原始问题
+            context: 已有上下文（记忆等）
+            session_id: 会话 ID
+            event_callback: 事件回调（用于推送问卷到前端）
+
+        Returns:
+            {
+                "clarified": bool,       # 是否进行了澄清
+                "collected_info": str,    # 收集到的信息文本（用于后续注入）
+                "raw_answers": dict,      # 原始答案字典
+            }
+        """
+        if not self.questionnaire_manager:
+            logger.debug("QuestionnaireManager 未配置，跳过澄清阶段")
+            return {"clarified": False, "collected_info": "", "raw_answers": {}}
+
+        # 构建上下文文本
+        context_text = ""
+        if context:
+            parts = []
+            for k, v in context.items():
+                if k == "recent_history" and isinstance(v, list):
+                    parts.append(f"最近对话: {len(v)} 条消息")
+                elif k == "historical_cases" and isinstance(v, list):
+                    parts.append(f"相似历史案例: {len(v)} 个")
+                else:
+                    parts.append(f"{k}: {v}")
+            context_text = "\n".join(parts) if parts else "无"
+
+        messages = [
+            {"role": "system", "content": self._get_clarify_system_prompt()},
+            {"role": "user", "content": PromptLoader.render(
+                "swarm/lead_clarify_user.j2",
+                question=question,
+                context=context_text,
+            )},
+        ]
+
+        collected_answers: Dict[str, Any] = {}
+
+        # 最多进行 2 轮澄清（避免无限循环）
+        for round_num in range(2):
+            try:
+                response = await self.llm_client.chat_with_tools(
+                    messages=messages,
+                    tools=[_QUESTION_TOOL_SCHEMA],
+                    tool_choice="auto",
+                    temperature=0.3,
+                )
+            except Exception as e:
+                logger.error(f"LeadAgent clarify LLM error: {e}")
+                break
+
+            if not response.has_tool_calls():
+                # LLM 不需要更多信息，直接返回
+                logger.info(f"LeadAgent clarify: 无需额外信息（round {round_num}）")
+                break
+
+            # 处理工具调用
+            tool_call = response.tool_calls[0]
+            if tool_call.name != "question_for_user":
+                logger.warning(f"LeadAgent clarify: 未预期的工具调用 {tool_call.name}")
+                break
+
+            questionnaire_xml = tool_call.arguments.get("questionnaire", "")
+
+            try:
+                questions = parse_questionnaire(questionnaire_xml)
+            except Exception as e:
+                logger.error(f"LeadAgent clarify: 问卷解析失败: {e}")
+                break
+
+            questionnaire_id = str(uuid.uuid4())
+            questionnaire_data = _build_questionnaire_data(questions)
+
+            logger.info(f"LeadAgent clarify: 发送问卷 {questionnaire_id}，共 {len(questions)} 个问题")
+
+            # 通过事件回调推送问卷到前端
+            if event_callback:
+                event_callback(Event(
+                    type=EventType.AGENT_QUESTIONNAIRE,
+                    source_agent=self.agent_id,
+                    data={
+                        "questionnaire_id": questionnaire_id,
+                        "questionnaire_data": questionnaire_data,
+                    },
+                ))
+
+            # 等待用户回答
+            try:
+                answers = await self.questionnaire_manager.create_pending(
+                    questionnaire_id, timeout=300.0
+                )
+            except Exception:
+                logger.warning(f"LeadAgent clarify: 问卷超时，跳过澄清")
+                break
+
+            formatted = format_answers_for_llm(questions, answers)
+            collected_answers.update(answers)
+
+            # 将工具调用和结果加入消息历史（让 LLM 知道已收集了什么）
+            messages.append({
+                "role": "assistant",
+                "content": response.content or None,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ],
+            })
+            messages.append(self.llm_client.create_tool_message(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                result={"success": True, "formatted_text": formatted},
+            ))
+
+        if not collected_answers:
+            return {"clarified": False, "collected_info": "", "raw_answers": {}}
+
+        # 汇总所有收集到的信息
+        all_info_parts = []
+        for key, val in collected_answers.items():
+            if isinstance(val, list):
+                all_info_parts.append(f"{key}: {', '.join(str(v) for v in val)}")
+            else:
+                all_info_parts.append(f"{key}: {val}")
+        collected_info = "\n".join(all_info_parts)
+
+        logger.info(f"LeadAgent clarify 完成，收集信息: {collected_info[:200]}")
+
+        return {
+            "clarified": True,
+            "collected_info": collected_info,
+            "raw_answers": collected_answers,
+        }
 
     async def assess_and_decompose(
         self,

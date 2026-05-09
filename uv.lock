@@ -1252,6 +1252,7 @@ dependencies = [
     { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pydantic-xml" },
     { name = "pymilvus" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
@@ -1283,6 +1284,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0.0" },
     { name = "pydantic", specifier = "==2.10.0" },
     { name = "pydantic-settings", specifier = "==2.7.0" },
+    { name = "pydantic-xml", specifier = ">=2.20.0" },
     { name = "pymilvus", specifier = ">=2.3.0" },
     { name = "python-dotenv", specifier = "==1.0.1" },
     { name = "python-multipart", specifier = ">=0.0.9" },
@@ -2361,6 +2363,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/41/19b62b99e7530cfa1d6ccd16199afd9289a12929bef1a03aa4382b22e683/pydantic_settings-2.7.0.tar.gz", hash = "sha256:ac4bfd4a36831a48dbf8b2d9325425b549a0a6f18cea118436d728eb4f1c4d66", size = 79743, upload-time = "2024-12-13T09:41:11.477Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/00/57b4540deb5c3a39ba689bb519a4e03124b24ab8589e618be4aac2c769bd/pydantic_settings-2.7.0-py3-none-any.whl", hash = "sha256:e00c05d5fa6cbbb227c84bd7487c5c1065084119b750df7c8c1a554aed236eb5", size = 29549, upload-time = "2024-12-13T09:41:09.54Z" },
+]
+
+[[package]]
+name = "pydantic-xml"
+version = "2.20.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/ab/5589aac52a5601bc91122625043034898c66fbe9fedce6785bfc6ef6e69e/pydantic_xml-2.20.0.tar.gz", hash = "sha256:38eb71fb66c05c31c632a50e964c273f67dafddc5aa7c64cd6bd2b487dc2eeaf", size = 26440, upload-time = "2026-04-11T21:24:23.967Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/e0/e0baac028479a09b2b46d09c8f0b2a32d4991e7c7bd13c544e64c6ff86d0/pydantic_xml-2.20.0-py3-none-any.whl", hash = "sha256:b492819830ff368124c9f8b53ea23953373422eebded2393e9d99008a086e07a", size = 42882, upload-time = "2026-04-11T21:24:25.096Z" },
 ]
 
 [[package]]

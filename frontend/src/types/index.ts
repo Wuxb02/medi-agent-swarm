@@ -1,5 +1,23 @@
 /** 前端类型定义 */
 
+export interface QuestionOption {
+  label: string
+  description?: string
+}
+
+export interface QuestionnaireQuestion {
+  header: string
+  type: 'enum' | 'multi' | 'input'
+  required: boolean
+  text: string
+  options: QuestionOption[]
+}
+
+export interface QuestionnaireData {
+  questionnaire_id: string
+  questions: QuestionnaireQuestion[]
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -10,6 +28,7 @@ export interface ChatMessage {
   disclaimer?: string
   agentEvents?: AgentEvent[]
   thinkingBlocks?: ThinkingBlock[]
+  questionnaire?: QuestionnaireData
   metadata?: {
     swarmEnabled: boolean
     agentsInvolved: string[]

@@ -10,6 +10,7 @@ export interface StreamCallbacks {
   onAgentToolStep?: (data: any) => void
   onAgentThinkingDone?: (data: any) => void
   onAgentContentDelta?: (data: any) => void
+  onAgentQuestionnaire?: (data: any) => void
   onSuggestions?: (data: any) => void
   onDone?: (data: any) => void
   onError?: (data: any) => void
@@ -66,6 +67,7 @@ export function useSSE() {
               case 'agent_tool_step': callbacks.onAgentToolStep?.(data); break
               case 'agent_thinking_done': callbacks.onAgentThinkingDone?.(data); break
               case 'agent_content_delta': callbacks.onAgentContentDelta?.(data); break
+              case 'agent_questionnaire': callbacks.onAgentQuestionnaire?.(data); break
               case 'suggestions': callbacks.onSuggestions?.(data); break
               case 'done':
                 doneReceived = true

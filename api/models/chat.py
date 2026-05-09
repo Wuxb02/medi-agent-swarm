@@ -37,3 +37,16 @@ class MessageHistory(BaseModel):
     """会话历史"""
     session_id: str
     messages: List[MessageItem] = []
+
+
+class AnswerRequest(BaseModel):
+    """问卷答案提交请求"""
+    questionnaire_id: str
+    answers: Dict[str, Any]
+    session_id: str
+
+
+class AnswerResponse(BaseModel):
+    """问卷答案提交响应"""
+    success: bool
+    message: str = ""

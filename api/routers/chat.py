@@ -2,8 +2,8 @@
 from fastapi import APIRouter
 from starlette.responses import StreamingResponse
 
-from api.models.chat import ChatRequest, ChatResponse, MessageHistory, MessageItem
-from api.services.chat_service import chat_non_stream, chat_stream
+from api.models.chat import ChatRequest, ChatResponse, MessageHistory, MessageItem, AnswerRequest, AnswerResponse
+from api.services.chat_service import chat_non_stream, chat_stream, get_manager
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -26,6 +26,17 @@ async def chat_stream_endpoint(request: ChatRequest):
             "Connection": "keep-alive",
         }
     )
+
+
+@router.post("/answer", response_model=AnswerResponse)
+async def submit_answer(request: AnswerRequest):
+    """提交问卷答案（用于交互式问诊）"""
+    manager = get_manager(request.session_id)
+    resolved = manager.resolve(request.questionnaire_id, request.answers)
+    if resolved:
+        return AnswerResponse(success=True, message="答案已提交")
+    else:
+        return AnswerResponse(success=False, message="未找到对应问卷或问卷已完成")
 
 
 @router.get("/history/{session_id}", response_model=MessageHistory)

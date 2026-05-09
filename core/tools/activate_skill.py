@@ -1,6 +1,6 @@
 """
-基础工具定义
-始终可用的系统级工具，不依赖任何 Skill
+activate_skill 工具 — 激活指定 Skill 后方可使用其工具
+从 core/base_tools.py 迁移，统一存放在 core/tools/ 下
 """
 from typing import Dict, Any
 

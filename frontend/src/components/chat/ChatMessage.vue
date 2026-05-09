@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useMarkdown } from '../../composables/useMarkdown'
+import { useChatStore } from '../../stores/chat'
 import type { ChatMessage, ThinkingBlock } from '../../types'
 import AgentTimeline from '../agents/AgentTimeline.vue'
 import SuggestionChips from './SuggestionChips.vue'
 import DisclaimerBanner from './DisclaimerBanner.vue'
 import ThinkingBlockItem from './ThinkingBlock.vue'
+import QuestionnaireCard from './QuestionnaireCard.vue'
 
 const props = defineProps<{
   message: ChatMessage
 }>()
 
+const chatStore = useChatStore()
 const { render } = useMarkdown()
 
 const renderedContent = computed(() => {
@@ -153,6 +156,14 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
               v-if="message.content"
               class="markdown-body text-sm text-slate-700 leading-relaxed mt-2"
               v-html="renderedContent"
+            />
+
+            <!-- 交互式问卷 -->
+            <QuestionnaireCard
+              v-if="message.questionnaire"
+              :questionnaire="message.questionnaire"
+              @submit="(answers) => chatStore.submitAnswers(message.questionnaire?.questionnaire_id || '', answers)"
+              class="mt-3"
             />
 
             <!-- 建议 -->

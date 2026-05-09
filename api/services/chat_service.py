@@ -10,6 +10,7 @@ from loguru import logger
 from swarm.swarm_coordinator import SwarmCoordinator
 from swarm.events import Event
 from api.models.chat import ChatRequest, ChatResponse
+from core.questionnaire_manager import QuestionnaireManager
 
 # 事件持久化目录（与 SessionSummaryManager 一致）
 _SUMMARY_DIR = os.path.join(
@@ -24,6 +25,23 @@ from memory.session_vector_store import SessionVectorStore
 _session_db = SessionDB()
 _session_vectors = SessionVectorStore()
 
+# 问卷管理器注册表（session_id → QuestionnaireManager）
+_managers: Dict[str, QuestionnaireManager] = {}
+
+
+def get_manager(session_id: str) -> QuestionnaireManager:
+    """获取或创建会话的问卷管理器"""
+    if session_id not in _managers:
+        _managers[session_id] = QuestionnaireManager()
+    return _managers[session_id]
+
+
+def remove_manager(session_id: str):
+    """清理会话的问卷管理器"""
+    manager = _managers.pop(session_id, None)
+    if manager:
+        manager.cancel_all()
+
 
 class EventBridge:
     """事件桥接器：拦截 SharedContext 的事件，推送到流"""
@@ -37,20 +55,30 @@ class EventBridge:
 
 async def chat_non_stream(request: ChatRequest) -> ChatResponse:
     """非流式问答"""
-    coordinator = SwarmCoordinator(enable_swarm=request.enable_swarm)
+    session_id = request.session_id or (
+        f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+    )
+    manager = get_manager(session_id)
+    coordinator = SwarmCoordinator(
+        enable_swarm=request.enable_swarm,
+        questionnaire_manager=manager
+    )
     result = await coordinator.process(
         question=request.question,
         context=request.context,
-        session_id=request.session_id
+        session_id=session_id
     )
 
     # 持久化到 SQLite + Milvus
-    session_id = result.get("session_id", request.session_id or "")
-    if session_id:
+    persist_session_id = result.get("session_id", session_id)
+    if persist_session_id:
         try:
-            _persist_session_turn(session_id, request, result, [])
+            _persist_session_turn(persist_session_id, request, result, [])
         except Exception as e:
             logger.warning(f"Failed to persist non-stream session turn: {e}")
+
+    # 清理问卷管理器
+    remove_manager(session_id)
 
     return ChatResponse(
         answer=result.get("answer", ""),
@@ -82,10 +110,14 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     # 收集所有事件用于持久化
     collected_events: List[Dict[str, Any]] = [{"event": "start", "data": start_event}]
 
+    # 1.5 创建会话的问卷管理器
+    manager = get_manager(session_id)
+
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
         enable_swarm=request.enable_swarm,
-        event_callback=lambda event: bridge.queue.put_nowait(event)
+        event_callback=lambda event: bridge.queue.put_nowait(event),
+        questionnaire_manager=manager
     )
 
     process_task = asyncio.create_task(
@@ -106,6 +138,11 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
             if request.enable_swarm and mapped_type == "agent_content_delta":
                 continue
             event_dict = event.to_dict()
+            # 问卷事件直接推送到前端（不经过 _map_event_type 映射）
+            if event.type.value == "agent_questionnaire":
+                yield _json_line("agent_questionnaire", event_dict)
+                collected_events.append({"event": "agent_questionnaire", "data": event_dict})
+                continue
             yield _json_line(mapped_type, event_dict)
             collected_events.append({"event": mapped_type, "data": event_dict})
         except asyncio.TimeoutError:
@@ -163,6 +200,9 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         _persist_session_turn(session_id, request, result, collected_events)
     except Exception as e:
         logger.warning(f"Failed to persist session turn: {e}")
+
+    # 9. 清理问卷管理器
+    remove_manager(session_id)
 
 
 def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

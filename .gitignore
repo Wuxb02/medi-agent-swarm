@@ -60,6 +60,7 @@ memory/data/*.db
 memory/data/*.db-shm
 memory/data/*.db-wal
 memory/data/.milvus_lite.db.lock
+memory/data/.session_vectors.db.lock
 
 # 对话记录
 memory/swarm/session_summaries/*
