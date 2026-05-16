@@ -2,16 +2,17 @@
 from fastapi import APIRouter, HTTPException
 
 from api.models.session import SessionListResponse, SessionDetail
-from api.services.session_service import list_sessions, get_session_detail, delete_session
+from api.services.session_service import list_sessions, count_sessions, get_session_detail, delete_session
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
 
 @router.get("", response_model=SessionListResponse)
-async def get_sessions(limit: int = 50):
+async def get_sessions(limit: int = 50, offset: int = 0):
     """获取会话列表"""
-    sessions = list_sessions(limit=limit)
-    return SessionListResponse(sessions=sessions, total=len(sessions))
+    sessions = list_sessions(limit=limit, offset=offset)
+    total = count_sessions()
+    return SessionListResponse(sessions=sessions, total=total)
 
 
 @router.get("/{session_id}", response_model=SessionDetail)

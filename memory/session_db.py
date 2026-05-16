@@ -286,7 +286,7 @@ class SessionDB:
 
         return self._execute(_do_count)
 
-    def list_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_sessions(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """列出会话摘要，按 updated_at DESC"""
 
         def _do_list(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -294,13 +294,22 @@ class SessionDB:
                 """
                 SELECT * FROM sessions
                 ORDER BY updated_at DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (limit,),
+                (limit, offset),
             ).fetchall()
             return [dict(r) for r in rows]
 
         return self._execute(_do_list)
+
+    def count_sessions(self) -> int:
+        """获取会话总数"""
+
+        def _do_count(conn: sqlite3.Connection) -> int:
+            row = conn.execute("SELECT COUNT(*) AS cnt FROM sessions").fetchone()
+            return row["cnt"] if row else 0
+
+        return self._execute(_do_count)
 
     def delete_session(self, session_id: str) -> bool:
         """删除会话及其所有 messages（CASCADE）"""

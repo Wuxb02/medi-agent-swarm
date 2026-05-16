@@ -30,6 +30,14 @@ onMounted(() => {
     chatStore.loadHistory(sessionId)
   }
 })
+
+// 路由参数变化时重新加载（如点击侧边栏另一个会话）
+watch(() => route.params.sessionId, (newId, oldId) => {
+  if (newId && newId !== oldId) {
+    chatStore.clearChat()
+    chatStore.loadHistory(newId as string)
+  }
+})
 </script>
 
 <template>

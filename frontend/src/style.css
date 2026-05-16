@@ -22,6 +22,10 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
 
+/* 会话列表：悬停时才显示滚动条 */
+.group\/sessions .scrollbar-thin::-webkit-scrollbar-thumb { background: transparent; }
+.group\/sessions:hover .scrollbar-thin::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+
 /* Markdown 内容样式 */
 .markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
 .markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 0.8rem 0 0.4rem; }

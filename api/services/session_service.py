@@ -24,45 +24,37 @@ _vectors = SessionVectorStore()
 # ─── 公开 API ──────────────────────────────────────────────
 
 
-def list_sessions(limit: int = 50) -> List[SessionListItem]:
-    """列出历史会话（优先 SQLite，回退 .md 文件）"""
-    sessions: List[SessionListItem] = []
-    seen_ids = set()
+def list_sessions(limit: int = 50, offset: int = 0) -> List[SessionListItem]:
+    """列出历史会话（SQLite 分页查询）
 
-    # 1. 从 SQLite 读取
+    .md 文件不再混入分页结果，避免破坏 offset 语义。
+    如需兼容旧数据，应先迁移至 SQLite。
+    """
     try:
-        db_sessions = _db.list_sessions(limit)
-        for s in db_sessions:
-            sid = s["session_id"]
-            seen_ids.add(sid)
-            sessions.append(
-                SessionListItem(
-                    session_id=sid,
-                    first_question=s.get("first_question", "")[:80],
-                    created_at=s.get("created_at", ""),
-                    message_count=s.get("message_count", 0),
-                    mode=s.get("mode", "single"),
-                    total_tokens=s.get("total_tokens", 0),
-                )
+        db_sessions = _db.list_sessions(limit, offset)
+        return [
+            SessionListItem(
+                session_id=s["session_id"],
+                first_question=s.get("first_question", "")[:80],
+                created_at=s.get("created_at", ""),
+                message_count=s.get("message_count", 0),
+                mode=s.get("mode", "single"),
+                total_tokens=s.get("total_tokens", 0),
             )
+            for s in db_sessions
+        ]
     except Exception as e:
         logger.warning(f"Failed to list sessions from SQLite: {e}")
+        return []
 
-    # 2. 回退到 .md 文件扫描（兼容旧数据）
-    for filepath in _iter_summary_files():
-        filename = os.path.basename(filepath)
-        sid_from_file = filename.replace(".md", "")
-        if sid_from_file not in seen_ids:
-            try:
-                session = _parse_summary_file(filepath, filename)
-                if session:
-                    seen_ids.add(sid_from_file)
-                    sessions.append(session)
-            except Exception as e:
-                logger.warning(f"Failed to parse {filename}: {e}")
 
-    sessions.sort(key=lambda s: s.created_at, reverse=True)
-    return sessions[:limit]
+def count_sessions() -> int:
+    """获取会话总数"""
+    try:
+        return _db.count_sessions()
+    except Exception as e:
+        logger.warning(f"Failed to count sessions: {e}")
+        return 0
 
 
 def get_session_detail(session_id: str) -> Optional[SessionDetail]:

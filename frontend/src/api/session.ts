@@ -1,7 +1,7 @@
 import api from './client'
 
-export async function getSessions(limit = 50) {
-  const { data } = await api.get('/sessions', { params: { limit } })
+export async function getSessions(limit: number = 50, offset: number = 0) {
+  const { data } = await api.get('/sessions', { params: { limit, offset } })
   return data.sessions
 }
 

@@ -9,7 +9,6 @@ const titles: Record<string, string> = {
   Chat: '智能问答',
   ChatSession: '智能问答',
   Knowledge: '知识库',
-  Sessions: '历史会话',
   Dashboard: '仪表盘',
 }
 
