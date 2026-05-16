@@ -82,8 +82,9 @@ onMounted(() => {
   loadSessions()
 })
 
-watch(() => chatStore.sessionId, (newId, oldId) => {
-  if (newId && !oldId) {
+// 对话流结束（isStreaming: true → false）后刷新列表，确保数据库已持久化
+watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
+  if (wasStreaming && !streaming && chatStore.sessionId) {
     loadSessions()
   }
 })
