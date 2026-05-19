@@ -622,10 +622,11 @@ class SwarmCoordinator:
     async def _evaluate_and_extract_memory(
         self, session_id: str, question: str, answer: str
     ) -> Optional[Dict[str, Any]]:
-        """使用 LLM 评估对话质量并提取信息（个人信息 + 可复用事实）。
+        """使用 LLM 评估对话质量并提取信息。
 
         Returns:
-            {"personal_info": [...], "reusable_facts": [...], "score": N, "reason": "..."}
+            {"stable_info": [...], "medical_records": [...],
+             "reusable_facts": [...], "score": N, "reason": "..."}
             或 None（降级）
         """
         # 1. 获取已有信息
@@ -681,11 +682,16 @@ class SwarmCoordinator:
             logger.warning(f"Memory eval JSON parse failed: {e}, session={session_id}")
             return None
 
-        # 5. 兼容旧格式（只有 facts 字段）
+        # 5. 兼容旧格式（只有 facts / personal_info 字段）
         if "reusable_facts" not in result and "facts" in result:
             result["reusable_facts"] = result.pop("facts")
-        if "personal_info" not in result:
-            result["personal_info"] = []
+        # 旧字段名 personal_info → stable_info
+        if "stable_info" not in result and "personal_info" in result:
+            result["stable_info"] = result.pop("personal_info")
+        if "stable_info" not in result:
+            result["stable_info"] = []
+        if "medical_records" not in result:
+            result["medical_records"] = []
 
         # 6. 将新可复用事实追加到 session metadata
         new_facts = result.get("reusable_facts", [])
@@ -703,14 +709,23 @@ class SwarmCoordinator:
             )
 
             if eval_result is not None:
-                # 个人信息 → 本地 PERSONAL.md
-                personal_info = eval_result.get("personal_info", [])
-                if personal_info:
-                    self.personal_profile.update(personal_info)
-                    for item in personal_info:
-                        logger.info(f"  [Personal] {item['key']}：{item['value']}")
-
                 score = eval_result.get("score", 0)
+                stable_info = eval_result.get("stable_info", [])
+                medical_records = eval_result.get("medical_records", [])
+
+                # 稳定信息 → 暂存区（score >= 3 才写入，过滤寒暄）
+                if stable_info and score >= 3:
+                    self.personal_profile.add_pending(stable_info)
+                    for item in stable_info:
+                        logger.info(f"  [Pending-Info] {item['key']}：{item['value']}")
+
+                # 病史记录 → 暂存区（所有提取到的病史都进暂存区）
+                if medical_records:
+                    self.personal_profile.add_pending_records(medical_records)
+                    for rec in medical_records:
+                        logger.info(f"  [Pending-Record] [{rec.get('date', '')}] {rec.get('description', '')}")
+
+                # Mem0 门控
                 if score < 5:
                     logger.info(
                         f"Memory gate: SKIP Mem0 (score={score}) "
@@ -721,7 +736,7 @@ class SwarmCoordinator:
                     msg_count = len(session.messages) if session else 0
                     logger.info(
                         f"Memory turn summary — short_term={msg_count} msgs | "
-                        f"personal={len(personal_info)} items saved | mem0=SKIP"
+                        f"pending_info={len(stable_info)} pending_records={len(medical_records)} | mem0=SKIP"
                     )
                     return
 
@@ -735,7 +750,7 @@ class SwarmCoordinator:
                     memory_text = f"Q: {question[:200]} A: {answer[:300]}"
                 logger.info(
                     f"Memory gate: PASS score={score} "
-                    f"facts={len(reusable_facts)} personal={len(personal_info)} session={session_id}"
+                    f"facts={len(reusable_facts)} pending_info={len(stable_info)} pending_records={len(medical_records)} session={session_id}"
                 )
             else:
                 memory_text = f"Q: {question[:200]} A: {answer[:300]}"
@@ -755,9 +770,15 @@ class SwarmCoordinator:
             # 打印本轮存储摘要
             session = self.short_term_memory.get_session(session_id)
             msg_count = len(session.messages) if session else 0
+            if eval_result:
+                info_count = len(eval_result.get("stable_info", []))
+                records_count = len(eval_result.get("medical_records", []))
+            else:
+                info_count = 0
+                records_count = 0
             logger.info(
                 f"Memory turn summary — short_term={msg_count} msgs | "
-                f"personal={len(eval_result.get('personal_info', [])) if eval_result else 0} items saved | "
+                f"pending_info={info_count} pending_records={records_count} | "
                 f"mem0={'PASS' if eval_result else 'FALLBACK'}"
             )
         except Exception as e:

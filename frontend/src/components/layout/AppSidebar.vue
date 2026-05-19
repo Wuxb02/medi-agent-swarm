@@ -3,6 +3,7 @@ import { ref, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '../../stores/chat'
 import { getSessions, deleteSession } from '../../api/session'
+import { getPersonalInfo } from '../../api/personal'
 import type { SessionItem } from '../../types'
 
 const router = useRouter()
@@ -17,6 +18,16 @@ const navItems = [
 
 const sessions = ref<SessionItem[]>([])
 const loading = ref(false)
+const pendingCount = ref(0)
+
+async function loadPendingCount() {
+  try {
+    const data = await getPersonalInfo()
+    pendingCount.value = (data.pending_items || []).length
+  } catch {
+    pendingCount.value = 0
+  }
+}
 
 async function loadSessions() {
   if (loading.value) return
@@ -80,12 +91,14 @@ function truncate(str: string, len: number): string {
 
 onMounted(() => {
   loadSessions()
+  loadPendingCount()
 })
 
 // 对话流结束（isStreaming: true → false）后刷新列表，确保数据库已持久化
 watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
   if (wasStreaming && !streaming && chatStore.sessionId) {
     loadSessions()
+    loadPendingCount()
   }
 })
 </script>
@@ -170,7 +183,7 @@ watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
     <div class="p-3 border-t border-slate-700">
       <router-link
         to="/personal"
-        class="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition"
+        class="flex items-center gap-3 px-3 py-2 text-sm rounded-lg transition relative"
         :class="route.path === '/personal'
           ? 'bg-slate-700 text-white'
           : 'text-slate-400 hover:bg-slate-700/50 hover:text-white'"
@@ -179,6 +192,12 @@ watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
         </svg>
         个人中心
+        <span
+          v-if="pendingCount > 0"
+          class="absolute right-3 top-1/2 -translate-y-1/2 min-w-[18px] h-[18px] px-1 flex items-center justify-center text-[10px] font-medium bg-orange-500 text-white rounded-full"
+        >
+          {{ pendingCount }}
+        </span>
       </router-link>
     </div>
 

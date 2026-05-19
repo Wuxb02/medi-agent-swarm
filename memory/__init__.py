@@ -39,7 +39,9 @@ from .session_summary import (
     PerformanceMetrics
 )
 from .personal_profile import (
-    PersonalProfile
+    PersonalProfile,
+    MedicalRecord,
+    PendingItem,
 )
 
 # SQLite + Milvus 会话持久化

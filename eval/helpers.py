@@ -9,6 +9,7 @@ from contextlib import contextmanager
 
 # PersonalProfile 全局文件路径（与 memory/personal_profile.py 一致）
 _PERSONAL_PROFILE_PATH = Path("memory/PERSONAL.md")
+_PENDING_PATH = Path("memory/PENDING.md")
 
 
 def make_session_id(prefix: str) -> str:
@@ -27,14 +28,21 @@ def isolated_coordinator():
     """
     from swarm.swarm_coordinator import SwarmCoordinator
 
-    # 备份原始 PersonalProfile 内容
-    original_content = None
+    # 备份原始文件内容
+    original_personal = None
+    original_pending = None
     if _PERSONAL_PROFILE_PATH.exists():
-        original_content = _PERSONAL_PROFILE_PATH.read_text(encoding="utf-8")
+        original_personal = _PERSONAL_PROFILE_PATH.read_text(encoding="utf-8")
+    if _PENDING_PATH.exists():
+        original_pending = _PENDING_PATH.read_text(encoding="utf-8")
 
     try:
         # 重置为空，避免评估间信息泄漏
-        _PERSONAL_PROFILE_PATH.write_text("# 患者个人信息\n\n- 暂无：无\n", encoding="utf-8")
+        _PERSONAL_PROFILE_PATH.write_text(
+            "# 患者档案\n\n## 个人信息\n- 暂无\n\n## 病史记录\n- 暂无\n\n",
+            encoding="utf-8",
+        )
+        _PENDING_PATH.write_text("# 待确认信息\n\n", encoding="utf-8")
 
         coordinator = SwarmCoordinator()
         # 同步到所有 Worker 的 user_context
@@ -44,7 +52,11 @@ def isolated_coordinator():
         yield coordinator
     finally:
         # 恢复原始内容
-        if original_content is not None:
-            _PERSONAL_PROFILE_PATH.write_text(original_content, encoding="utf-8")
+        if original_personal is not None:
+            _PERSONAL_PROFILE_PATH.write_text(original_personal, encoding="utf-8")
         else:
             _PERSONAL_PROFILE_PATH.unlink(missing_ok=True)
+        if original_pending is not None:
+            _PENDING_PATH.write_text(original_pending, encoding="utf-8")
+        else:
+            _PENDING_PATH.unlink(missing_ok=True)
