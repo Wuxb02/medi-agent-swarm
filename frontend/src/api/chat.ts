@@ -4,7 +4,6 @@ export interface ChatRequest {
   question: string
   session_id?: string
   context?: Record<string, any>
-  enable_swarm?: boolean
 }
 
 export interface ChatResponse {

@@ -8,7 +8,6 @@ class ChatRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None
-    enable_swarm: bool = True
 
 
 class ChatResponse(BaseModel):

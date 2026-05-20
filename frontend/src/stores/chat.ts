@@ -212,7 +212,6 @@ export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null)
   const messages = ref<ChatMessage[]>([])
   const isStreaming = ref(false)
-  const swarmMode = ref(true)
   const error = ref<string | null>(null)
 
   const { connect, disconnect } = useSSE()
@@ -252,7 +251,6 @@ export const useChatStore = defineStore('chat', () => {
       await connect('/api/chat/stream', {
         question,
         session_id: sessionId.value,
-        enable_swarm: swarmMode.value,
       }, {
         onStart(data) {
           sessionId.value = data.session_id
@@ -547,5 +545,5 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { sessionId, messages, isStreaming, swarmMode, error, sendMessage, loadHistory, clearChat, submitAnswers }
+  return { sessionId, messages, isStreaming, error, sendMessage, loadHistory, clearChat, submitAnswers }
 })

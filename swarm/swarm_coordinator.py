@@ -17,7 +17,7 @@ from loguru import logger
 
 from core import LLMClient
 from core.prompt_loader import PromptLoader
-from .shared_context import SharedContext
+from .shared_context import SharedContext, SubTask, TaskStatus
 from .lead_agent import LeadAgent
 from .events import Event, EventType
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
@@ -43,12 +43,10 @@ class SwarmCoordinator:
     def __init__(
         self,
         llm_client: Optional[LLMClient] = None,
-        enable_swarm: bool = True,
         event_callback: Optional[Any] = None,
         questionnaire_manager: Optional[Any] = None
     ):
         self.llm_client = llm_client or LLMClient()
-        self.enable_swarm = enable_swarm
         self.event_callback = event_callback
         self.questionnaire_manager = questionnaire_manager
 
@@ -189,7 +187,7 @@ class SwarmCoordinator:
         mode = None
 
         if len(subtasks) == 1:
-            # 单任务 → 直接调用对应 Agent
+            # 单任务 → 与 Swarm 模式一致，通过 process_subtask 执行（隔离历史）
             task = subtasks[0]
             agent_id = task.get("assigned_agent")
             agent = self._get_agent_by_id(agent_id)
@@ -206,11 +204,21 @@ class SwarmCoordinator:
             if self.event_callback and hasattr(agent, 'set_on_thinking'):
                 self._inject_thinking_callbacks(agent, lambda event: self.event_callback(event))
 
-            result = await agent.process({
-                'question': question,
-                'context': enhanced_context,
-                'session_id': session_id
-            })
+            # 构造 SubTask 对象，走与 Swarm 模式一致的 process_subtask 路径
+            subtask_obj = SubTask(
+                id=task.get("id", "single"),
+                type=task.get("type", "general"),
+                description=question,
+                assigned_agent=agent_id,
+                status=TaskStatus.PENDING,
+            )
+            sub_session_id = f"{session_id}:{agent_id}:{subtask_obj.id}"
+
+            result = await agent.process_subtask(
+                subtask_obj,
+                session_id=session_id,
+                sub_session_id=sub_session_id,
+            )
             final_answer = result.get('answer', '')
 
             # 提取 token 用量
@@ -221,11 +229,19 @@ class SwarmCoordinator:
             if hasattr(agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(agent)
 
+            # 将子会话结果合并回主会话
+            self.short_term_memory.merge_sub_session(
+                main_session_id=session_id,
+                sub_session_id=sub_session_id,
+                summary_text=final_answer[:500] if final_answer else "",
+            )
+
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
                 'route_reason': f'单任务路由到 {agent_id}',
-                'usage': token_usage
+                'usage': token_usage,
+                'agents_involved': [agent_id],
             })
 
             # 确保单Agent模式下也有 disclaimer 字段
@@ -253,7 +269,7 @@ class SwarmCoordinator:
             except Exception as e:
                 logger.error(f"Failed to save single agent session summary: {e}")
 
-        elif len(subtasks) >= 2 and self.enable_swarm:
+        elif len(subtasks) >= 2:
             # 多任务 → 启动 Swarm
             logger.info(f"Route: Swarm (Multi-Agent Collaboration) - {len(subtasks)} tasks")
             mode = "swarm"
@@ -270,23 +286,29 @@ class SwarmCoordinator:
             return result
 
         else:
-            # 0个任务或Swarm关闭 → 降级到 ConsultationAgent
-            if len(subtasks) == 0:
-                logger.warning("No subtasks generated, fallback to ConsultationAgent")
-                mode = "fallback"
-            else:
-                logger.info("Swarm disabled, fallback to ConsultationAgent")
-                mode = "disabled_swarm"
+            # 0个任务 → 降级到 ConsultationAgent
+            logger.warning("No subtasks generated, fallback to ConsultationAgent")
+            mode = "fallback"
 
             # 注入 thinking 回调
             if self.event_callback and hasattr(self.consultation_agent, 'set_on_thinking'):
                 self._inject_thinking_callbacks(self.consultation_agent, lambda event: self.event_callback(event))
 
-            result = await self.consultation_agent.process({
-                'question': question,
-                'context': enhanced_context,
-                'session_id': session_id
-            })
+            # 降级模式也走 process_subtask 路径，隔离历史
+            fallback_subtask = SubTask(
+                id="fallback",
+                type="general",
+                description=question,
+                assigned_agent="consultation_agent",
+                status=TaskStatus.PENDING,
+            )
+            sub_session_id = f"{session_id}:consultation_agent:fallback"
+
+            result = await self.consultation_agent.process_subtask(
+                fallback_subtask,
+                session_id=session_id,
+                sub_session_id=sub_session_id,
+            )
             final_answer = result.get('answer', '')
             token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
             session_message_count = result.get('message_count', 0)
@@ -294,10 +316,18 @@ class SwarmCoordinator:
             # 清理 thinking 回调
             if hasattr(self.consultation_agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(self.consultation_agent)
+
+            # 将子会话结果合并回主会话
+            self.short_term_memory.merge_sub_session(
+                main_session_id=session_id,
+                sub_session_id=sub_session_id,
+                summary_text=final_answer[:500] if final_answer else "",
+            )
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
-                'usage': token_usage
+                'usage': token_usage,
+                'agents_involved': ['consultation_agent'],
             })
 
             # 保存 fallback 会话总结
@@ -319,6 +349,9 @@ class SwarmCoordinator:
 
         # ===== 统一的记忆保存（非 Swarm 模式）=====
         end_time = datetime.now()
+
+        # 将 total_time 写入结果
+        result['total_time'] = (end_time - start_time).total_seconds()
 
         # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
 
@@ -872,7 +905,6 @@ class SwarmCoordinator:
 async def process_with_swarm(
     question: str,
     context: Optional[Dict[str, Any]] = None,
-    enable_swarm: bool = True,
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """
@@ -881,11 +913,10 @@ async def process_with_swarm(
     Args:
         question: 用户问题
         context: 额外上下文
-        enable_swarm: 是否启用 Swarm（False 则总是用单 Agent）
         session_id: 会话ID（如果提供，将使用该ID而不是生成新的）
 
     Returns:
         处理结果
     """
-    coordinator = SwarmCoordinator(enable_swarm=enable_swarm)
+    coordinator = SwarmCoordinator()
     return await coordinator.process(question, context, session_id=session_id)

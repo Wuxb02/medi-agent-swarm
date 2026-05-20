@@ -60,7 +60,6 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
     )
     manager = get_manager(session_id)
     coordinator = SwarmCoordinator(
-        enable_swarm=request.enable_swarm,
         questionnaire_manager=manager
     )
     result = await coordinator.process(
@@ -104,7 +103,7 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     )
 
     # 1. 发送 start
-    start_event = {"session_id": session_id, "mode": "swarm" if request.enable_swarm else "single"}
+    start_event = {"session_id": session_id}
     yield _json_line("start", start_event)
 
     # 收集所有事件用于持久化
@@ -115,7 +114,6 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
 
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
-        enable_swarm=request.enable_swarm,
         event_callback=lambda event: bridge.queue.put_nowait(event),
         questionnaire_manager=manager
     )
@@ -133,9 +131,9 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         try:
             event = await asyncio.wait_for(bridge.queue.get(), timeout=0.5)
             mapped_type = _map_event_type(event.type.value)
-            # Swarm 模式下跳过 content delta（多 Worker 的 token 交错会导致格式混乱，
+            # 跳过 content delta（多 Worker 的 token 交错会导致格式混乱，
             # 最终答案由 done 事件携带的完整 answer 提供）
-            if request.enable_swarm and mapped_type == "agent_content_delta":
+            if mapped_type == "agent_content_delta":
                 continue
             event_dict = event.to_dict()
             # 问卷事件直接推送到前端（不经过 _map_event_type 映射）
@@ -343,7 +341,7 @@ def _persist_session_turn(
             "total_time": result.get("total_time", 0.0),
             "total_tokens": result.get("usage", {}).get("total_tokens", 0),
             "subtasks_completed": result.get("subtasks_completed", 0),
-            "mode": "swarm" if request.enable_swarm else "single",
+            "mode": "swarm" if result.get("swarm_enabled", False) else "single",
         },
     )
 

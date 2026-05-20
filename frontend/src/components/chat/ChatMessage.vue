@@ -3,7 +3,6 @@ import { computed, ref, watch } from 'vue'
 import { useMarkdown } from '../../composables/useMarkdown'
 import { useChatStore } from '../../stores/chat'
 import type { ChatMessage, ThinkingBlock } from '../../types'
-import AgentTimeline from '../agents/AgentTimeline.vue'
 import SuggestionChips from './SuggestionChips.vue'
 import DisclaimerBanner from './DisclaimerBanner.vue'
 import ThinkingBlockItem from './ThinkingBlock.vue'
@@ -86,13 +85,6 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
 
       <!-- 助手消息 -->
       <div v-else class="space-y-3">
-        <!-- Agent 协作时间线 -->
-        <AgentTimeline
-          v-if="message.agentEvents && message.agentEvents.length > 0"
-          :events="message.agentEvents"
-          :metadata="message.metadata"
-        />
-
         <!-- 回答内容 -->
         <div class="flex gap-3">
           <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 text-xs font-semibold">AI</div>
@@ -182,15 +174,14 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
 
             <!-- 元信息 -->
             <div v-if="message.metadata" class="mt-2 flex items-center gap-3 text-xs text-slate-400">
-              <span v-if="message.metadata.swarmEnabled" class="flex items-center gap-1">
-                <span class="w-1.5 h-1.5 bg-green-400 rounded-full" />
-                Swarm 协作
-              </span>
               <span v-if="message.metadata.totalTime">
                 {{ message.metadata.totalTime.toFixed(1) }}s
               </span>
               <span v-if="message.metadata.agentsInvolved.length">
-                {{ message.metadata.agentsInvolved.length }} 个 Agent
+                {{ message.metadata.agentsInvolved.length }} 个 Agent · {{ message.metadata.agentsInvolved.map(id => agentNameMap[id] || id).join('、') }}
+              </span>
+              <span v-if="message.metadata.usage?.total_tokens">
+                {{ message.metadata.usage.total_tokens }} tokens
               </span>
               <template v-if="message.metadata.performanceMetrics">
                 <span class="text-slate-300">|</span>

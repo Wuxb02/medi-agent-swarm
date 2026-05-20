@@ -619,7 +619,7 @@ async def test_memory_integration():
     print("测试 4.3: 记忆系统集成（验证多轮对话上下文）")
     print("="*70)
 
-    coordinator = SwarmCoordinator(enable_swarm=False)  # 使用单Agent简化测试
+    coordinator = SwarmCoordinator()  # 由 LeadAgent 自动决定路由
 
     print(f"\n📊 记忆系统状态:")
     print(f"  - 短期记忆: {coordinator.short_term_memory.storage_type}")

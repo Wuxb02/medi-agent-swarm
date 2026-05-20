@@ -10,12 +10,12 @@
 ### 🎯 核心特性
 
 - **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
-- **📡 流式响应**: 实时推送 Agent 协作过程，可视化多 Agent 并行执行 ✅
+- **📡 流式响应**: 实时推送 Agent 执行过程，可视化 Agent 参与情况 ✅
 - **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），实现"先问后诊" ✅
 - **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
-- **🐝 Agent Swarm**: 真正的群体智能（去中心化协作，自主任务认领，并行执行）✅
-- **🧠 记忆系统**: 短期记忆（会话级，**子会话隔离**）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储 + 记忆分层共享** ✅
+- **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
+- **🧠 记忆系统**: 短期记忆（LeadAgent 独占）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -65,11 +65,11 @@
    - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
-   - 短期记忆：会话级对话历史（10条消息），Worker 自行加载最近 5 轮
-   - **子会话隔离**：Swarm 并行模式下，每个 Worker 使用独立的子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），避免历史交叉污染；执行完毕后将最终回答合并回主会话
+   - 短期记忆：会话级对话历史（10条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
+   - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
    - 个人档案：全局 `memory/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
-   - **上下文利用率 100%**：追问能正确理解历史对话
+   - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
 
 ### SKILL.md 格式
@@ -401,12 +401,8 @@ medix-agent-swarm/
 
 **架构说明**：
 - ✅ **Web + CLI 双入口**：`api_main.py`（Web）/ `main.py`（CLI）
-- ✅ **Skill + Tool 双层架构**：Skill（能力包：指令+工具）与 Tool（底层函数）明确分层
-- ✅ **指令注入**：SKILL.md 正文作为 Skill 指令，激活时注入 system prompt
-- ✅ **动态工具加载**：`activate_skill` 激活后，该 Skill 的工具才可用
-- ✅ **兼容模式自动检测**：全部 Skill 迁移后自动启用双层模式
 - ✅ **统一配置**：使用项目根目录 `.env` 文件管理环境变量
-- ✅ **记忆分离**：Agent 身份文件和会话总结分别存储在 `memory/agents/` 和 `memory/swarm/`
+- ✅ **统一 Agent 委派**：单 Agent / Swarm / 降级均走 `process_subtask()` + 子会话隔离，路由自动决定
 
 ## 🤖 Skills 和 Agent 清单
 
@@ -445,18 +441,8 @@ medix-agent-swarm/
 
 ### 2个协调 Agent
 
-- **LeadAgent**: 任务分解和结果汇总（非编排器）
-- **SwarmCoordinator**: 智能路由（简单问题→单Agent，复杂问题→Swarm）
-
-### Skills 架构特点
-
-- ✅ **双层架构**: Skill（能力包）→ Tool（底层函数），activate_skill 激活后使用
-- ✅ **指令注入**: SKILL.md 正文作为 Skill 指令，激活时自动注入 system prompt
-- ✅ **动态工具**: 激活 Skill 后才加载其工具，避免工具列表膨胀
-- ✅ **Agent 灵活性**: 每个 Agent 注册全部9个 Skills，通过 activate_skill 自主选择
-- ✅ **SkillRegistry**: 统一管理双层注册、执行、格式转换、兼容模式检测
-- ✅ **统一知识库**: 医学知识统一存储在 Milvus 向量数据库，支持语义检索
-- ✅ **易于扩展**: 添加新 Skill 只需在 `.claude/skills/` 下创建目录，无需修改 Agent 代码
+- **LeadAgent**: 信息澄清 + 任务分解 + 结果汇总（独占历史上下文）
+- **SwarmCoordinator**: 记忆检索 + 路由分发 + 子会话合并（路由由 LeadAgent 评估自动决定）
 
 ## 🌐 Web 界面
 
@@ -627,7 +613,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 ```
 1. 会话开始
    ↓
-2. 短期记忆：加载当前会话历史（最近10条消息）
+2. 短期记忆：加载当前会话历史（最近10条消息）→ 仅供 LeadAgent 参考
    ↓
 3. 长期记忆：检索 Mem0 相似案例
    ↓
@@ -636,11 +622,11 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    - 长期记忆 → 基于历史案例做更好的任务分配
    - 相关记忆嵌入子任务 description → 传递给 Worker
    ↓
-5. Worker Agent 执行（子会话隔离）
+5. Worker Agent 执行（统一子会话隔离）
+   - 所有模式（单 Agent / Swarm / 降级）均走 process_subtask()
    - 每个 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），历史互不干扰
+   - Worker 不加载短期记忆，只接收任务指令和用户档案
    - 个人档案：通过 AgentLoop 自动注入为 system message（所有 Agent 共享）
-   - 短期记忆：Worker 从自己的子会话加载最近 5 轮对话
-   - 子任务 description：包含 LeadAgent 筛选的相关记忆上下文
    - 执行完毕后：最终回答合并回主会话，子会话清除
    ↓
 6. 对话结束 → LLM 质量评估 + 信息分类
@@ -648,14 +634,6 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    ├─ 可复用事实 → Mem0
    └─ 短期记忆 → Agent Loop 中自动保存
 ```
-
-**记忆分层机制**：
-
-| 记忆类型 | 谁来读取 | 注入方式 |
-| --- | --- | --- |
-| 个人档案（personal_info） | 每个 Worker Agent | AgentLoop 注入为独立 system message |
-| 短期记忆（recent_history） | Worker 自行加载 | AgentLoop 中 `get_history(limit=5)` |
-| 长期记忆（historical_cases） | LeadAgent 筛选后传递 | 嵌入子任务 description 中 |
 
 **注意事项**：
 
@@ -671,29 +649,9 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 
 | 原则 | MediZJ 实现 | 位置 |
 |------|-----------|------|
-| **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 | `constraints/` |
-| **自动修复** | 输出违规自动添加免责声明、高危警告 | `validation/` |
-| **熵管理** | 记忆自动去重和压缩，防止系统膨胀 | `memory/entropy_manager.py` |
-
-### 核心功能
-
-**1. 约束验证**（`constraints/agent_constraints.yaml`）
-- 定义每个 Agent 允许的 Skills 和禁止的行为
-- 运行时自动验证 Skill 调用和输出内容
-- 违规时记录警告日志
-
-**2. 自动修复**（`validation/auto_fixer.py`）
-- 缺少免责声明 → 自动添加
-- 高危症状（胸痛、呼吸困难等）→ 自动添加就医提醒
-
-**3. 熵管理**（`memory/entropy_manager.py`）
-
-- 熵驱动自动清理：先估熵→低熵跳过（零开销）→向量语义去重复检→LLM 压缩
-- 多指标两级判定（low/high）：消息数 >20、重复率 >15%、平均长度 >500 任一触发即 high
-- 基于向量语义相似度的去重：使用 BAAI/bge-small-zh-v1.5 嵌入模型，余弦相似度 > 0.9 判定为重复
-- LLM 压缩注入熵约束：高重复→去重要求、长消息→提炼核心、多轮→高度概括
-- 动态 max_tokens：高熵 512 / 普通 256，平衡摘要质量与成本
-- 自动降级：LLM 不可用时自动切换为截断模式
+| **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 Skill 调用和输出 | `constraints/` |
+| **自动修复** | 缺少免责声明自动添加，高危症状自动提醒就医 | `validation/` |
+| **熵管理** | 记忆自动去重和压缩，防止系统膨胀（详见下方） | `memory/entropy_manager.py` |
 
 ### 熵管理全流程
 
@@ -837,8 +795,9 @@ python -m eval.runner --score-abtest
 
 所有 LLM prompt 统一存放在 `prompt/` 目录下，使用 Jinja2 模板引擎管理，实现 prompt 与代码解耦。
 
-### 核心特性：动态“卡带式” System Prompt 架构
-项目采用动态“卡带式” System Prompt 管理机制，彻底解决了复杂长对话和多工具调用场景下常见的指令冗余与大模型注意力涣散问题。在单 Agent 层面，系统提示词由“基础角色定义 + 可用技能目录 + 当前激活技能指令”三层结构动态拼接而成。通过严格的排他性技能插拔设计，同一时间仅向大模型暴露当前激活技能的核心约束，切换技能即刻“卸载”旧指令“加载”新指令；辅以任务级别的生命周期状态重置，确保上下文窗口始终保持极致精简，模型注意力高度聚焦。而在 Swarm 群体协作层面，中心协调者（LeadAgent）与执行节点（Worker）的 Prompt 体系完全解耦，以独立的流水线处理信息澄清、任务拆解与结果融合。这种“单体深度按需加载，群体广度切片协调”的架构，使得 Agent 群体在具备强大扩展能力的同时，依然保持极高的指令遵循度与运行稳定性。
+### 动态”卡带式” System Prompt
+
+系统提示词采用三层动态拼接（基础角色 + 技能目录 + 当前激活指令），同一时间仅暴露当前 Skill 的核心约束。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
 
 ### 设计理念
 
@@ -952,37 +911,16 @@ SwarmCoordinator
    │
    ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 判断复杂度并分解
    │
-   ├─ 1 个子任务 → 对应 Agent 直接处理 → 最终回答
+   ├─ 1 个子任务 → Agent 通过 process_subtask() 执行（隔离子会话，无历史）
    │
    └─ ≥2 个子任务 → Swarm 模式
         ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
-        ├─ Worker 自主认领并行执行
+        ├─ Worker 通过 process_subtask() 自主认领并行执行（统一隔离）
         │    ├─ ConsultAgent（独立 activate_skill + 执行）
         │    ├─ DiagAgent（独立 activate_skill + 执行）
         │    └─ ResearchAgent（独立 activate_skill + 执行）
         └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
-
-**核心原理**：
-
-- ✅ Skill = 能力包（description + instructions + tools），Tool = 底层函数
-- ✅ `activate_skill` 是唯一基础工具，激活 Skill 后注入指令 + 加载工具
-- ✅ SkillRegistry 双层管理：Skill 层注册能力包，Tool 层注册函数
-- ✅ 兼容模式自动检测：全部 Skill 有 `tools` 声明 → 双层模式，否则 → 平铺模式
-- ✅ Agent 通过"信息素"（SharedContext）间接通信，去中心化协作
-
-### Agent Swarm 群体智能
-
-**关键特性**：去中心化、自组织、涌现智能
-
-**工作流程**：
-1. SwarmCoordinator 检索长短期记忆，构建增强上下文
-2. **LeadAgent 始终先介入**，评估复杂度并分解任务（所有问题都走这一步）
-3. 1 个子任务 → 单 Agent 直接处理（快速响应）
-4. ≥2 个子任务 → LeadAgent 创建 SubTask 写入 SharedContext
-5. Worker Agents 自主认领并行执行（基于能力匹配，每个 Agent 自主选择 Skills）
-6. LeadAgent 汇总结果
-7. SessionSummary 学习总结
 
 ### 记忆系统架构
 
@@ -1025,9 +963,9 @@ SwarmCoordinator
 └──────────────┘  └───────────────────┘
 ```
 ---
-## 工作流  
+## 工作流
 
-### 单agent
+### Worker Agent（Prompt 拼接与循环机制）
 ```plaintext
 =======================================================================
                【 单 Agent 模式：Prompt 拼接与循环机制 】
@@ -1045,8 +983,8 @@ SwarmCoordinator
       ▼
 ┌───────────────────────── Role: System / User ─────────────────────────┐
 │  4. 全局上下文 (User Context): ## 用户档案 (包含用户的长期画像数据)   │
-│  5. 短期记忆 (Short Term Memory): 注入最近的 N 轮历史对话消息         │
-│  6. 当前输入 (User Input): 用户本次提问或派发的子任务内容             │
+│  5. 当前输入 (User Input): 用户本次提问或派发的子任务内容             │
+│     （Worker 通过 process_subtask() 执行，隔离子会话，无历史上下文）  │
 └───────────────────────────────────────────────────────────────────────┘
       │
       ▼
