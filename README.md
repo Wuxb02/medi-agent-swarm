@@ -15,7 +15,7 @@
 - **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
-- **🧠 记忆系统**: 短期记忆（LeadAgent 独占）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
+- **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -70,7 +70,7 @@
    - 个人档案：全局 `memory/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
-   - **LLM 语义摘要**：早期对话自动压缩为结构化摘要，保留关键医学信息
+   - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
 
 ### SKILL.md 格式
 
@@ -364,7 +364,7 @@ medix-agent-swarm/
 │
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
-│   ├── short_term.py                  # 短期记忆（单例，集成 LLM 语义摘要 + 子会话隔离）
+│   ├── short_term.py                  # 短期记忆（单例，写时增量压缩 + 子会话隔离）
 │   ├── personal_profile.py            # 个人健康档案（全局 memory/PERSONAL.md）
 │   ├── session_summary.py             # 会话总结
 │   ├── entropy_manager.py             # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
@@ -537,15 +537,17 @@ memory = ShortTermMemory(session_id="user_123", storage_type="redis")
 **存储方式**：
 - **内存**（默认）：无需配置，保留时间60分钟
 - **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
-- 存储容量：最近10条消息
+- 存储容量：累积消息，写入时熵驱动压缩
 
-**智能压缩**：
+**智能压缩（写时增量压缩）**：
 
-短期记忆集成了熵管理器，在消息积累过多时自动压缩早期对话：
+短期记忆采用"写入时压缩、读取时零开销"模式。每次 `add_message()` 写入新消息后，检查未压缩消息的熵等级，仅当满足高熵条件时触发压缩：
 
-- **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留症状、诊断、用药等关键医学信息
-- **截断降级**（自动）：LLM 不可用或调用失败时，自动降级为截断模式
-- **去重**：基于向量语义相似度（BAAI/bge-small-zh-v1.5）检测并移除语义重复消息，阈值 0.9
+- **熵驱动触发**：未压缩消息满足 `total_messages > 20` 或 `duplicate_rate > 0.15` 或 `avg_message_length > 500` 时才压缩，否则跳过
+- **增量压缩**：只压缩较旧的消息，保留最近 N 条不动；压缩摘要持久化到 messages 列表，下次读取直接返回
+- **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留关键医学信息
+- **截断降级**（自动）：LLM 不可用时降级为截断模式
+- **去重**：基于向量语义相似度（BAAI/bge-small-zh-v1.5）检测并移除重复消息，阈值 0.9
 
 #### 个人档案（PersonalProfile）
 
@@ -613,7 +615,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 ```
 1. 会话开始
    ↓
-2. 短期记忆：加载当前会话历史（最近10条消息）→ 仅供 LeadAgent 参考
+2. 短期记忆：直接返回当前会话历史（压缩已在写入时完成，读取零开销）→ 仅供 LeadAgent 参考
    ↓
 3. 长期记忆：检索 Mem0 相似案例
    ↓
@@ -659,34 +661,39 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 
 #### 设计原则
 
-- **读时清理，非写时清理**：消息以原始形态存储，每次读取时透明地执行去重+压缩，对 Agent 核心逻辑零侵入
+- **写时增量压缩，读时直接返回**：消息写入时检查熵，满足高熵条件时压缩早期对话，压缩结果持久化到 messages 列表；读取时直接返回列表尾部，零计算开销
+- **累积增长**：压缩后继续累积新消息，当新的未压缩部分再次满足高熵条件时再次压缩
 - **熵驱动**：先评估信息熵，低熵时零开销跳过，高熵时按需执行去重和压缩
 - **自动降级**：LLM 不可用时自动切换为截断模式，嵌入模型加载失败时直接返回原始消息
 
-#### auto_clean 流水线
+#### 增量压缩流程
 
-`auto_clean()` 是熵管理的主入口，调用方只需传入消息列表和上限：
+`_maybe_compress_incremental()` 在每次 `add_message()` 后自动调用：
 
 ```
-输入: messages[], max_messages
+输入: 新消息写入 messages[]
   │
   ▼
-Step 1: estimate_entropy()          计算多维熵指标
-  │
-  ├── entropy_level == "low" → 返回原始消息（零开销）
+Step 1: 提取未压缩部分        messages[_uncompressed_start:]
   │
   ▼
-Step 2: duplicate_rate > 0.1?       判断是否值得去重
-  │
-  ├── YES → deduplicate_messages()  贪心语义去重
-  │         └── 复检熵 → "low" 则返回（跳过 LLM）
+Step 2: 分离可压缩区间         [start, len - keep_recent) 保留最近 N 条不动
   │
   ▼
-Step 3: total > max_messages?       判断是否需要压缩
+Step 3: estimate_entropy()    计算可压缩区间的多维熵指标
   │
-  ├── YES → compress_session_history()
-  │         ├── LLM 语义摘要（含动态熵约束）
-  │         └── 截断降级（LLM 不可用时）
+  ├── entropy_level != "high" → 跳过（零开销）
+  │
+  ▼
+Step 4: duplicate_rate > 0.1? → deduplicate_messages() 贪心语义去重
+  │
+  ▼
+Step 5: _compress_older_messages()
+  │     ├── LLM 语义摘要（含动态熵约束）
+  │     └── 截断降级（LLM 不可用时）
+  │
+  ▼
+Step 6: 替换原区间 + 更新 _uncompressed_start 指针
 ```
 
 #### 熵评估（多指标判定）
@@ -722,23 +729,28 @@ LLM 的 `max_tokens` 也受熵等级影响：高熵 512 tokens，普通 256 toke
 
 LLM 不可用或调用失败时，自动降级为截断模式：将 user + assistant 配对，截取前 50/100 字符生成摘要。
 
+压缩摘要以 `assistant` role 存储，兼容 `get_history()` 的消息过滤逻辑，确保 Agent 能正确接收早期对话的摘要信息。
+
 #### 集成位置
 
 | 集成点 | 位置 | 作用 |
 |--------|------|------|
-| **ShortTermMemory** | `memory/short_term.py` | 主力战场：在 `get_recent_messages()` 中调用 `auto_clean()`，携带 LLM 客户端 |
+| **ShortTermMemory.add_message()** | `memory/short_term.py` | 写入时调用 `_maybe_compress_incremental()`，熵驱动增量压缩 |
+| **ShortTermMemory.get_recent_messages()** | `memory/short_term.py` | 读取时直接返回 messages 列表，零压缩开销 |
 | **LongTermMemory** | `memory/long_term.py` | 轻量使用：在 `search_similar_sessions()` 中仅调用 `deduplicate_sessions()`，无 LLM 客户端 |
-| **AgentLoop** | `core/agent_loop.py` | 通过 `get_history()` 间接调用，无直接依赖 |
 | **SwarmCoordinator** | `swarm/swarm_coordinator.py` | 传入 LLM 客户端，使短期记忆具备 LLM 压缩能力 |
 
 核心流程：
 
 ```
-AgentLoop._initialize_messages()
+AgentLoop.run()
+  → ShortTermMemory.add_message(session_id, "user", content)
+    → messages.append(new_message)
+    → _maybe_compress_incremental(history)
+      → 熵检查 → 去重 + 压缩 → 更新 _uncompressed_start
+
   → ShortTermMemory.get_history(session_id, limit=5)
-    → get_recent_messages()
-      → entropy_manager.auto_clean(messages, max_messages=5)
-        → 去重 + 压缩后的干净消息返回给 Agent
+    → messages[-limit:]  # 直接返回，无压缩计算
 ```
 
 ### 验证
@@ -928,14 +940,15 @@ SwarmCoordinator
 ┌────────────────────────────────────┐
 │  短期记忆（会话级，内存/Redis）     │
 │  - 对话历史（messages）            │
-│  - 当前会话上下文                  │
+│  - 写时增量压缩（熵驱动）          │
 │  - 保留时间：60分钟                │
 │  存储：内存（默认）或 Redis        │
 ├────────────────────────────────────┤
-│  熵管理器（自动优化）              │
+│  熵管理器（写时触发）              │
 │  - 向量语义去重（检测重复消息）    │
 │  - LLM 语义摘要（压缩早期对话）    │
 │  - 截断降级（LLM 不可用时）        │
+│  → 压缩结果持久化到 messages 列表  │
 └────────────────────────────────────┘
            ↕ (每轮对话后)
 ┌────────────────────────────────────┐

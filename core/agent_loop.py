@@ -120,7 +120,7 @@ class AgentLoop:
             # 记录用户消息到短期记忆
             if self.short_term_memory and session_id:
                 user_message = messages[-1]["content"] if messages else str(input_data)
-                self.short_term_memory.add_message(
+                await self.short_term_memory.add_message(
                     session_id=session_id,
                     role="user",
                     content=user_message
@@ -250,7 +250,7 @@ class AgentLoop:
                         # 记录 assistant 消息到短期记忆
                         if self.short_term_memory and session_id:
                             tool_names = [tc.name for tc in llm_response.tool_calls]
-                            self.short_term_memory.add_message(
+                            await self.short_term_memory.add_message(
                                 session_id=session_id,
                                 role="assistant",
                                 content=f"调用工具：{', '.join(tool_names)}"
@@ -310,7 +310,7 @@ class AgentLoop:
                             # 记录结果到短期记忆
                             if self.short_term_memory and session_id:
                                 result_summary = str(tool_result)[:200]
-                                self.short_term_memory.add_message(
+                                await self.short_term_memory.add_message(
                                     session_id=session_id,
                                     role="tool",
                                     content=f"{tool_call.name}: {result_summary}"
@@ -378,7 +378,7 @@ class AgentLoop:
 
                         # 记录最终回答到短期记忆
                         if self.short_term_memory and session_id:
-                            self.short_term_memory.add_message(
+                            await self.short_term_memory.add_message(
                                 session_id=session_id,
                                 role="assistant",
                                 content=final_answer or "(empty response)"
@@ -453,7 +453,7 @@ class AgentLoop:
 
                     # 记录最终回答到短期记忆
                     if self.short_term_memory and session_id:
-                        self.short_term_memory.add_message(
+                        await self.short_term_memory.add_message(
                             session_id=session_id,
                             role="assistant",
                             content=result['answer']

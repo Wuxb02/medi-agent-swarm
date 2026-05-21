@@ -548,9 +548,9 @@ async def test_short_term_memory():
     stm.create_session(session_id, metadata={"test": True})
 
     # 添加消息
-    stm.add_message(session_id, "user", "我头痛")
-    stm.add_message(session_id, "assistant", "建议休息并就医")
-    stm.add_message(session_id, "tool", "assess_risk: risk_level=low")
+    await stm.add_message(session_id, "user", "我头痛")
+    await stm.add_message(session_id, "assistant", "建议休息并就医")
+    await stm.add_message(session_id, "tool", "assess_risk: risk_level=low")
 
     # 获取历史
     messages = await stm.get_recent_messages(session_id, limit=10)
@@ -1328,8 +1328,8 @@ async def test_harness_integration():
 
     # 测试熵管理：添加重复消息
     for i in range(3):
-        stm.add_message(session_id, "user", "重复的问题")
-        stm.add_message(session_id, "assistant", "重复的回答")
+        await stm.add_message(session_id, "user", "重复的问题")
+        await stm.add_message(session_id, "assistant", "重复的回答")
 
     # 获取历史（应该自动去重）
     history = await stm.get_history(session_id, limit=5)

@@ -31,6 +31,7 @@ class ConversationHistory:
     created_at: datetime = field(default_factory=datetime.now)
     last_updated: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _uncompressed_start: int = 0  # 未压缩消息在 messages 中的起始索引
 
     def add_message(self, role: str, content: str):
         """添加消息"""
@@ -52,7 +53,8 @@ class ConversationHistory:
             "messages": self.messages,
             "created_at": self.created_at.isoformat(),
             "last_updated": self.last_updated.isoformat(),
-            "metadata": self.metadata
+            "metadata": self.metadata,
+            "_uncompressed_start": self._uncompressed_start
         }
 
     @classmethod
@@ -63,7 +65,8 @@ class ConversationHistory:
             messages=data["messages"],
             created_at=datetime.fromisoformat(data["created_at"]),
             last_updated=datetime.fromisoformat(data["last_updated"]),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
+            _uncompressed_start=data.get("_uncompressed_start", len(data["messages"]))
         )
 
 
@@ -170,14 +173,14 @@ class ShortTermMemory:
         logger.debug(f"Created session: {session_id}")
         return history
 
-    def add_message(
+    async def add_message(
         self,
         session_id: str,
         role: str,
         content: str
     ):
         """
-        添加消息到会话历史
+        添加消息到会话历史（写入时自动增量压缩）
 
         Args:
             session_id: 会话ID
@@ -191,11 +194,72 @@ class ShortTermMemory:
 
         history.add_message(role, content)
 
+        # 写入时增量压缩：仅当未压缩消息满足高熵条件时触发
+        if self.entropy_manager:
+            await self._maybe_compress_incremental(history)
+
         # 保存到存储
         if self.storage_type == "redis" and self.redis_client:
             self._save_to_redis(history)
 
         logger.debug(f"Added {role} message to session {session_id}")
+
+    async def _maybe_compress_incremental(self, history: ConversationHistory):
+        """
+        增量压缩：只对未压缩部分检查熵，满足高熵条件时压缩较旧的消息。
+
+        策略：
+        - 保留最近 keep_recent 条消息不动
+        - 对更早的未压缩消息执行熵检查（high 时才压缩）
+        - 压缩摘要以 role="assistant" 存入（兼容 get_history 过滤）
+        - 更新 _uncompressed_start 指针，实现累积增长
+        """
+        messages = history.messages
+        start = history._uncompressed_start
+        keep_recent = 5  # 保留最近 5 条不动
+
+        # 可压缩区间: [start, len(messages) - keep_recent)
+        compressible_end = len(messages) - keep_recent
+        if compressible_end <= start:
+            return  # 可压缩部分不足
+
+        compressible = messages[start:compressible_end]
+
+        # 熵检查：仅当高熵时才触发压缩
+        entropy = self.entropy_manager.estimate_entropy(compressible)
+        if entropy["entropy_level"] != "high":
+            return  # 不满足压缩条件，跳过
+
+        logger.info(
+            f"📊 会话 {history.session_id} 未压缩部分熵等级: high "
+            f"(消息数: {entropy['total_messages']}, "
+            f"重复率: {entropy['duplicate_rate']:.1%})"
+        )
+
+        # 执行压缩
+        # 1. 去重（重复率 > 0.1 才执行）
+        cleaned = compressible
+        if entropy.get("duplicate_rate", 0) > 0.1:
+            cleaned = self.entropy_manager.deduplicate_messages(cleaned)
+
+        # 2. LLM 摘要（或截断降级）
+        compressed = await self.entropy_manager._compress_older_messages(
+            cleaned, entropy=entropy
+        )
+
+        # 3. 修正 role: system → assistant（兼容 get_history 过滤）
+        for msg in compressed:
+            if msg.get("role") == "system":
+                msg["role"] = "assistant"
+
+        # 4. 替换原区间，更新压缩边界
+        history.messages = messages[:start] + compressed + messages[compressible_end:]
+        history._uncompressed_start = start + len(compressed)
+
+        logger.info(
+            f"📦 增量压缩完成: {len(compressible)} 条 → {len(compressed)} 条摘要 "
+            f"(session={history.session_id}, 未压缩边界={history._uncompressed_start})"
+        )
 
     def get_session(self, session_id: str) -> Optional[ConversationHistory]:
         """
@@ -219,37 +283,18 @@ class ShortTermMemory:
         limit: int = 50
     ) -> List[Dict[str, str]]:
         """
-        获取最近的消息（自动熵管理）
+        获取最近的消息（读取时不做压缩，压缩已在写入时完成）
 
         Args:
             session_id: 会话ID
             limit: 最大消息数
 
         Returns:
-            消息列表（去重和压缩后）
+            消息列表
         """
         history = self.get_session(session_id)
         if history:
-            messages = history.get_recent_messages(limit)
-
-            # Harness Engineering: 统一熵管理
-            if self.entropy_manager and len(messages) > 0:
-                # 熵估算（仅用于日志监控）
-                if len(messages) >= 10:
-                    entropy_info = self.entropy_manager.estimate_entropy(messages)
-                    if entropy_info["entropy_level"] == "high":
-                        logger.warning(
-                            f"📊 会话 {session_id} 熵等级: {entropy_info['entropy_level']} "
-                            f"(消息数: {entropy_info['total_messages']}, "
-                            f"重复率: {entropy_info['duplicate_rate']:.1%})"
-                        )
-
-                # auto_clean 内部自行做熵判断
-                messages = await self.entropy_manager.auto_clean(
-                    messages, max_messages=limit
-                )
-
-            return messages
+            return history.get_recent_messages(limit)
         return []
 
     async def get_history(
