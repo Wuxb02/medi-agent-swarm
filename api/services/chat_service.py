@@ -161,6 +161,12 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         yield _json_line("suggestions", suggestions_payload)
         collected_events.append({"event": "suggestions", "data": suggestions_payload})
 
+    # 5.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
+    try:
+        _persist_session_turn(session_id, request, result, collected_events)
+    except Exception as e:
+        logger.warning(f"Failed to persist session turn: {e}")
+
     # 6. 发送 done（最后一个事件）
     done_data = {
         "session_id": result.get("session_id", session_id),
@@ -192,12 +198,6 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         _save_session_events(session_id, collected_events, result)
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
-
-    # 8. 持久化到 SQLite + Milvus
-    try:
-        _persist_session_turn(session_id, request, result, collected_events)
-    except Exception as e:
-        logger.warning(f"Failed to persist session turn: {e}")
 
     # 9. 清理问卷管理器
     remove_manager(session_id)
@@ -342,6 +342,9 @@ def _persist_session_turn(
             "total_tokens": result.get("usage", {}).get("total_tokens", 0),
             "subtasks_completed": result.get("subtasks_completed", 0),
             "mode": "swarm" if result.get("swarm_enabled", False) else "single",
+            "parallel_efficiency": result.get("performance_metrics", {}).get("parallel_efficiency", 0),
+            "information_coverage": result.get("performance_metrics", {}).get("information_coverage", 0),
+            "redundancy": result.get("performance_metrics", {}).get("redundancy", 0),
         },
     )
 

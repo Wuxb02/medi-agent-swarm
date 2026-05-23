@@ -114,6 +114,7 @@ export interface SessionItem {
   parallel_efficiency: number
   information_coverage: number
   redundancy: number
+  _isNew?: boolean
 }
 
 export interface SessionTurn {

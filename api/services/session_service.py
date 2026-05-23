@@ -202,6 +202,9 @@ def _build_detail_from_db(session_data: Dict[str, Any]) -> SessionDetail:
             if last_turn else ""
         ),
         total_tokens=session_data.get("total_tokens", 0),
+        parallel_efficiency=session_data.get("parallel_efficiency", 0),
+        information_coverage=session_data.get("information_coverage", 0),
+        redundancy=session_data.get("redundancy", 0),
         turns=turns,
     )
 

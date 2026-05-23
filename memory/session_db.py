@@ -52,6 +52,7 @@ class SessionDB:
 
         # 初始化数据库表
         self._execute(self._create_tables)
+        self._execute(self._migrate_tables)
 
         self._initialized = True
         logger.info(f"SessionDB initialized: {db_path}")
@@ -89,7 +90,10 @@ class SessionDB:
                 first_question TEXT DEFAULT '',
                 total_tokens   INTEGER DEFAULT 0,
                 message_count  INTEGER DEFAULT 0,
-                turn_count     INTEGER DEFAULT 0
+                turn_count     INTEGER DEFAULT 0,
+                parallel_efficiency  REAL DEFAULT 0,
+                information_coverage REAL DEFAULT 0,
+                redundancy           REAL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS messages (
@@ -119,6 +123,15 @@ class SessionDB:
                 ON messages(session_id, turn_index);
         """)
 
+    @staticmethod
+    def _migrate_tables(conn: sqlite3.Connection):
+        """数据库迁移：为已有表添加新列"""
+        for col in ("parallel_efficiency", "information_coverage", "redundancy"):
+            try:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} REAL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+
     def save_turn(
         self,
         session_id: str,
@@ -146,14 +159,18 @@ class SessionDB:
                 """
                 INSERT INTO sessions
                     (session_id, created_at, updated_at, mode,
-                     first_question, total_tokens, message_count, turn_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     first_question, total_tokens, message_count, turn_count,
+                     parallel_efficiency, information_coverage, redundancy)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     updated_at     = excluded.updated_at,
                     mode           = excluded.mode,
                     total_tokens   = sessions.total_tokens + excluded.total_tokens,
                     message_count  = sessions.message_count + excluded.message_count,
-                    turn_count     = sessions.turn_count + 1
+                    turn_count     = sessions.turn_count + 1,
+                    parallel_efficiency  = excluded.parallel_efficiency,
+                    information_coverage = excluded.information_coverage,
+                    redundancy           = excluded.redundancy
                 """,
                 (
                     session_id,
@@ -164,6 +181,9 @@ class SessionDB:
                     assistant_msg.get("total_tokens", 0),
                     2,  # 每轮 2 条消息
                     1,
+                    assistant_msg.get("parallel_efficiency", 0),
+                    assistant_msg.get("information_coverage", 0),
+                    assistant_msg.get("redundancy", 0),
                 ),
             )
 

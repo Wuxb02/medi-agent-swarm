@@ -19,6 +19,7 @@ const navItems = [
 const sessions = ref<SessionItem[]>([])
 const loading = ref(false)
 const pendingCount = ref(0)
+const newSessionId = ref<string | null>(null) // 追踪最新创建的会话 ID，用于 loadSessions 后重新标记
 
 async function loadPendingCount() {
   try {
@@ -34,6 +35,11 @@ async function loadSessions() {
   loading.value = true
   try {
     sessions.value = await getSessions(200, 0)
+    // 重新标记新建会话（loadSessions 会丢失 _isNew 标记）
+    if (newSessionId.value) {
+      const s = sessions.value.find(s => s.session_id === newSessionId.value)
+      if (s) (s as any)._isNew = true
+    }
   } catch (e) {
     console.error('Failed to load sessions:', e)
   } finally {
@@ -94,11 +100,48 @@ onMounted(() => {
   loadPendingCount()
 })
 
-// 对话流结束（isStreaming: true → false）后刷新列表，确保数据库已持久化
+// 新会话创建时（sessionId 从 null 变为值）立即在列表头部插入占位条目
+watch(() => chatStore.sessionId, (newId, oldId) => {
+  if (newId && !oldId) {
+    const firstQ = chatStore.messages.find(m => m.role === 'user')?.content || '新会话'
+    const placeholder: SessionItem = {
+      session_id: newId,
+      first_question: firstQ,
+      created_at: new Date().toISOString(),
+      message_count: 1,
+      mode: '',
+      total_tokens: 0,
+      parallel_efficiency: 0,
+      information_coverage: 0,
+      redundancy: 0,
+      _isNew: true,
+    }
+    if (!sessions.value.some(s => s.session_id === newId)) {
+      sessions.value.unshift(placeholder)
+    }
+    newSessionId.value = newId
+  }
+})
+
+// 对话流结束后刷新列表，确保数据库已持久化
 watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
   if (wasStreaming && !streaming && chatStore.sessionId) {
+    // 延迟刷新，确保后端持久化已完成
+    setTimeout(() => {
+      loadSessions()
+      loadPendingCount()
+    }, 500)
+  }
+})
+
+// 切换到其他会话时，清除乐观高亮并刷新列表（清除 _isNew 标记）
+watch(() => route.params.sessionId, (newId, oldId) => {
+  if (newId && newSessionId.value && newId !== newSessionId.value) {
+    newSessionId.value = null
+  }
+  // 切换会话时刷新列表，用 API 数据替换带 _isNew 标记的对象
+  if (newId && newId !== oldId) {
     loadSessions()
-    loadPendingCount()
   }
 })
 </script>
@@ -156,9 +199,14 @@ watch(() => chatStore.isStreaming, (streaming, wasStreaming) => {
           :key="s.session_id"
           @click="openSession(s.session_id)"
           class="group flex items-center justify-between px-3 py-2 text-sm rounded-lg cursor-pointer transition"
-          :class="route.params.sessionId === s.session_id
-            ? 'bg-slate-600 text-white'
-            : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'"
+          :class="[
+            route.params.sessionId === s.session_id
+              ? 'bg-slate-600 text-white'
+              : 'text-slate-300 hover:bg-slate-700/50 hover:text-white',
+            s._isNew
+              ? 'bg-slate-600 text-white'
+              : ''
+          ]"
         >
           <div class="flex-1 min-w-0">
             <div class="truncate">{{ truncate(s.first_question, 18) }}</div>

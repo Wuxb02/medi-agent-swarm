@@ -467,6 +467,12 @@ export const useChatStore = defineStore('chat', () => {
                 agentsInvolved: am.agents_involved || [],
                 totalTime: am.total_time,
                 subtasksCompleted: am.subtasks_completed,
+                usage: { total_tokens: detail.total_tokens || 0 },
+                performanceMetrics: {
+                  parallelEfficiency: detail.parallel_efficiency || 0,
+                  informationCoverage: detail.information_coverage || 0,
+                  redundancy: detail.redundancy || 0,
+                },
               },
             })
           }
@@ -500,11 +506,12 @@ export const useChatStore = defineStore('chat', () => {
               agentsInvolved: detail.agents_involved || [],
               totalTime: detail.total_time,
               subtasksCompleted: detail.subtasks_completed,
-              performanceMetrics: detail.parallel_efficiency > 0 ? {
+              usage: { total_tokens: detail.total_tokens || 0 },
+              performanceMetrics: {
                 parallelEfficiency: detail.parallel_efficiency || 0,
                 informationCoverage: detail.information_coverage || 0,
                 redundancy: detail.redundancy || 0,
-              } : undefined,
+              },
             },
           })
         }
