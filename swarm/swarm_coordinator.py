@@ -213,7 +213,7 @@ class SwarmCoordinator:
             subtask_obj = SubTask(
                 id=task.get("id", "single"),
                 type=task.get("type", "general"),
-                description=question,
+                description=task.get("description", question),
                 assigned_agent=agent_id,
                 status=TaskStatus.PENDING,
             )
@@ -234,11 +234,16 @@ class SwarmCoordinator:
             if hasattr(agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(agent)
 
-            # 将子会话结果合并回主会话
+            # 将用户问题和子会话结果合并回主会话
+            await self.short_term_memory.add_message(
+                session_id=session_id,
+                role="user",
+                content=question,
+            )
             self.short_term_memory.merge_sub_session(
                 main_session_id=session_id,
                 sub_session_id=sub_session_id,
-                summary_text=final_answer[:500] if final_answer else "",
+                summary_text=final_answer if final_answer else "",
             )
 
             result.update({
@@ -322,11 +327,16 @@ class SwarmCoordinator:
             if hasattr(self.consultation_agent, 'set_on_thinking'):
                 self._cleanup_thinking_callbacks(self.consultation_agent)
 
-            # 将子会话结果合并回主会话
+            # 将用户问题和子会话结果合并回主会话
+            await self.short_term_memory.add_message(
+                session_id=session_id,
+                role="user",
+                content=question,
+            )
             self.short_term_memory.merge_sub_session(
                 main_session_id=session_id,
                 sub_session_id=sub_session_id,
-                summary_text=final_answer[:500] if final_answer else "",
+                summary_text=final_answer if final_answer else "",
             )
             result.update({
                 'swarm_enabled': False,
@@ -358,7 +368,7 @@ class SwarmCoordinator:
         # 将 total_time 写入结果
         result['total_time'] = (end_time - start_time).total_seconds()
 
-        # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
+        # 注意：用户问题和最终回答已由上方 merge_sub_session 保存到主会话，子会话已清除
 
         # fire-and-forget：由 chat_stream 的 finalizer 负责等待完成
         self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
@@ -456,7 +466,8 @@ class SwarmCoordinator:
         # Step 3.5: 合并 Worker 子会话到主会话
         await self._merge_worker_subsessions(
             main_session_id=session_id,
-            shared_context=shared_context
+            shared_context=shared_context,
+            question=question,
         )
 
         end_time = datetime.now()
@@ -495,8 +506,7 @@ class SwarmCoordinator:
         except Exception as e:
             logger.error(f"Failed to generate session summary: {e}")
 
-        # 注意：短期记忆已经在 Agent Loop 中保存了，这里不需要重复保存
-        # Agent Loop 保存了完整的对话历史（user + assistant + tool messages）
+        # 注意：用户问题由 _merge_worker_subsessions 保存到主会话，子会话已清除
 
         # 保存长期记忆任务（fire-and-forget，由 chat_stream finalizer 等待）
         self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
@@ -608,7 +618,8 @@ class SwarmCoordinator:
     async def _merge_worker_subsessions(
         self,
         main_session_id: str,
-        shared_context
+        shared_context,
+        question: str,
     ):
         """
         将所有 Worker 的子会话历史合并到主会话
@@ -622,6 +633,13 @@ class SwarmCoordinator:
             "diagnostic_agent": "诊断Agent",
             "research_agent": "研究Agent",
         }
+
+        # 保存用户问题到主会话（确保下轮有完整 Q&A 上下文）
+        await self.short_term_memory.add_message(
+            session_id=main_session_id,
+            role="user",
+            content=question,
+        )
 
         for agent_id, contributions in shared_context.agent_contributions.items():
             for contrib in contributions:
