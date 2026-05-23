@@ -43,16 +43,20 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
         return PromptLoader.load("agents/consultation_system.j2")
 
     def register_tools(self):
-        """注册所有 9 个 Skills（共享实现，来自 SkillRegistryMixin）"""
+        """注册所有 Skills（共享实现，来自 SkillRegistryMixin）"""
         self.register_all_skills()
 
     def format_user_input(self, input_data: Dict[str, Any]) -> str:
         """格式化用户输入"""
+        raw_ctx = input_data.get('context', {})
+        ctx_text = ""
+        if raw_ctx and isinstance(raw_ctx, dict):
+            ctx_text = "\n".join(f"{k}: {v}" for k, v in raw_ctx.items())
         return PromptLoader.render(
             "agents/consultation_user_input.j2",
             question=input_data.get('question', ''),
             session_id=input_data.get('session_id', ''),
-            context=input_data.get('context', {}),
+            context=ctx_text,
         )
 
     async def post_process_result(

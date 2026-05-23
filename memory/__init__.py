@@ -24,12 +24,6 @@ from .entropy_manager import (
 )
 
 # 本地 Markdown 持久化
-from .agent_identity import (
-    AgentIdentity,
-    AgentIdentityManager,
-    CollaborationRecord,
-    ToolUsageStats
-)
 from .session_summary import (
     SessionSummary,
     SessionSummaryManager,
@@ -56,11 +50,6 @@ __all__ = [
     # Harness Engineering: 熵管理
     'MemoryEntropyManager',
     # 本地持久化类
-    'AgentIdentity',
-    'AgentIdentityManager',
-    'LearningRecord',
-    'CollaborationRecord',
-    'ToolUsageStats',
     'SessionSummary',
     'SessionSummaryManager',
     'AgentParticipation',

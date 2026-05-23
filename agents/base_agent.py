@@ -60,7 +60,6 @@ class BaseAgent(ABC):
         # Swarm 协作相关
         self.capabilities: List[str] = []  # 能力标签
         self.shared_context: Optional[Any] = None  # SharedContext 引用
-        self.identity_manager: Optional[Any] = None  # AgentIdentityManager 引用
 
         logger.info(
             f"Initialized {self.__class__.__name__} (id={agent_id}) "
@@ -140,6 +139,18 @@ class BaseAgent(ABC):
             if instructions:
                 base += f"\n\n---\n## 当前 Skill 指令\n{instructions}"
 
+        return base
+
+    def get_base_system_prompt_stable(self) -> str:
+        """获取稳定的系统提示词（不含激活 Skill 指令），用于 KV cache 前缀。
+
+        Skill 指令通过 activate_skill 的 tool result 传递给 LLM，
+        而非注入 system prompt，避免修改 messages[0] 导致 KV cache 失效。
+        """
+        base = self._get_base_system_prompt()
+        if not self.skill_registry.compat_mode:
+            catalog = self.skill_registry.get_skills_catalog()
+            base += f"\n\n---\n## 可用 Skills\n{catalog}\n\n使用 activate_skill(name=\"xxx\") 激活技能后方可使用其工具。"
         return base
 
     @abstractmethod
@@ -229,10 +240,6 @@ class BaseAgent(ABC):
     def attach_shared_context(self, shared_context: Any):
         """附加 SharedContext（由 Swarm 调用）"""
         self.shared_context = shared_context
-
-    def attach_identity_manager(self, identity_manager: Any):
-        """附加 AgentIdentityManager（由 Swarm 调用）"""
-        self.identity_manager = identity_manager
 
     def set_on_thinking(self, callback):
         """设置 thinking 内容回调"""

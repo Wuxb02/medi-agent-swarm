@@ -37,7 +37,7 @@
 运行时：
   LLM 从 system prompt 知道有哪些 Skill
   → 调用 activate_skill("search-knowledge")
-  → system prompt 追加该 Skill 的 instructions 指令正文
+  → tool result 返回该 Skill 的 instructions 指令正文
   → tools 列表更新为该 Skill 声明的工具
   → LLM 使用 Skill 的工具执行任务
   → 给出最终回答
@@ -52,7 +52,7 @@
 
 2. **指令注入机制**
    - SKILL.md 的 YAML frontmatter 提供 `name`、`description`、`tools` 字段
-   - SKILL.md 的 Markdown 正文作为 Skill 指令，激活时注入 system prompt
+   - SKILL.md 的 Markdown 正文作为 Skill 指令，通过 `activate_skill` 的 **tool result** 返回给 LLM
    - Agent 获得 Skill 的上下文知识，而非仅获得工具
 
 3. **动态工具加载**
@@ -67,7 +67,7 @@
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（10条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
-   - 个人档案：全局 `memory/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
+   - 个人档案：`memory/profile/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
@@ -192,9 +192,10 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 
 1. **LeadAgent 统一收集**：澄清阶段仅在 LeadAgent 层面执行，Worker Agent 不再自行提问
 2. **暂停/恢复机制**：基于 `asyncio.Future`，工具返回 `needs_user_input` 标记后 AgentLoop 自动 await，前端提交后 resolve 继续
-3. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
-4. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
-5. **最多 2 轮澄清**：LeadAgent 最多进行 2 轮问卷交互，避免无限循环
+3. **上下文注入**：clarify 和 assess 阶段自动注入用户档案（仅已确认信息）+ 近期对话 + 历史相似案例，避免重复提问已有信息
+4. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
+5. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
+6. **最多 2 轮澄清**：LeadAgent 最多进行 2 轮问卷交互，避免无限循环
 
 
 ## 🚀 从零开始运行
@@ -365,7 +366,7 @@ medix-agent-swarm/
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
 │   ├── short_term.py                  # 短期记忆（单例，写时增量压缩 + 子会话隔离）
-│   ├── personal_profile.py            # 个人健康档案（全局 memory/PERSONAL.md）
+│   ├── personal_profile.py            # 个人健康档案（memory/profile/）
 │   ├── session_summary.py             # 会话总结
 │   ├── entropy_manager.py             # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
 │   └── embedding.py                   # 共享 embedding 工具（模型加载 + 余弦相似度）
@@ -553,11 +554,11 @@ memory = ShortTermMemory(session_id="user_123", storage_type="redis")
 
 **作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），全局单文件。
 
-**存储路径**：`memory/PERSONAL.md`
+**存储路径**：`memory/profile/PERSONAL.md`
 
 **工作方式**：
 - LLM 每轮对话自动提取个人信息，增量合并写入
-- 对话开始时自动注入到 Agent 上下文
+- 对话开始时自动注入到 Agent 上下文（仅已确认信息，来自 `PERSONAL.md`）
 - 前端「个人中心」支持手动查看和编辑
 
 **文件格式**：
@@ -592,7 +593,7 @@ MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
   ↓
 LLM 评估（prompt/memory/quality_eval.j2）
   ├─ 质量评分（1-10）
-  ├─ 提取个人信息 → memory/PERSONAL.md
+  ├─ 提取个人信息 → memory/profile/PERSONAL.md
   └─ 提取可复用事实 → Mem0
 ```
 
@@ -619,7 +620,8 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    ↓
 3. 长期记忆：检索 Mem0 相似案例
    ↓
-4. LeadAgent 任务分解（携带短期记忆 + 长期记忆）
+4. LeadAgent 任务分解（携带已确认档案 + 短期记忆 + 长期记忆）
+   - 用户档案（`to_text()`，仅已确认信息）→ clarify + assess 阶段自动注入
    - 短期记忆 → 理解多轮对话意图
    - 长期记忆 → 基于历史案例做更好的任务分配
    - 相关记忆嵌入子任务 description → 传递给 Worker
@@ -809,7 +811,7 @@ python -m eval.runner --score-abtest
 
 ### 动态”卡带式” System Prompt
 
-系统提示词采用三层动态拼接（基础角色 + 技能目录 + 当前激活指令），同一时间仅暴露当前 Skill 的核心约束。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
+系统提示词采用 KV cache 友好的三层结构（基础角色 + 技能目录 → 用户档案 → Skill 指令通过 tool result 返回）。system prompt 前缀在 Agent Loop 中保持稳定，Skill 指令不修改 system prompt，而是通过 `activate_skill` 的工具返回值传递给 LLM。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
 
 ### 设计理念
 
@@ -842,6 +844,7 @@ system_prompt = PromptLoader.load("agents/consultation_system.j2")
 user_msg = PromptLoader.render(
     "swarm/assessment_user.j2",
     question="高血压怎么办？",
+    personal_profile="个人信息：\n年龄：35岁",
     recent_history=[{"role": "user", "content": "..."}],
     historical_cases=[{"summary": "...", "score": 0.95}]
 )
@@ -860,7 +863,7 @@ disclaimer = PromptLoader.render(
 | --- | --- | --- |
 | `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
 | `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
-| `swarm/assessment_user.j2` | `question`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
+| `swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
 | `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
 | `research/query_planning.j2` | `question` | 查询拆解 |
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
@@ -913,15 +916,15 @@ python knowledge/scripts/deduplicate.py
   所有 Skill 的 name + description → system prompt（LLM 启动即知可用能力）
   base tools = [activate_skill]
 
-运行时：
+运行时（KV cache 友好，system prompt 前缀不变）：
 用户问题
    ↓
 SwarmCoordinator
    ├─ 检索长短期记忆，构建增强上下文
    │
-   ├─ LeadAgent.clarify()  ← 信息澄清：通过问卷收集背景信息
+   ├─ LeadAgent.clarify()  ← 信息澄清：注入用户档案+对话历史，避免重复提问
    │
-   ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 判断复杂度并分解
+   ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 注入完整上下文后分解
    │
    ├─ 1 个子任务 → Agent 通过 process_subtask() 执行（隔离子会话，无历史）
    │
@@ -973,6 +976,7 @@ SwarmCoordinator
 │ 注入为       │  │ 筛选相关案例      │
 │ system msg   │  │ 嵌入 description  │
 │ (所有Agent)  │  │ (传给 Worker)     │
+│ 仅已确认信息 │  │ 仅已确认信息      │
 └──────────────┘  └───────────────────┘
 ```
 ---
@@ -987,18 +991,23 @@ SwarmCoordinator
 [ 每次迭代开始：初始化 Messages (AgentLoop._initialize_messages) ]
       │
       ▼
-┌──────────────────────── Role: System (系统设定) ────────────────────────┐
-│  1. 基础设定 (Base Prompt) : Agent 子类定义的核心角色和职责           │
-│  2. 技能目录 (Skills Catalog): 当前 Agent 注册的所有可用 Skills 列表  │
-│  3. 激活指令 (Active Skill): (仅当激活时) 追加该 Skill 的核心指导说明 │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── Role: System (KV cache 稳定前缀) ─────────────────┐
+│  1. 基础设定 (Base Prompt) : Agent 子类定义的核心角色和职责               │
+│  2. 技能目录 (Skills Catalog): 当前 Agent 注册的所有可用 Skills 列表      │
+│     ↑ 此后永不修改，KV cache 100% 命中                                    │
+└───────────────────────────────────────────────────────────────────────────┘
       │
       ▼
-┌───────────────────────── Role: System / User ─────────────────────────┐
-│  4. 全局上下文 (User Context): ## 用户档案 (包含用户的长期画像数据)   │
-│  5. 当前输入 (User Input): 用户本次提问或派发的子任务内容             │
-│     （Worker 通过 process_subtask() 执行，隔离子会话，无历史上下文）  │
-└───────────────────────────────────────────────────────────────────────┘
+┌───────────────────────── Role: System (缓慢变化) ────────────────────────┐
+│  3. 用户档案 (User Context): ## 用户档案 (包含用户的长期画像数据)        │
+│     ↑ 同一用户不变，KV cache 高命中                                      │
+└──────────────────────────────────────────────────────────────────────────┘
+      │
+      ▼
+┌───────────────────────── Role: User (动态) ─────────────────────────────┐
+│  4. 当前输入 (User Input): 用户本次提问或派发的子任务内容               │
+│     （Worker 通过 process_subtask() 执行，隔离子会话，无历史上下文）    │
+└─────────────────────────────────────────────────────────────────────────┘
       │
       ▼
 (( Agent 状态循环引擎开始 - State: IN_PROGRESS )) <─────────────────────────┐
@@ -1013,7 +1022,8 @@ SwarmCoordinator
       │                     [ 循环执行工具 (execute_tool) ]                 │
       │                           │                                         │
       │                           ├─► 若工具为 `activate_skill`:            │
-      │                           │   触发 System Prompt 动态刷新, 注入新指令
+      │                           │   tool result 返回 Skill 指令正文,      │
+      │                           │   tools 列表动态刷新（system prompt 不变）
       │                           │                                         │
       │                           ├─► 增加 Tool Call 计数，防止无限死循环   │
       │                           │                                         │
@@ -1036,7 +1046,8 @@ SwarmCoordinator
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 1：信息澄清 (LeadAgent.clarify)                                    │
-│ Prompt: lead_clarify.j2 + lead_clarify_user.j2 (注入历史上下文)         │
+│ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
+│ 注入: 用户档案（仅已确认信息）+ 近期对话 + 历史相似案例                 │
 │ 状态流转: LLM 主动调用 `question_for_user` 工具，向前端抛出问卷事件。   │
 │           收集完毕后，将用户填写的背景数据打包成 collected_info         │
 └─────────────────────────────────────────────────────────────────────────┘

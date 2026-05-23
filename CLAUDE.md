@@ -95,7 +95,7 @@ cd frontend && npm run build
 | `memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
 | `memory/session_db.py` | SQLite 会话数据库（sessions + messages 表） |
 | `memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
-| `memory/personal_profile.py` | 个人健康档案（全局 memory/PERSONAL.md） |
+| `memory/personal_profile.py` | 个人健康档案（`memory/profile/PERSONAL.md`） |
 | `memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
 | `knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例） |
 | `research/deep_research_workflow.py` | 多步骤研究流水线 |
@@ -141,7 +141,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 | 层级 | 存储 | 用途 |
 | --- | --- | --- |
 | 短期记忆 | 内存（默认）/Redis | 会话级对话历史，写时增量压缩，仅供 LeadAgent 参考 |
-| 个人档案 | `memory/PERSONAL.md`（本地文件） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
+| 个人档案 | `memory/profile/PERSONAL.md`（本地文件） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
 | 长期记忆 | Mem0 云服务 | 跨会话可复用医学事实，经 LLM 质量门控（score < 5 跳过） |
 
 未设置 `MEM0_API_KEY` 时优雅降级，仅使用短期记忆和个人档案。

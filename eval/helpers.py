@@ -7,9 +7,11 @@ import uuid
 from pathlib import Path
 from contextlib import contextmanager
 
-# PersonalProfile 全局文件路径（与 memory/personal_profile.py 一致）
-_PERSONAL_PROFILE_PATH = Path("memory/PERSONAL.md")
-_PENDING_PATH = Path("memory/PENDING.md")
+from memory.personal_profile import PROFILE_PATH, PENDING_PATH
+
+# 复用 PersonalProfile 的路径定义（基于 __file__，不依赖工作目录）
+_PERSONAL_PROFILE_PATH = PROFILE_PATH
+_PENDING_PATH = PENDING_PATH
 
 
 def make_session_id(prefix: str) -> str:

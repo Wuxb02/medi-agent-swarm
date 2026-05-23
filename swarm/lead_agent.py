@@ -117,17 +117,17 @@ class LeadAgent:
             return {"clarified": False, "collected_info": "", "raw_answers": {}}
 
         # 构建上下文文本
-        context_text = ""
+        context_text = "无"
         if context:
             parts = []
-            for k, v in context.items():
-                if k == "recent_history" and isinstance(v, list):
-                    parts.append(f"最近对话: {len(v)} 条消息")
-                elif k == "historical_cases" and isinstance(v, list):
-                    parts.append(f"相似历史案例: {len(v)} 个")
-                else:
-                    parts.append(f"{k}: {v}")
-            context_text = "\n".join(parts) if parts else "无"
+            if context.get("personal_profile") and context["personal_profile"] != "暂无":
+                parts.append(f"## 用户档案\n{context['personal_profile']}")
+            if context.get("recent_history") and isinstance(context["recent_history"], list):
+                parts.append(f"近期对话: {len(context['recent_history'])} 条消息")
+            if context.get("historical_cases") and isinstance(context["historical_cases"], list):
+                parts.append(f"历史相似案例: {len(context['historical_cases'])} 个")
+            if parts:
+                context_text = "\n\n".join(parts)
 
         messages = [
             {"role": "system", "content": self._get_clarify_system_prompt()},
@@ -259,7 +259,10 @@ class LeadAgent:
             {"role": "user", "content": PromptLoader.render(
                 "swarm/assessment_user.j2",
                 question=question,
-                context=context or '无'
+                personal_profile=(context or {}).get("personal_profile"),
+                collected_info=(context or {}).get("collected_info"),
+                recent_history=(context or {}).get("recent_history"),
+                historical_cases=(context or {}).get("historical_cases"),
             )}
         ]
 

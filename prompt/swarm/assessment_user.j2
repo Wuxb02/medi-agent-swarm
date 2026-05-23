@@ -1,6 +1,8 @@
 问题：{{ question }}
 
-{% if collected_info %}## 用户补充信息（已收集）
+{% if personal_profile and personal_profile != "暂无" %}## 用户档案
+{{ personal_profile }}
+{% endif %}{% if collected_info %}## 用户补充信息（已收集）
 {{ collected_info }}
 {% endif %}{% if recent_history %}## 近期对话历史
 {% for msg in recent_history %}[{{ msg.role }}] {{ msg.content }}

@@ -1,5 +1,4 @@
 {% if session_id %}[系统信息] 当前会话ID: {{ session_id }}
 {% endif %}{% if context %}背景信息：
-{% for k, v in context.items() %}{{ k }}: {{ v }}
-{% endfor %}
+{{ context }}
 {% endif %}用户问题：{{ question }}

@@ -317,13 +317,11 @@ class AgentLoop:
                                 )
                                 message_count += 1
 
-                        # Skill 激活后：动态刷新 tools 和 system prompt
+                        # Skill 激活后：动态刷新 tools
                         if tool_call.name == "activate_skill":
                             tools_openai_format = agent.get_tools_for_llm()
-                            # 更新 system prompt（注入 Skill 指令正文）
-                            if messages and messages[0].get("role") == "system":
-                                messages[0]["content"] = agent.get_system_prompt()
-                            logger.info(f"🔄 Skill activated, refreshed tools and system prompt")
+                            # Skill 指令已通过 tool result 返回，无需修改 messages[0]
+                            logger.info(f"🔄 Skill activated, refreshed tools")
 
                         # 推理轮次结束：回调耗时
                         elapsed = time.monotonic() - think_start
@@ -492,8 +490,8 @@ class AgentLoop:
         """初始化消息列表，包含历史对话上下文"""
         messages = []
 
-        # 系统提示词
-        system_prompt = agent.get_system_prompt()
+        # 系统提示词（稳定版本，不含 Skill 指令，用于 KV cache 前缀）
+        system_prompt = agent.get_base_system_prompt_stable()
         if system_prompt:
             messages.append({
                 'role': 'system',

@@ -19,7 +19,6 @@ def create_activate_skill_tool(registry) -> callable:
     async def activate_skill(name: str) -> Dict[str, Any]:
         """
         激活指定 Skill。激活后可以使用该 Skill 的工具。
-        同一时间只能有一个 Skill 处于激活状态，激活新 Skill 会自动停用之前的。
 
         Args:
             name: Skill 名称（如 "search-knowledge", "deep-research"）
@@ -46,12 +45,16 @@ def create_activate_skill_tool(registry) -> callable:
             }
 
         skill_def = registry.get_skill_definition(skill_name)
-        return {
+        result = {
             "success": True,
             "skill": skill_name,
             "description": skill_def.description,
             "available_tools": skill_def.tool_names,
             "message": f"已激活 Skill: {skill_name}，现在可以使用以下工具: {', '.join(skill_def.tool_names)}"
         }
+        # 将 Skill 指令正文通过 tool result 传递给 LLM（避免修改 messages[0]）
+        if instructions:
+            result["instructions"] = instructions
+        return result
 
     return activate_skill

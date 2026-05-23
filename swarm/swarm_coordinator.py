@@ -143,6 +143,11 @@ class SwarmCoordinator:
         # 3. 构建增强上下文（传给 LeadAgent 做任务分解）
         enhanced_context = context or {}
 
+        # 注入用户档案（仅已确认信息，不含待确认条目）
+        lead_personal = self.personal_profile.to_text()
+        if lead_personal != "暂无":
+            enhanced_context["personal_profile"] = lead_personal
+
         # 注入短期记忆
         if recent_history:
             enhanced_context["recent_history"] = [

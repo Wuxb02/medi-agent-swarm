@@ -1,8 +1,8 @@
 """
 PersonalProfile：患者档案管理（两文件架构）
 
-第一层：已确认信息 + 病史记录 → memory/PERSONAL.md
-第二层：待确认暂存区 → memory/PENDING.md
+第一层：已确认信息 + 病史记录 → memory/profile/PERSONAL.md
+第二层：待确认暂存区 → memory/profile/PENDING.md
 """
 import re
 from dataclasses import dataclass
@@ -12,9 +12,10 @@ from typing import Dict, List
 from loguru import logger
 
 
-# 文件路径
-PROFILE_PATH = Path("memory/PERSONAL.md")   # 已确认信息 + 病史记录
-PENDING_PATH = Path("memory/PENDING.md")    # 待确认暂存区
+# 文件路径（基于模块位置，不依赖工作目录）
+_MODULE_DIR = Path(__file__).parent
+PROFILE_PATH = _MODULE_DIR / "profile" / "PERSONAL.md"   # 已确认信息 + 病史记录
+PENDING_PATH = _MODULE_DIR / "profile" / "PENDING.md"    # 待确认暂存区
 
 
 @dataclass
@@ -488,9 +489,9 @@ class PersonalProfile:
     # ========== Agent 上下文注入 ==========
 
     def to_text(self) -> str:
-        """将所有信息格式化为文本（注入 agent prompt）。
+        """将已确认信息格式化为文本（注入 agent prompt）。
 
-        输出：已确认信息 + 待确认信息 + 待确认病史 + 已确认病史
+        仅输出已确认信息 + 已确认病史，不含待确认条目。
         """
         sections = []
 
@@ -499,27 +500,6 @@ class PersonalProfile:
         if confirmed:
             lines = [f"{k}：{v}" for k, v in confirmed.items()]
             sections.append("个人信息：\n" + "\n".join(lines))
-
-        # 待确认条目（区分信息和病史）
-        pending = self.load_pending()
-        if pending:
-            info_lines = []
-            record_lines = []
-            for item in pending:
-                if item.is_record:
-                    parts = [item.value]
-                    if item.symptoms:
-                        parts.append(item.symptoms)
-                    if item.medication:
-                        parts.append(f"用药：{item.medication}")
-                    record_lines.append(f"- [{item.record_date}] {'，'.join(parts)}")
-                else:
-                    conf_label = "高" if item.confidence == "high" else "中"
-                    info_lines.append(f"- {item.key}：{item.value}（置信度：{conf_label}）")
-            if info_lines:
-                sections.append("待确认信息：\n" + "\n".join(info_lines))
-            if record_lines:
-                sections.append("待确认病史：\n" + "\n".join(record_lines))
 
         # 已确认病史记录
         records = self.load_records()
