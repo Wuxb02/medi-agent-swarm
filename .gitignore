@@ -65,6 +65,7 @@ memory/data/.session_vectors.db.lock
 # 对话记录
 memory/swarm/session_summaries/*
 memory/swarm/session_summaries/*memory/PERSONAL.md
+memory/profile/*
 
 .claude/settings.local.json
 

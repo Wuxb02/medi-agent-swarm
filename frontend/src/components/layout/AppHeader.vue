@@ -1,16 +1,25 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useChatStore } from '../../stores/chat'
 
 const route = useRoute()
+const chatStore = useChatStore()
 
-const titles: Record<string, string> = {
+const pageTitles: Record<string, string> = {
   Chat: '智能问答',
-  ChatSession: '智能问答',
   Knowledge: '知识库',
   Dashboard: '仪表盘',
+  Personal: '个人中心',
 }
 
-const title = route.name ? titles[route.name as string] || 'MediZJ' : 'MediZJ'
+const title = computed(() => {
+  const name = route.name as string
+  if (name === 'ChatSession') {
+    return chatStore.sessionTitle || '智能问答'
+  }
+  return pageTitles[name] || 'MediZJ'
+})
 </script>
 
 <template>

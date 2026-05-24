@@ -210,6 +210,7 @@ function reconstructFromEvents(rawEvents: any[]): {
 
 export const useChatStore = defineStore('chat', () => {
   const sessionId = ref<string | null>(null)
+  const sessionTitle = ref<string | null>(null)
   const messages = ref<ChatMessage[]>([])
   const isStreaming = ref(false)
   const error = ref<string | null>(null)
@@ -433,6 +434,8 @@ export const useChatStore = defineStore('chat', () => {
       if (!detail) return
 
       sessionId.value = detail.session_id
+      // 从第一条用户消息推导会话标题
+      sessionTitle.value = null
       messages.value = []
 
       if (detail.turns && detail.turns.length > 0) {
@@ -524,6 +527,7 @@ export const useChatStore = defineStore('chat', () => {
   function clearChat() {
     messages.value = []
     sessionId.value = null
+    sessionTitle.value = null
     error.value = null
     disconnect()
     isStreaming.value = false
@@ -552,5 +556,5 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  return { sessionId, messages, isStreaming, error, sendMessage, loadHistory, clearChat, submitAnswers }
+  return { sessionId, sessionTitle, messages, isStreaming, error, sendMessage, loadHistory, clearChat, submitAnswers }
 })

@@ -47,8 +47,9 @@ async function loadSessions() {
   }
 }
 
-function openSession(sessionId: string) {
-  router.push(`/chat/${sessionId}`)
+function openSession(session: SessionItem) {
+  chatStore.sessionTitle = session.first_question || '未命名会话'
+  router.push(`/chat/${session.session_id}`)
 }
 
 async function handleDelete(sessionId: string, e: Event) {
@@ -120,6 +121,7 @@ watch(() => chatStore.sessionId, (newId, oldId) => {
       sessions.value.unshift(placeholder)
     }
     newSessionId.value = newId
+    chatStore.sessionTitle = firstQ
   }
 })
 
@@ -197,7 +199,7 @@ watch(() => route.params.sessionId, (newId, oldId) => {
         <div
           v-for="s in sessions"
           :key="s.session_id"
-          @click="openSession(s.session_id)"
+          @click="openSession(s)"
           class="group flex items-center justify-between px-3 py-2 text-sm rounded-lg cursor-pointer transition"
           :class="[
             route.params.sessionId === s.session_id
