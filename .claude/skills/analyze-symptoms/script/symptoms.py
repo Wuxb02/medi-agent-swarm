@@ -114,7 +114,7 @@ async def analyze_symptoms(symptoms: str) -> Dict[str, Any]:
                 if results and results[0]["score"] > 0.5:
                     kb_insights.append({
                         "disease": disease,
-                        "info": results[0]["content"][:200]  # 限制长度
+                        "info": results[0]["content"] 
                     })
         except Exception as e:
             logger.warning(f"Failed to get KB insights: {e}")

@@ -21,6 +21,19 @@ from swarm import SwarmCoordinator, process_with_swarm, SharedContext, EventType
 from memory import ShortTermMemory, LongTermMemory, MemoryEntropyManager
 from memory.embedding import load_embedding_model
 
+# Trace 系统
+try:
+    from trace import (
+        Span, SpanType, SpanStatus, SpanTiming,
+        TraceAttributes, AgentAttributes, LLMAttributes, ToolAttributes,
+        traced_span, get_current_trace_id, TraceCollector,
+    )
+    from trace.context import _current_trace_id
+    from trace.storage import TraceSqliteStorage
+    _TRACE_TEST = True
+except ImportError:
+    _TRACE_TEST = False
+
 # Harness Engineering 模块
 try:
     from constraints import ConstraintValidator
@@ -1394,6 +1407,324 @@ async def test_memory_no_duplication():
 
 
 # ============================================================================
+# Phase 9: Trace 轨迹观察系统
+# ============================================================================
+
+async def test_trace_data_model():
+    """测试 9.1: Trace 数据模型"""
+    print("\n" + "=" * 70)
+    print("测试 9.1: Trace 数据模型")
+    print("=" * 70)
+
+    if not _TRACE_TEST:
+        print("⚠️  Trace 模块未安装，跳过测试")
+        return
+
+    # 1. Span 创建
+    span = Span(
+        trace_id="test_trace_001",
+        span_type=SpanType.TOOL,
+        name="search-knowledge",
+    )
+    assert span.id is not None
+    assert span.trace_id == "test_trace_001"
+    assert span.span_type == SpanType.TOOL
+    assert span.status == SpanStatus.OK
+    assert span.timing.start_time is not None
+    assert span.timing.duration_ms is None  # 未完成
+
+    # 2. SpanTiming
+    span.timing.finish()
+    assert span.timing.end_time is not None
+    assert span.timing.duration_ms is not None
+    assert span.timing.duration_ms >= 0
+
+    # 3. SpanType 枚举
+    all_types = [SpanType.TRACE, SpanType.STAGE, SpanType.AGENT,
+                 SpanType.ITERATION, SpanType.LLM, SpanType.TOOL]
+    assert len(all_types) == 6
+
+    # 4. 属性 dataclass
+    llm = LLMAttributes(model="gpt-4o", prompt_tokens=100, completion_tokens=50, total_tokens=150)
+    assert llm.model == "gpt-4o"
+    assert llm.total_tokens == 150
+
+    tool = ToolAttributes(tool_name="search-knowledge", success=True, result_summary="3 results")
+    assert tool.tool_name == "search-knowledge"
+    assert tool.success is True
+
+    agent = AgentAttributes(agent_id="diagnostic_agent", subtask_id="sub_1", iteration_count=2)
+    assert agent.agent_id == "diagnostic_agent"
+
+    trace = TraceAttributes(session_id="sess_001", mode="swarm",
+                            agents_involved=["diagnostic_agent", "research_agent"],
+                            question_summary="test")
+    assert trace.mode == "swarm"
+    assert len(trace.agents_involved) == 2
+
+    print("✅ Trace 数据模型正常")
+    print("✅ 测试 9.1 通过！")
+
+
+async def test_trace_context_manager():
+    """测试 9.2: traced_span 上下文管理器"""
+    print("\n" + "=" * 70)
+    print("测试 9.2: traced_span 上下文管理器")
+    print("=" * 70)
+
+    if not _TRACE_TEST:
+        print("⚠️  Trace 模块未安装，跳过测试")
+        return
+
+    # 重置
+    TraceCollector.reset()
+    collector = TraceCollector()
+    session_id = "test_ctx_001"
+    collector.begin_trace(session_id)
+    _current_trace_id.set(session_id)
+
+    # 1. 基本上下文创建
+    with traced_span(SpanType.STAGE, name="clarify") as span:
+        assert span.span_type == SpanType.STAGE
+        assert span.name == "clarify"
+        assert span.trace_id == session_id
+        assert get_current_trace_id() == session_id
+        # timing 未完成
+        assert span.timing.duration_ms is None
+
+    # 退出后 timing 应该完成
+    assert span.timing.duration_ms is not None
+    assert span.timing.end_time is not None
+
+    # 2. 父子 span 层级
+    with traced_span(SpanType.AGENT, name="diagnostic_agent") as agent_span:
+        with traced_span(SpanType.ITERATION, name="iter-1") as iter_span:
+            with traced_span(SpanType.TOOL, name="search-knowledge") as tool_span:
+                # 验证父子关系
+                assert tool_span.parent_id == iter_span.id
+                assert iter_span.parent_id == agent_span.id
+                assert agent_span.parent_id is None  # 顶层
+
+    # 3. 异常情况下 status 记录
+    with traced_span(SpanType.LLM, name="bad_call") as span:
+        try:
+            raise ValueError("simulated error")
+        except ValueError:
+            # Exception propagates, traced_span should record it
+            pass
+
+    # 注意：上下文管理器 __exit__ 接收 exc_info 但 return False (不抑制)
+    # 上面的 except 捕获了异常，所以 __exit__ 收到 (None, None, None)
+    # span.status 仍然是 OK。这是预期行为——只记录未被捕获的异常。
+    assert span.timing.duration_ms is not None
+
+    # 4. 收集器
+    spans = collector.get_flat_spans(session_id)
+    assert len(spans) >= 3, f"Expected >=3 spans, got {len(spans)}"
+
+    # 5. 事件回调
+    callback_spans = []
+    collector.on_span_complete = lambda s: callback_spans.append(s)
+    with traced_span(SpanType.TOOL, name="test-callback") as span:
+        span.tool_attrs = ToolAttributes(tool_name="test-callback")
+    assert len(callback_spans) == 1
+    assert callback_spans[0].name == "test-callback"
+
+    # 清理
+    collector.on_span_complete = None
+    TraceCollector.reset()
+
+    print("✅ traced_span 上下文管理器正常")
+    print("✅ 测试 9.2 通过！")
+
+
+async def test_trace_collector_and_tree():
+    """测试 9.3: TraceCollector 收集和树构建"""
+    print("\n" + "=" * 70)
+    print("测试 9.3: TraceCollector 收集和树构建")
+    print("=" * 70)
+
+    if not _TRACE_TEST:
+        print("⚠️  Trace 模块未安装，跳过测试")
+        return
+
+    TraceCollector.reset()
+    collector = TraceCollector()
+    session_id = "test_tree_001"
+    collector.begin_trace(session_id)
+    _current_trace_id.set(session_id)
+
+    # 模拟完整的 Agent 执行流程
+    with traced_span(SpanType.STAGE, name="clarify") as s1:
+        pass
+
+    with traced_span(SpanType.STAGE, name="assess_decompose") as s2:
+        pass
+
+    with traced_span(SpanType.STAGE, name="execute") as s3:
+        with traced_span(SpanType.AGENT, name="diagnostic_agent") as agent:
+            with traced_span(SpanType.ITERATION, name="iter-1") as iter1:
+                with traced_span(SpanType.LLM, name="chat_with_tools") as llm:
+                    llm.llm_attrs = LLMAttributes(
+                        model="gpt-4o", prompt_tokens=800,
+                        completion_tokens=200, total_tokens=1000
+                    )
+                with traced_span(SpanType.TOOL, name="search-knowledge") as tool:
+                    tool.tool_attrs = ToolAttributes(
+                        tool_name="search-knowledge", success=True,
+                        result_summary="found 3 results"
+                    )
+
+    with traced_span(SpanType.STAGE, name="synthesize") as s4:
+        with traced_span(SpanType.LLM, name="chat") as llm2:
+            llm2.llm_attrs = LLMAttributes(
+                model="gpt-4o", prompt_tokens=1200,
+                completion_tokens=400, total_tokens=1600
+            )
+
+    # 验证收集
+    spans = collector.get_flat_spans(session_id)
+    assert len(spans) == 9, f"Expected 9 spans, got {len(spans)}"
+
+    # 按类型统计
+    type_counts = {}
+    for s in spans:
+        type_counts[s.span_type.value] = type_counts.get(s.span_type.value, 0) + 1
+    assert type_counts.get("stage") == 4
+    assert type_counts.get("agent") == 1
+    assert type_counts.get("iteration") == 1
+    assert type_counts.get("llm") == 2
+    assert type_counts.get("tool") == 1
+
+    # 全部有相同的 trace_id
+    for s in spans:
+        assert s.trace_id == session_id
+
+    # 全部 timing 已完成
+    for s in spans:
+        assert s.timing.duration_ms is not None
+        assert s.timing.end_time is not None
+
+    TraceCollector.reset()
+
+    print("✅ TraceCollector 收集正常")
+    print(f"  ✓ 收集到 {len(spans)} 个 span")
+    print(f"  ✓ 类型分布: {type_counts}")
+    print("✅ 测试 9.3 通过！")
+
+
+async def test_trace_sqlite_storage():
+    """测试 9.4: Trace SQLite 存储"""
+    print("\n" + "=" * 70)
+    print("测试 9.4: Trace SQLite 存储")
+    print("=" * 70)
+
+    if not _TRACE_TEST:
+        print("⚠️  Trace 模块未安装，跳过测试")
+        return
+
+    # 重置单例
+    TraceCollector.reset()
+    TraceSqliteStorage.reset()
+    from trace.analysis import TraceAnalyzer
+    TraceAnalyzer.reset()
+
+    storage = TraceSqliteStorage()
+    session_id = "test_sqlite_001"
+    collector = TraceCollector()
+    collector.set_storage(storage)
+    collector.begin_trace(session_id)
+    _current_trace_id.set(session_id)
+
+    # 创建带有 TraceAttributes 的 span
+    with traced_span(SpanType.STAGE, name="clarify") as s1:
+        s1.trace_attrs = TraceAttributes(
+            session_id=session_id, mode="single_agent",
+            question_summary="test question for storage"
+        )
+        with traced_span(SpanType.LLM, name="chat_with_tools") as llm:
+            llm.llm_attrs = LLMAttributes(
+                model="gpt-4o", prompt_tokens=500,
+                completion_tokens=300, total_tokens=800,
+                finish_reason="stop"
+            )
+        with traced_span(SpanType.TOOL, name="assess-risk") as tool:
+            tool.tool_attrs = ToolAttributes(
+                tool_name="assess-risk", success=True,
+                result_summary="risk level: low"
+            )
+
+    with traced_span(SpanType.AGENT, name="consultation_agent") as agent:
+        agent.agent_attrs = AgentAttributes(
+            agent_id="consultation_agent", subtask_id="sub_1",
+            subtask_type="general", iteration_count=1, total_tokens=800
+        )
+        with traced_span(SpanType.LLM, name="chat") as llm2:
+            llm2.llm_attrs = LLMAttributes(
+                model="gpt-4o", prompt_tokens=1000,
+                completion_tokens=500, total_tokens=1500,
+                finish_reason="stop"
+            )
+
+    # Flush 到 SQLite
+    collector.flush(session_id)
+
+    # 验证读取
+    db_spans = storage.get_flat_spans(session_id)
+    assert len(db_spans) == 5, f"Expected 5 spans in DB, got {len(db_spans)}"
+
+    # 验证 spans 表内容
+    span_types = set(s["span_type"] for s in db_spans)
+    assert "stage" in span_types
+    assert "agent" in span_types
+    assert "llm" in span_types
+    assert "tool" in span_types
+
+    # 验证 LLM attrs JSON 正确存储
+    llm_spans = [s for s in db_spans if s["span_type"] == "llm"]
+    assert len(llm_spans) == 2
+    assert llm_spans[0]["llm_attrs"] is not None  # JSON string
+
+    # 验证 tool attrs
+    tool_spans = [s for s in db_spans if s["span_type"] == "tool"]
+    assert len(tool_spans) == 1
+    assert tool_spans[0]["tool_attrs"] is not None
+
+    # 验证 agent attrs
+    agent_spans = [s for s in db_spans if s["span_type"] == "agent"]
+    assert len(agent_spans) == 1
+    assert agent_spans[0]["agent_attrs"] is not None
+
+    # 验证 traces 表
+    tree = storage.get_trace(session_id)
+    assert tree is not None
+    assert tree["span_type"] in ("stage", "agent", "trace"), \
+        f"Unexpected root span type: {tree['span_type']}"
+
+    # 验证列表 API
+    traces = storage.list_traces(limit=10)
+    assert len(traces) >= 1
+    found = any(t["trace_id"] == session_id for t in traces)
+    assert found, "Test trace not found in list"
+
+    # 清理
+    import sqlite3
+    conn = sqlite3.connect(storage.db_path)
+    conn.execute("DELETE FROM spans WHERE trace_id=?", (session_id,))
+    conn.execute("DELETE FROM traces WHERE trace_id=?", (session_id,))
+    conn.commit()
+    conn.close()
+
+    TraceCollector.reset()
+
+    print("✅ Trace SQLite 存储正常")
+    print(f"  ✓ 写入 {len(db_spans)} 个 span")
+    print(f"  ✓ 读取 tree JSON 成功")
+    print(f"  ✓ 列表 API 正常")
+    print("✅ 测试 9.4 通过！")
+
+
+# ============================================================================
 # 主测试流程
 # ============================================================================
 
@@ -1433,6 +1764,11 @@ async def main():
         ("Phase 8: Harness 自动修复器", test_harness_auto_fixer),
         ("Phase 8: Harness 熵管理器", test_harness_entropy_manager),
         ("Phase 8: Harness 完整集成", test_harness_integration),
+        # Phase 9: Trace 轨迹观察系统
+        ("Phase 9: Trace 数据模型", test_trace_data_model),
+        ("Phase 9: traced_span 上下文管理器", test_trace_context_manager),
+        ("Phase 9: TraceCollector 收集和树构建", test_trace_collector_and_tree),
+        ("Phase 9: Trace SQLite 存储", test_trace_sqlite_storage),
     ]
 
     passed = 0
