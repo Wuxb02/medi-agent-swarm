@@ -20,6 +20,7 @@
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
+- **🔍 Trace 追踪**: 全链路请求追踪，六种 Span 类型（TRACE/STAGE/AGENT/ITERATION/LLM/TOOL），瀑布图可视化，per-agent/tool/llm 聚合统计 ✅
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -291,12 +292,7 @@ medix-agent-swarm/
 │   │   ├── stores/                    # Pinia 状态管理
 │   │   ├── api/                       # API 调用层（chat, knowledge, sessions, dashboard, personal, trace）
 │   │   ├── composables/               # useSSE (流式), useMarkdown
-│   │   │   └── types/                     # TypeScript 类型定义
-│   └── trace/                          # Trace 追踪模块
-│       ├── context.py                  # Trace 上下文管理
-│       ├── collector.py                # Span 收集器
-│       ├── models.py                   # Trace 数据模型
-│       └── storage.py                  # SQLite 持久化
+│   │   └── types/                     # TypeScript 类型定义
 │   ├── vite.config.ts
 │   └── package.json
 │
@@ -367,6 +363,15 @@ medix-agent-swarm/
 │   ├── lead_agent.py                  # 信息澄清 + 任务分解 + 结果汇总
 │   ├── shared_context.py              # 共享环境（信息素）
 │   └── swarm_coordinator.py           # 智能路由（clarify → decompose → route）
+│
+├── trace/                             # Agent 追踪系统
+│   ├── __init__.py                    # 模块导出
+│   ├── models.py                      # Span 数据模型（6 种类型 + 4 类属性）
+│   ├── context.py                     # traced_span 上下文管理器（contextvars，异步安全）
+│   ├── collector.py                   # Span 收集器（单例，内存缓冲 → flush SQLite）
+│   ├── analysis.py                    # 聚合分析（per-agent/tool/llm 统计、慢请求、错误）
+│   └── storage/
+│       └── __init__.py                # SQLite 存储（traces + spans 表，树 JSON + 扁平行）
 │
 ├── memory/                            # 记忆管理（集成熵管理）
 │   ├── long_term.py                   # 长期记忆（Mem0）
@@ -1126,6 +1131,96 @@ SwarmCoordinator
       ▼
 ( State: COMPLETED ) -> 返回结果
 ```
+
+---
+
+## 🔍 Trace 追踪系统
+
+全链路请求追踪，基于类 OpenTelemetry 的 Span 模型，非侵入式嵌入 Agent 执行流程，覆盖从请求进入到最终回答的全部阶段。
+
+### Span 层级模型
+
+一次请求对应一棵六层 Span 树：
+
+```text
+TRACE (root)           ← 请求级，记录 session_id、mode、agents_involved、total_tokens
+├── STAGE (clarify)    ← 流水线阶段（clarify / assess_decompose / synthesize）
+├── AGENT              ← Agent 执行，记录 agent_id、subtask_id、iteration_count、tool_call_count
+│   ├── ITERATION      ← Think-Act-Observe 循环迭代
+│   │   ├── LLM        ← LLM API 调用，记录 model、token 消耗、finish_reason
+│   │   └── TOOL       ← 工具执行，记录 tool_name、arguments、result_summary、success
+│   └── ITERATION
+│       ├── LLM
+│       └── TOOL
+└── AGENT
+    └── ...
+```
+
+| Span 类型 | 携带属性 | 采集位置 |
+|-----------|---------|---------|
+| `TRACE` | `TraceAttributes`（session_id, mode, question_summary, agents_involved, total_tokens） | `SwarmCoordinator` 请求边界 |
+| `STAGE` | name 区分阶段 | `SwarmCoordinator` clarify / decompose / synthesize |
+| `AGENT` | `AgentAttributes`（agent_id, subtask_id, iteration_count, tool_call_count, total_tokens） | `SwarmCoordinator._execute_single_agent_traced` |
+| `ITERATION` | name 标记迭代序号 | `AgentLoop` 每轮循环 |
+| `LLM` | `LLMAttributes`（model, prompt_tokens, completion_tokens, finish_reason） | `llm_client` |
+| `TOOL` | `ToolAttributes`（tool_name, arguments, result_summary, success） | `AgentLoop` 工具调用 |
+
+### 数据采集
+
+通过 `traced_span` 上下文管理器非侵入式采集，基于 Python `contextvars` 实现异步安全的上下文传播：
+
+```python
+# AgentLoop 中：每个 ITERATION 自动创建 span
+with traced_span(SpanType.ITERATION, name=f"iteration_{state.iteration}"):
+    # LLM 调用 → 内部自动创建 LLM span
+    # 工具调用 → 内部自动创建 TOOL span
+    ...
+
+# SwarmCoordinator 中：每个阶段创建 span
+with traced_span(SpanType.STAGE, name="clarify"):
+    clarify_result = await self.lead_agent.clarify(...)
+```
+
+Span 退出时自动记录耗时、状态（异常时标记 ERROR），并推入 `TraceCollector` 单例。Trace 不可用时优雅降级为空操作。
+
+### 收集与持久化
+
+```text
+traced_span.__exit__()
+      │
+      ▼
+TraceCollector.collect(span)         ← 内存缓冲（按 trace_id 分组）
+      │
+      ├─► callback → EventBridge     ← 实时 SSE 推向前端（TRACE_SPAN 事件）
+      │
+      ▼
+TraceCollector.flush(trace_id)       ← 请求结束时调用
+      │
+      ├─► _build_tree()              ← 由 parent_id 重建 Span 树
+      └─► TraceSqliteStorage.save()  ← 写入 SQLite（复用 sessions.db）
+            ├── traces 表             ← 嵌套树 JSON（tree_json）
+            └── spans 表              ← 扁平行（便于 SQL 查询），FK CASCADE 关联
+```
+
+### 聚合分析
+
+`TraceAnalyzer` 基于 spans 表提供多维统计：
+
+| 分析维度 | 指标 |
+|---------|------|
+| **per-agent** | 调用次数、avg/p50/p90 延迟、成功率、avg tokens |
+| **per-tool** | 调用次数、avg 延迟、成功率 |
+| **LLM** | 调用次数、avg/p50/p90 延迟、avg prompt/completion tokens |
+| **慢请求** | 超过阈值的 trace 列表（按耗时降序） |
+| **错误** | 状态为 error 的 trace 列表 |
+
+### 前端可视化
+
+`/trace` 页面提供三个视图：
+
+- **列表**：所有 trace 按时间倒序，展示 session、模式、耗时、Agent 参与、token 消耗
+- **统计**：per-agent / per-tool / LLM 统计卡片 + 慢请求 + 错误列表
+- **瀑布图**：选中单个 trace 后，按时间线展示各 Span 的层级、偏移量和耗时，点击 Span 可查看完整属性
 
 ---
 
