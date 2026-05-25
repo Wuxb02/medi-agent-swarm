@@ -7,12 +7,27 @@ Agent循环引擎
 import uuid
 import json
 import time
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
 from .state_manager import StateManager, TaskStatus
 from .llm_client import LLMResponse
 from .prompt_loader import PromptLoader
+
+# Trace 模块惰性导入（避免循环依赖）
+try:
+    from trace.context import traced_span as _trace_span
+    from trace.models import SpanType, ToolAttributes as _TraceToolAttrs
+    TRACE_AVAILABLE = True
+except ImportError:
+    TRACE_AVAILABLE = False
+
+
+@contextmanager
+def _noop_ctx():
+    """空上下文管理器，用于条件性 traced_span"""
+    yield None
 
 # Harness Engineering: 约束验证和自动修复
 try:
@@ -138,6 +153,10 @@ class AgentLoop:
                 state.iteration += 1
                 logger.debug(f"=== Iteration {state.iteration}/{state.max_iterations} ===")
 
+                # Trace: ITERATION span
+                _iter_ctx = _trace_span(SpanType.ITERATION, name=f"iteration_{state.iteration}") if TRACE_AVAILABLE else _noop_ctx()
+                _iter_ctx.__enter__()
+
                 try:
                     # 调用 LLM（流式或非流式）
                     use_streaming = bool(self.on_thinking or self.on_content_token)
@@ -230,6 +249,7 @@ class AgentLoop:
                                 'role': 'user',
                                 'content': PromptLoader.render("agent_loop/tool_limit.j2", max_tool_calls=self.max_tool_calls)
                             })
+                            _iter_ctx.__exit__(None, None, None)
                             continue
 
                         # 推理开始：计时 + 回调 thinking 内容
@@ -274,10 +294,23 @@ class AgentLoop:
                                         f"⚠️ 约束警告: {validation_result.get('reason')}"
                                     )
 
-                            tool_result = await agent.execute_tool(
-                                tool_name=tool_call.name,
-                                arguments=tool_call.arguments
-                            )
+                            # Trace: 工具调用 Span 采集
+                            _tool_ctx = _trace_span(SpanType.TOOL, name=tool_call.name) if TRACE_AVAILABLE else _noop_ctx()
+                            with _tool_ctx as t:
+                                if t:
+                                    t.tool_attrs = _TraceToolAttrs(
+                                        tool_name=tool_call.name,
+                                        arguments=tool_call.arguments,
+                                    )
+
+                                tool_result = await agent.execute_tool(
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments
+                                )
+
+                                if t:
+                                    t.tool_attrs.result_summary = str(tool_result)
+                                    t.tool_attrs.success = isinstance(tool_result, dict) and "error" not in str(tool_result).lower()
 
                             # 检测是否需要用户输入（问卷模式）
                             if (isinstance(tool_result, dict)
@@ -332,6 +365,7 @@ class AgentLoop:
                             )
 
                         # 继续下一轮循环
+                        _iter_ctx.__exit__(None, None, None)
                         continue
 
                     # 情况2: LLM 返回文本响应，任务完成
@@ -400,10 +434,13 @@ class AgentLoop:
                         if hasattr(agent, 'post_process_result'):
                             result = await agent.post_process_result(result, final_answer)
 
+                        _iter_ctx.__exit__(None, None, None)
+
                         state.mark_completed(result)
                         break
 
                 except Exception as e:
+                    _iter_ctx.__exit__(type(e), e, e.__traceback__)
                     logger.error(f"Error in iteration {state.iteration}: {e}")
                     # 异常时也要关闭当前迭代的 thinking dots
                     if self.on_thinking_done:

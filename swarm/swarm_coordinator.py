@@ -23,6 +23,14 @@ from .events import Event, EventType
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from memory import SessionSummaryManager, SessionSummary, ShortTermMemory, LongTermMemory, PersonalProfile
 
+# Trace 惰性导入
+try:
+    from trace.context import traced_span
+    from trace.models import SpanType, AgentAttributes
+    _TRACE = True
+except ImportError:
+    _TRACE = False
+
 
 class SwarmCoordinator:
     """
@@ -120,6 +128,24 @@ class SwarmCoordinator:
 
         logger.info(f"Processing question (session={session_id}): {question[:50]}...")
 
+        # ===== 初始化 Trace =====
+        _trace_collector = None
+        try:
+            from trace.collector import TraceCollector
+            from trace.storage import TraceSqliteStorage
+            from trace.context import _current_trace_id
+            from trace.models import TraceAttributes
+
+            _trace_collector = TraceCollector()
+            _trace_collector.begin_trace(session_id)
+            if not hasattr(_trace_collector, '_storage_set') or not _trace_collector._storage_set:
+                _trace_collector.set_storage(TraceSqliteStorage())
+                _trace_collector._storage_set = True
+            _current_trace_id.set(session_id)
+            logger.debug(f"[Trace] Started for session={session_id}")
+        except ImportError:
+            pass
+
         # 刷新 Worker Agent 的用户档案（可能在会话中被更新）
         personal_text = self.personal_profile.to_text()
         if personal_text != "暂无":
@@ -168,12 +194,17 @@ class SwarmCoordinator:
             logger.info(f"Found {len(similar_memories)} similar historical cases from long-term memory")
 
         # Step 0: LeadAgent 信息澄清（在任务分解之前）
-        clarify_result = await self.lead_agent.clarify(
-            question=question,
-            context=enhanced_context,
-            session_id=session_id,
-            event_callback=self.event_callback,
-        )
+        _ctx = traced_span(SpanType.STAGE, name="clarify") if _TRACE else None
+        if _ctx: _ctx.__enter__()
+        try:
+            clarify_result = await self.lead_agent.clarify(
+                question=question,
+                context=enhanced_context,
+                session_id=session_id,
+                event_callback=self.event_callback,
+            )
+        finally:
+            if _ctx: _ctx.__exit__(None, None, None)
 
         if clarify_result.get("clarified"):
             collected_info = clarify_result["collected_info"]
@@ -181,7 +212,12 @@ class SwarmCoordinator:
             logger.info(f"LeadAgent 澄清完成，收集信息: {collected_info[:100]}...")
 
         # Step 1: LeadAgent 分解任务
-        assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
+        _ctx2 = traced_span(SpanType.STAGE, name="assess_decompose") if _TRACE else None
+        if _ctx2: _ctx2.__enter__()
+        try:
+            assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
+        finally:
+            if _ctx2: _ctx2.__exit__(None, None, None)
 
         subtasks = assessment.get("subtasks", [])
 
@@ -219,10 +255,8 @@ class SwarmCoordinator:
             )
             sub_session_id = f"{session_id}:{agent_id}:{subtask_obj.id}"
 
-            result = await agent.process_subtask(
-                subtask_obj,
-                session_id=session_id,
-                sub_session_id=sub_session_id,
+            result = await self._execute_single_agent_traced(
+                agent, subtask_obj, session_id, sub_session_id
             )
             final_answer = result.get('answer', '')
 
@@ -293,6 +327,7 @@ class SwarmCoordinator:
             )
             final_answer = result.get('answer', '')
             # ltm_save_task 已在 _process_with_swarm 中设置
+            await self._flush_trace(_trace_collector, session_id, question, mode, result)
             return result
 
         else:
@@ -314,10 +349,8 @@ class SwarmCoordinator:
             )
             sub_session_id = f"{session_id}:consultation_agent:fallback"
 
-            result = await self.consultation_agent.process_subtask(
-                fallback_subtask,
-                session_id=session_id,
-                sub_session_id=sub_session_id,
+            result = await self._execute_single_agent_traced(
+                self.consultation_agent, fallback_subtask, session_id, sub_session_id
             )
             final_answer = result.get('answer', '')
             token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
@@ -383,7 +416,32 @@ class SwarmCoordinator:
             }
         ))
 
+        await self._flush_trace(_trace_collector, session_id, question, mode, result)
         return result
+
+    async def _flush_trace(self, collector, session_id, question, mode, result):
+        """持久化 Trace 数据"""
+        if collector is None:
+            return
+        try:
+            from trace.models import TraceAttributes
+            agents = result.get('agents_involved', []) if isinstance(result, dict) else []
+            usage = result.get('usage', {}) if isinstance(result, dict) else {}
+            tokens = usage.get('total_tokens', 0) if isinstance(usage, dict) else 0
+            q = question[:200] if question else ''
+
+            root_spans = collector.get_flat_spans(session_id)
+            for s in (root_spans or []):
+                if s.span_type.value == 'trace':
+                    s.trace_attrs = TraceAttributes(
+                        session_id=session_id, mode=mode or '',
+                        question_summary=q, agents_involved=agents,
+                        total_tokens=tokens,
+                    )
+                    break
+            await collector.flush(session_id)
+        except Exception as e:
+            logger.warning(f"[Trace] Flush failed: {e}")
 
     async def _process_with_swarm(
         self,
@@ -595,6 +653,12 @@ class SwarmCoordinator:
 
     async def _execute_single_subtask(self, worker, subtask, shared_context):
         """执行单个子任务（使用子会话隔离）"""
+        _ctx = traced_span(SpanType.AGENT, name=worker.agent_id) if _TRACE else None
+        if _ctx:
+            _ctx.__enter__()
+            _ctx.span.agent_attrs = AgentAttributes(
+                agent_id=worker.agent_id, subtask_id=subtask.id, subtask_type=subtask.type
+            )
         try:
             # 生成子会话 ID：{main_session_id}:{agent_id}:{subtask_id}
             # 保证同一 worker 的多个子任务也不互相污染
@@ -612,8 +676,59 @@ class SwarmCoordinator:
             )
             shared_context.complete_subtask(subtask.id, worker.agent_id, result)
             logger.info(f"{worker.agent_id}: Completed {subtask.type}")
+
+            # 回填 Agent trace 属性
+            if _ctx and _ctx.span.agent_attrs:
+                _ctx.span.agent_attrs.iteration_count = result.get('iterations', 0)
+                if hasattr(worker, 'loop') and hasattr(worker.loop, 'tool_call_count'):
+                    _ctx.span.agent_attrs.tool_call_count = worker.loop.tool_call_count
+                if result.get('usage'):
+                    _ctx.span.agent_attrs.total_tokens = result['usage'].get('total_tokens', 0)
         except Exception as e:
             logger.error(f"{worker.agent_id}: Error in {subtask.type}: {e}")
+        finally:
+            if _ctx:
+                _ctx.__exit__(None, None, None)
+
+    async def _execute_single_agent_traced(self, agent, subtask, session_id, sub_session_id):
+        """单Agent/降级模式：带 AGENT span 执行子任务
+
+        非 Swarm 路径也需要创建 AGENT span，使 trace 中 ITERATION span
+        正确归属到 AGENT 下，并提供 agent_attrs（iteration_count 等）。
+        """
+        _ctx = traced_span(SpanType.AGENT, name=agent.agent_id) if _TRACE else None
+        if _ctx:
+            _ctx.__enter__()
+            _ctx.span.agent_attrs = AgentAttributes(
+                agent_id=agent.agent_id, subtask_id=subtask.id, subtask_type=subtask.type
+            )
+        try:
+            logger.info(
+                f"{agent.agent_id}: Executing {subtask.type} "
+                f"(sub_session={sub_session_id})"
+            )
+
+            result = await agent.process_subtask(
+                subtask,
+                session_id=session_id,
+                sub_session_id=sub_session_id,
+            )
+            logger.info(f"{agent.agent_id}: Completed {subtask.type}")
+
+            # 回填 Agent trace 属性
+            if _ctx and _ctx.span.agent_attrs:
+                _ctx.span.agent_attrs.iteration_count = result.get('iterations', 0)
+                if hasattr(agent, 'loop') and hasattr(agent.loop, 'tool_call_count'):
+                    _ctx.span.agent_attrs.tool_call_count = agent.loop.tool_call_count
+                if result.get('usage'):
+                    _ctx.span.agent_attrs.total_tokens = result['usage'].get('total_tokens', 0)
+            return result
+        except Exception as e:
+            logger.error(f"{agent.agent_id}: Error in {subtask.type}: {e}")
+            raise
+        finally:
+            if _ctx:
+                _ctx.__exit__(None, None, None)
 
     async def _merge_worker_subsessions(
         self,

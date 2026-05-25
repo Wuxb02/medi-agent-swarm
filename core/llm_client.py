@@ -79,21 +79,46 @@ class LLMClient:
             模型返回的文本
         """
         try:
+            from trace.context import traced_span
+            from trace.models import SpanType, LLMAttributes as LLMAttrs
+        except ImportError:
+            traced_span = None
+
+        try:
             temperature = temperature or self.temperature
             max_tokens = max_tokens or self.max_tokens
 
             logger.debug(f"Calling LLM ({self.model_type}) with {len(messages)} messages")
             logger.debug(f"LLM base_url: {self.client.base_url}, model: {self.model_name}")
 
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs
-            )
+            if traced_span:
+                with traced_span(SpanType.LLM, name="chat") as span:
+                    span.llm_attrs = LLMAttrs(model=self.model_name)
+                    response = await self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **kwargs
+                    )
+                    content = response.choices[0].message.content
+                    span.llm_attrs.finish_reason = response.choices[0].finish_reason or ""
+                    usage = getattr(response, "usage", None)
+                    if usage:
+                        span.llm_attrs.prompt_tokens = usage.prompt_tokens
+                        span.llm_attrs.completion_tokens = usage.completion_tokens
+                        span.llm_attrs.total_tokens = usage.total_tokens
+                    span.llm_attrs.output_content_summary = content or ""
+            else:
+                response = await self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs
+                )
+                content = response.choices[0].message.content
 
-            content = response.choices[0].message.content
             logger.debug(f"LLM response length: {len(content)} chars")
             return content
 
@@ -139,6 +164,39 @@ class LLMClient:
         """
         return {"role": role, "content": content}
 
+    @staticmethod
+    def _parse_response(response) -> LLMResponse:
+        """解析 OpenAI 响应为 LLMResponse"""
+        message = response.choices[0].message
+        finish_reason = response.choices[0].finish_reason
+
+        tool_calls = []
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            for tc in message.tool_calls:
+                tool_calls.append(ToolCall(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=json.loads(tc.function.arguments)
+                ))
+
+        reasoning_content = getattr(message, 'reasoning_content', None)
+
+        usage = None
+        if hasattr(response, 'usage') and response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
+        return LLMResponse(
+            content=message.content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            reasoning_content=reasoning_content,
+            usage=usage,
+        )
+
     async def chat_with_tools(
         self,
         messages: List[Dict[str, Any]],
@@ -162,6 +220,12 @@ class LLMClient:
             LLMResponse 对象
         """
         try:
+            from trace.context import traced_span
+            from trace.models import SpanType, LLMAttributes as LLMAttrs
+        except ImportError:
+            traced_span = None
+
+        try:
             temperature = temperature or self.temperature
             max_tokens = max_tokens or self.max_tokens
 
@@ -182,42 +246,21 @@ class LLMClient:
                 if tool_choice != "auto":
                     request_params["tool_choice"] = tool_choice
 
-            response = await self.client.chat.completions.create(**request_params)
-
-            # 解析响应
-            message = response.choices[0].message
-            finish_reason = response.choices[0].finish_reason
-
-            # 提取工具调用
-            tool_calls = []
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                for tc in message.tool_calls:
-                    tool_calls.append(ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=json.loads(tc.function.arguments)
-                    ))
-                logger.debug(f"LLM requested {len(tool_calls)} tool calls")
-
-            # 提取模型原生推理内容
-            reasoning_content = getattr(message, 'reasoning_content', None)
-
-            # 提取 token 用量
-            usage = None
-            if hasattr(response, 'usage') and response.usage:
-                usage = {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "total_tokens": response.usage.total_tokens,
-                }
-
-            return LLMResponse(
-                content=message.content,
-                tool_calls=tool_calls,
-                finish_reason=finish_reason,
-                reasoning_content=reasoning_content,
-                usage=usage
-            )
+            if traced_span:
+                with traced_span(SpanType.LLM, name="chat_with_tools") as span:
+                    span.llm_attrs = LLMAttrs(model=self.model_name)
+                    response = await self.client.chat.completions.create(**request_params)
+                    llm_response = self._parse_response(response)
+                    if llm_response.usage:
+                        span.llm_attrs.prompt_tokens = llm_response.usage.get("prompt_tokens", 0)
+                        span.llm_attrs.completion_tokens = llm_response.usage.get("completion_tokens", 0)
+                        span.llm_attrs.total_tokens = llm_response.usage.get("total_tokens", 0)
+                    span.llm_attrs.finish_reason = llm_response.finish_reason
+                    span.llm_attrs.output_content_summary = llm_response.content or ""
+                    return llm_response
+            else:
+                response = await self.client.chat.completions.create(**request_params)
+                return self._parse_response(response)
 
         except Exception as e:
             logger.error(f"LLM call with tools failed: {e}")
@@ -250,6 +293,12 @@ class LLMClient:
             LLMResponse 对象（与非流式兼容）
         """
         try:
+            from trace.context import traced_span
+            from trace.models import SpanType, LLMAttributes as LLMAttrs
+        except ImportError:
+            traced_span = None
+
+        try:
             temperature = temperature or self.temperature
             max_tokens = max_tokens or self.max_tokens
 
@@ -268,92 +317,110 @@ class LLMClient:
                 if tool_choice != "auto":
                     request_params["tool_choice"] = tool_choice
 
-            stream = await self.client.chat.completions.create(**request_params)
-
-            content_parts: List[str] = []
-            reasoning_parts: List[str] = []
-            tool_call_accum: Dict[int, Dict[str, Any]] = {}
-            finish_reason = "stop"
-            tools_notified = False
-            usage = None
-
-            async for chunk in stream:
-                # 捕获 usage（最后一个 chunk 可能 choices 为空但包含 usage）
-                if hasattr(chunk, 'usage') and chunk.usage:
-                    usage = {
-                        "prompt_tokens": chunk.usage.prompt_tokens,
-                        "completion_tokens": chunk.usage.completion_tokens,
-                        "total_tokens": chunk.usage.total_tokens,
-                    }
-
-                if not chunk.choices:
-                    continue
-
-                choice = chunk.choices[0]
-                delta = choice.delta
-
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-
-                # 累积文本内容
-                if delta.content:
-                    content_parts.append(delta.content)
-                    if on_content_token:
-                        on_content_token(delta.content)
-
-                # 累积推理内容
-                if getattr(delta, 'reasoning_content', None):
-                    reasoning_parts.append(delta.reasoning_content)
-                    if on_reasoning_token:
-                        on_reasoning_token(delta.reasoning_content)
-
-                # 累积 tool_calls
-                if delta.tool_calls:
-                    if not tools_notified and on_tools_detected:
-                        on_tools_detected()
-                        tools_notified = True
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_call_accum:
-                            tool_call_accum[idx] = {"id": "", "name": "", "arguments": ""}
-
-                        entry = tool_call_accum[idx]
-                        if tc_delta.id:
-                            entry["id"] = tc_delta.id
-                        if tc_delta.function:
-                            if tc_delta.function.name:
-                                entry["name"] = tc_delta.function.name
-                            if tc_delta.function.arguments:
-                                entry["arguments"] += tc_delta.function.arguments
-
-            # 解析累积的 tool_calls
-            parsed_tool_calls = []
-            for idx in sorted(tool_call_accum.keys()):
-                entry = tool_call_accum[idx]
-                try:
-                    args = json.loads(entry["arguments"]) if entry["arguments"] else {}
-                except json.JSONDecodeError:
-                    args = {}
-                parsed_tool_calls.append(ToolCall(
-                    id=entry["id"],
-                    name=entry["name"],
-                    arguments=args
-                ))
-
-            content = "".join(content_parts) or None
-            reasoning_content = "".join(reasoning_parts) or None
-
-            return LLMResponse(
-                content=content,
-                tool_calls=parsed_tool_calls,
-                finish_reason=finish_reason,
-                reasoning_content=reasoning_content,
-                usage=usage
-            )
+            if traced_span:
+                async with traced_span(SpanType.LLM, name="chat_with_tools_stream") as span:
+                    span.llm_attrs = LLMAttrs(model=self.model_name)
+                    result = await self._stream_chunks(
+                        request_params, on_content_token, on_reasoning_token, on_tools_detected
+                    )
+                    if result.usage:
+                        span.llm_attrs.prompt_tokens = result.usage.get("prompt_tokens", 0)
+                        span.llm_attrs.completion_tokens = result.usage.get("completion_tokens", 0)
+                        span.llm_attrs.total_tokens = result.usage.get("total_tokens", 0)
+                    span.llm_attrs.finish_reason = result.finish_reason
+                    span.llm_attrs.output_content_summary = result.content or ""
+                    return result
+            else:
+                return await self._stream_chunks(
+                    request_params, on_content_token, on_reasoning_token, on_tools_detected
+                )
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")
             raise
+
+    async def _stream_chunks(
+        self, request_params: Dict[str, Any],
+        on_content_token=None, on_reasoning_token=None, on_tools_detected=None
+    ) -> LLMResponse:
+        """流式读取 + 解析 chunks"""
+        stream = await self.client.chat.completions.create(**request_params)
+
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        tool_call_accum: Dict[int, Dict[str, Any]] = {}
+        finish_reason = "stop"
+        tools_notified = False
+        usage = None
+
+        async for chunk in stream:
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens,
+                    "completion_tokens": chunk.usage.completion_tokens,
+                    "total_tokens": chunk.usage.total_tokens,
+                }
+
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+            if delta.content:
+                content_parts.append(delta.content)
+                if on_content_token:
+                    on_content_token(delta.content)
+
+            if getattr(delta, 'reasoning_content', None):
+                reasoning_parts.append(delta.reasoning_content)
+                if on_reasoning_token:
+                    on_reasoning_token(delta.reasoning_content)
+
+            if delta.tool_calls:
+                if not tools_notified and on_tools_detected:
+                    on_tools_detected()
+                    tools_notified = True
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_call_accum:
+                        tool_call_accum[idx] = {"id": "", "name": "", "arguments": ""}
+
+                    entry = tool_call_accum[idx]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+
+        parsed_tool_calls = []
+        for idx in sorted(tool_call_accum.keys()):
+            entry = tool_call_accum[idx]
+            try:
+                args = json.loads(entry["arguments"]) if entry["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            parsed_tool_calls.append(ToolCall(
+                id=entry["id"],
+                name=entry["name"],
+                arguments=args
+            ))
+
+        content = "".join(content_parts) or None
+        reasoning_content = "".join(reasoning_parts) or None
+
+        return LLMResponse(
+            content=content,
+            tool_calls=parsed_tool_calls,
+            finish_reason=finish_reason,
+            reasoning_content=reasoning_content,
+            usage=usage
+        )
 
     def create_tool_message(
         self,
