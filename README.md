@@ -5,19 +5,19 @@
 
 ## 📋 项目概述
 
-本项目采用创新的 **Skill + Tool 双层架构**，通过9个原子 Skills（能力包：指令+工具）和3个专业 Agent 协同工作，提供智能、专业的医疗服务。支持 **CLI 交互**和 **Web 界面**两种使用方式。
+本项目采用创新的 **Skill + Tool 双层架构**，通过10个原子 Skills（能力包：指令+工具）和3个专业 Agent 协同工作，提供智能、专业的医疗服务。支持 **CLI 交互**和 **Web 界面**两种使用方式。
 
 ### 🎯 核心特性
 
 - **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
 - **📡 流式响应**: 实时推送 Agent 执行过程，可视化 Agent 参与情况 ✅
 - **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），实现"先问后诊" ✅
-- **🔧 Skill + Tool 双层架构**: 9个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
+- **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
 - **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
-- **⚡ Claude Code Skills**: 9个预定义技能，一键调用医疗助手 ✅
+- **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 
@@ -61,7 +61,7 @@
    - 激活新 Skill 自动停用前一个，避免工具膨胀
 
 4. **兼容模式自动检测**
-   - 全部 9 个 Skill 都有 `tools` 声明 → 启用双层模式
+   - 全部 10 个 Skill 都有 `tools` 声明 → 启用双层模式
    - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
@@ -144,8 +144,7 @@ LeadAgent.clarify()
     ▼
 LeadAgent.assess_and_decompose(问题 + collected_info)
     │
-    ├─ 单任务 → Agent 处理（已有完整背景信息）
-    └─ 多任务 → Swarm 分发（子任务描述已包含背景信息）
+    └─ 按子任务数量路由 → Worker 执行（统一走 process_subtask + 隔离子会话）
 ```
 
 ### 核心组件
@@ -287,16 +286,21 @@ medix-agent-swarm/
 │
 ├── frontend/                          # Vue 3 前端项目
 │   ├── src/
-│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView
-│   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/
+│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView
+│   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/, trace/
 │   │   ├── stores/                    # Pinia 状态管理
-│   │   ├── api/                       # API 调用层
+│   │   ├── api/                       # API 调用层（chat, knowledge, sessions, dashboard, personal, trace）
 │   │   ├── composables/               # useSSE (流式), useMarkdown
-│   │   └── types/                     # TypeScript 类型定义
+│   │   │   └── types/                     # TypeScript 类型定义
+│   └── trace/                          # Trace 追踪模块
+│       ├── context.py                  # Trace 上下文管理
+│       ├── collector.py                # Span 收集器
+│       ├── models.py                   # Trace 数据模型
+│       └── storage.py                  # SQLite 持久化
 │   ├── vite.config.ts
 │   └── package.json
 │
-├── .claude/skills/                    # Claude Code Skills (9个)
+├── .claude/skills/                    # Claude Code Skills (10个)
 │   ├── search-knowledge/              # 搜索医学知识库
 │   ├── assess-risk/                   # 风险评估
 │   ├── analyze-symptoms/              # 症状分析
@@ -305,7 +309,8 @@ medix-agent-swarm/
 │   ├── clinical-guideline/            # 临床指南检索
 │   ├── deep-research/                 # 深度研究
 │   ├── search-history/                # 搜索会话历史（短期记忆）
-│   └── search-similar-cases/          # 搜索相似案例（长期记忆）
+│   ├── search-similar-cases/          # 搜索相似案例（长期记忆）
+│   └── render-markdown-html/          # Markdown 与 HTML 互转
 │
 ├── agents/                            # Agent 实现
 │   ├── base_agent.py                  # Agent 基类
@@ -407,7 +412,7 @@ medix-agent-swarm/
 
 ## 🤖 Skills 和 Agent 清单
 
-### 9个原子 Skills（两层架构）
+### 10个原子 Skills（两层架构）
 
 **所有 Agent 共享以下 Skills**：
 
@@ -427,17 +432,17 @@ medix-agent-swarm/
 
 #### 1. ConsultationAgent（健康咨询）
 - **能力**: 通用健康咨询和生活方式指导
-- **注册 Skills**: 全部7个（自主选择合适的 Skills）
+- **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `search_knowledge`, `recommend_lifestyle`
 
 #### 2. DiagnosticAgent（症状诊断）
 - **能力**: 症状分析、风险评估和鉴别诊断
-- **注册 Skills**: 全部7个（自主选择合适的 Skills）
+- **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `assess_risk`, `analyze_symptoms`, `disease_code`
 
 #### 3. ResearchAgent（医学研究）
 - **能力**: 循证医学证据和权威指南检索
-- **注册 Skills**: 全部7个（自主选择合适的 Skills）
+- **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `clinical_guideline`, `deep_research`
 
 ### 2个协调 Agent
@@ -456,6 +461,7 @@ medix-agent-swarm/
 | **历史会话** | 会话列表查看、恢复、删除 | `/sessions` |
 | **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
 | **个人中心** | 查看/编辑个人健康档案（年龄、性别、病史等） | `/personal` |
+| **Trace 追踪** | 请求追踪、Agent 耗时分析、LLM 调用详情、工具调用统计 | `/trace` |
 
 ### Web 架构
 
@@ -497,6 +503,15 @@ SharedContext.on_event_callback → 事件推送
 | GET | `/api/personal` | 获取个人健康档案 |
 | PUT | `/api/personal` | 更新个人健康档案 |
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/traces` | Trace 列表 |
+| GET | `/api/traces/{trace_id}` | Trace 详情 |
+| GET | `/api/traces/{trace_id}/spans` | Trace Span 列表 |
+| GET | `/api/traces/{trace_id}/waterfall` | 瀑布图数据 |
+| GET | `/api/traces/stats/agents` | Agent 耗时统计 |
+| GET | `/api/traces/stats/tools` | 工具调用统计 |
+| GET | `/api/traces/stats/llm` | LLM 调用统计 |
+| GET | `/api/traces/stats/slow` | 慢请求列表 |
+| GET | `/api/traces/stats/errors` | 错误统计 |
 
 
 ## ⚙️ 配置说明
@@ -529,10 +544,10 @@ MEM0_API_KEY=m0-your-api-key-here
 ```python
 # 方式1: 内存存储（默认，无需配置）
 from memory.short_term import ShortTermMemory
-memory = ShortTermMemory(session_id="user_123", storage_type="memory")
+memory = ShortTermMemory(storage_type="memory")
 
 # 方式2: Redis持久化（可选）
-memory = ShortTermMemory(session_id="user_123", storage_type="redis")
+memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost", "port": 6379})
 ```
 
 **存储方式**：
@@ -815,7 +830,7 @@ python -m eval.runner --score-abtest
 
 ### 设计理念
 
-- **集中管理**: 18 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
+- **集中管理**: 21 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
 - **Jinja2 模板**: 支持变量渲染（`{{ variable }}`）、条件分支（`{% if %}`）、循环（`{% for %}`）
 - **代码解耦**: Python 代码不再包含 prompt 字符串，修改 prompt 无需改动业务逻辑
 - **统一入口**: `PromptLoader` 类提供 `load()`（静态）和 `render()`（带变量）两个方法
@@ -825,7 +840,7 @@ python -m eval.runner --score-abtest
 ```
 prompt/
 ├── agents/                # Agent 系统提示词（4 个）
-├── swarm/                 # Swarm 协调提示词（4 个）
+├── swarm/                 # Swarm 协调提示词（6 个）
 ├── research/              # 研究模块提示词（2 个）
 ├── memory/                # 记忆相关提示词（3 个）
 ├── agent_loop/            # Agent Loop 控制消息（2 个）
@@ -926,15 +941,12 @@ SwarmCoordinator
    │
    ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 注入完整上下文后分解
    │
-   ├─ 1 个子任务 → Agent 通过 process_subtask() 执行（隔离子会话，无历史）
+   ├─ 按子任务数量路由（统一走 process_subtask + 隔离子会话）：
+   │    ├─ 0个 → 降级到 ConsultationAgent
+   │    ├─ 1个 → 直接路由到指定 Worker
+   │    └─ ≥2个 → SharedContext 分发，3个 Worker 并行认领执行
    │
-   └─ ≥2 个子任务 → Swarm 模式
-        ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
-        ├─ Worker 通过 process_subtask() 自主认领并行执行（统一隔离）
-        │    ├─ ConsultAgent（独立 activate_skill + 执行）
-        │    ├─ DiagAgent（独立 activate_skill + 执行）
-        │    └─ ResearchAgent（独立 activate_skill + 执行）
-        └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
+   └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
 
 ### 记忆系统架构
@@ -982,10 +994,90 @@ SwarmCoordinator
 ---
 ## 工作流
 
-### Worker Agent（Prompt 拼接与循环机制）
+系统只有**一个统一工作流**，单 Agent 与 Swarm 的区别仅在于 LeadAgent 分解出的子任务数量不同——Worker 内部走完全相同的 `AgentLoop` 和 `process_subtask()` 子会话隔离机制。
+
+### 统一工作流（路由决定并发度）
+
 ```plaintext
 =======================================================================
-               【 单 Agent 模式：Prompt 拼接与循环机制 】
+        【 统一工作流：clarify → decompose → route → synthesize 】
+=======================================================================
+
+               [ 用户原始输入 (User Input) ]
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 0：记忆检索 (SwarmCoordinator)                                     │
+│ 统一检索三层记忆，构建增强上下文：                                       │
+│   - 短期记忆：当前会话最近 10 条消息                                     │
+│   - 长期记忆：Mem0 相似历史案例（最多 3 条）                             │
+│   - 个人档案：PERSONAL.md（仅已确认信息）                                │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 1：信息澄清 (LeadAgent.clarify)                                    │
+│ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
+│ 注入: 用户档案 + 近期对话 + 历史相似案例                                │
+│ LLM 主动调用 question_for_user 工具，向前端抛出问卷事件。               │
+│ 收集完毕后，将用户填写的背景数据打包成 collected_info                   │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼ (携带 collected_info)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 2：评估与分解 (LeadAgent.assess_and_decompose)                     │
+│ Prompt: lead_system.j2 + assessment_user.j2                             │
+│ LLM 分析问题复杂度，输出 SubTask 列表，每个子任务指定 assigned_agent    │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+              [ 按子任务数量智能路由 ]
+                            │
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+   0 个子任务         1 个子任务         ≥2 个子任务
+   ┌─────────┐      ┌──────────┐      ┌──────────────┐
+   │ 降级到   │      │ 单 Agent │      │  Swarm 模式  │
+   │ Consult  │      │ 直接路由 │      │ 并行协作     │
+   │ Agent    │      │ 到指定   │      │              │
+   │          │      │ Worker   │      │              │
+   └────┬─────┘      └────┬─────┘      └──────┬───────┘
+        │                 │                   │
+        ▼                 ▼                   ▼
+   process_subtask   process_subtask    ┌─────────────────────┐
+   (隔离子会话)      (隔离子会话)       │ SharedContext 分发   │
+        │                 │             │ 并行 process_subtask│
+        │                 │             │ (隔离子会话)        │
+        │                 │             └──────────┬──────────┘
+        │                 │                        │
+        └─────────────────┴────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 3：结果汇总 (LeadAgent.synthesize_results)                         │
+│ Prompt: synthesis.j2                                                    │
+│ 将各 Worker 的 Contributions 拼接为 Markdown，连同原始问题交给 LLM      │
+│ 超时时也会用已完成的部分结果尝试合成                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+                   [ 生成最终回答 ]
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 收尾 (SwarmCoordinator)                                                 │
+│   - 子会话合并回主会话（Worker 历史隔离 → 主会话完整 Q&A 链）           │
+│   - SessionSummary 持久化（含性能指标）                                 │
+│   - LLM 质量门控 → 个人信息/病史进暂存区，高质量事实入 Mem0             │
+│   - Trace 数据持久化                                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Agent Loop 内部机制（所有 Worker 共享）
+
+```plaintext
+=======================================================================
+        【 Agent Loop：Prompt 拼接与循环机制（KV cache 友好）】
 =======================================================================
 
 [ 每次迭代开始：初始化 Messages (AgentLoop._initialize_messages) ]
@@ -1033,56 +1125,6 @@ SwarmCoordinator
       │
       ▼
 ( State: COMPLETED ) -> 返回结果
-```
-
-### swarm-agent  
-```plaintext
-=======================================================================
-               【 Swarm 模式：任务协调与 Prompt 漏斗 】
-=======================================================================
-
-                 [ 用户原始输入 (User Input) ]
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 阶段 1：信息澄清 (LeadAgent.clarify)                                    │
-│ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
-│ 注入: 用户档案（仅已确认信息）+ 近期对话 + 历史相似案例                 │
-│ 状态流转: LLM 主动调用 `question_for_user` 工具，向前端抛出问卷事件。   │
-│           收集完毕后，将用户填写的背景数据打包成 collected_info         │
-└─────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼ (携带提取出的 Context)
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 阶段 2：评估与分解 (LeadAgent.assess_and_decompose)                     │
-│ Prompt: lead_system.j2 + assessment_user.j2                             │
-│ 状态流转: LLM 分析问题复杂度，输出 JSON 数组，定义各个 SubTask 及其     │
-│           指定的负责 Worker (assigned_agent)                            │
-└─────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-               [ 派发子任务至 SharedContext ]
-                              │
-         ┌────────────────────┼────────────────────┐
-         ▼                    ▼                    ▼
-     Worker A             Worker B             Worker C
-   (如：诊断Agent)     (如：指南研究Agent)    (如：健康推荐Agent)
-         │                    │                    │
-         └─────────►  (各自进入上面的【单 Agent 状态循环】) ◄─────────┘
-                              │
-                              ▼
-            [ 等待所有 Worker 任务完成 (wait_for_completion) ]
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 阶段 3：结果汇总 (LeadAgent.synthesize_results)                         │
-│ Prompt: synthesis.j2                                                    │
-│ 变量注入: 将 SharedContext 中所有 Agent 生成的 Contributions 拼接成     │
-│           Markdown，连同原始问题一起交给 LLM                            │
-└─────────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                     [ 生成最终的全局回答 ]
 ```
 
 ---
