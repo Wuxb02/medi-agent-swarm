@@ -10,6 +10,8 @@ const pageTitles: Record<string, string> = {
   Chat: '智能问答',
   Knowledge: '知识库',
   Dashboard: '仪表盘',
+  Traces: '轨迹',
+  TraceDetail: '轨迹详情',
   Personal: '个人中心',
 }
 

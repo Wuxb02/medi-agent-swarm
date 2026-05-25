@@ -111,6 +111,13 @@ def delete_session(session_id: str) -> bool:
         except OSError as e:
             logger.warning(f"Failed to delete {events_json}: {e}")
 
+    # 5. 删除关联的 Trace 数据
+    try:
+        from trace.storage import TraceSqliteStorage
+        TraceSqliteStorage().delete_trace(session_id)
+    except Exception as e:
+        logger.warning(f"Failed to delete trace data: {e}")
+
     return deleted
 
 

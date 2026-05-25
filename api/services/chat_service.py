@@ -25,6 +25,13 @@ from memory.session_vector_store import SessionVectorStore
 _session_db = SessionDB()
 _session_vectors = SessionVectorStore()
 
+# Trace 惰性导入
+try:
+    from trace import TraceCollector
+    _TRACE_AVAIL = True
+except ImportError:
+    _TRACE_AVAIL = False
+
 # 问卷管理器注册表（session_id → QuestionnaireManager）
 _managers: Dict[str, QuestionnaireManager] = {}
 
@@ -111,6 +118,23 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
 
     # 1.5 创建会话的问卷管理器
     manager = get_manager(session_id)
+
+    # 1.6 注册 Trace 实时推送回调（span 完成时入队 EventBridge）
+    if _TRACE_AVAIL:
+        collector = TraceCollector()
+
+        def _on_span_complete(span):
+            from swarm.events import Event, EventType
+            bridge.queue.put_nowait(Event(
+                type=EventType.TRACE_SPAN,
+                source_agent="trace",
+                data={"id": span.id, "trace_id": span.trace_id, "parent_id": span.parent_id,
+                      "span_type": span.span_type.value,
+                      "name": span.name, "start_time": span.timing.start_time.isoformat(),
+                      "duration_ms": span.timing.duration_ms, "status": span.status.value}
+            ))
+
+        collector.add_span_callback(session_id, _on_span_complete)
 
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
@@ -199,8 +223,12 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
 
-    # 9. 清理问卷管理器
+    # 8. 清理问卷管理器
     remove_manager(session_id)
+
+    # 9. 清理 trace 回调（确保不留残留引用；正常流程 flush 已清理）
+    if _TRACE_AVAIL:
+        collector.remove_span_callback(session_id, _on_span_complete)
 
 
 def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -301,6 +329,7 @@ def _map_event_type(event_type: str) -> str:
         "agent_question": "agent_tool_call",
         "agent_answer": "agent_tool_result",
         "swarm_completed": "agent_complete",
+        "trace_span": "trace_span",
     }
     return mapping.get(event_type, event_type)
 

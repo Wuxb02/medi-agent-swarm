@@ -16,7 +16,7 @@ logger.add(
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
 )
 
-from api.routers import chat, knowledge, sessions, dashboard, personal
+from api.routers import chat, knowledge, sessions, dashboard, personal, traces
 
 app = FastAPI(
     title="MediZJ Agent Swarm API",
@@ -39,6 +39,7 @@ app.include_router(knowledge.router)
 app.include_router(sessions.router)
 app.include_router(dashboard.router)
 app.include_router(personal.router)
+app.include_router(traces.router)
 
 
 @app.get("/")
