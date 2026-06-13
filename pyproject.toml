@@ -50,6 +50,55 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["agents*", "constraints*", "core*", "knowledge*", "memory*", "research*", "swarm*", "validation*"]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-cov>=6.0,<7.0",
+    "pytest-mock>=3.14,<4.0",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "pytest-cov>=6.0,<7.0",
+    "pytest-mock>=3.14,<4.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["test"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = ["-v", "--strict-markers", "--tb=short"]
+markers = [
+    "unit: 纯单元测试，无外部依赖",
+    "integration: 需要外部服务 (LLM/Mem0/Milvus/网络)",
+    "slow: 慢速测试 (真实 LLM 调用)",
+]
+
+[tool.coverage.run]
+source = ["agents", "core", "swarm", "memory", "knowledge", "constraints", "validation", "research", "trace"]
+omit = [
+    "*/__pycache__/*",
+    "test/*",
+    "examples/*",
+    "eval/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

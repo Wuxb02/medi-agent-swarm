@@ -34,8 +34,11 @@ python main.py -v       # 详细日志模式
 uv run python api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
-# 运行测试（26+ 测试用例，8 个阶段，raw assert）
-python examples/test_all.py
+# 运行测试（231 个单元测试 + 20 个集成测试）
+pytest test/ -m "unit"                     # 仅单元测试（快速，无需外部服务）
+pytest test/ -m "integration" --run-integration  # 集成测试（需 LLM/Milvus/Mem0）
+pytest test/ --run-integration             # 全部测试
+pytest test/ -m "unit" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
 python -m eval.runner --metrics all
@@ -160,5 +163,4 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 
 ## 已知问题
 
-- 测试使用 raw assert 而非 pytest/unittest，无正式测试框架
 - 无 linting/formatting/CI 配置

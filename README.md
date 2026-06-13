@@ -245,7 +245,17 @@ python knowledge/scripts/import_hardcoded_data.py
 ### 5. 运行测试
 
 ```bash
-python examples/test_all.py
+# 单元测试（231 个，无需外部服务，秒级完成）
+pytest test/ -m "unit"
+
+# 集成测试（20 个，需 LLM/Milvus/Mem0）
+pytest test/ -m "integration" --run-integration
+
+# 全部测试
+pytest test/ --run-integration
+
+# 覆盖率报告
+pytest test/ -m "unit" --cov --cov-report=html
 ```
 
 ### 6. 开始使用
@@ -401,8 +411,18 @@ medix-agent-swarm/
 │   ├── evidence_synthesizer.py
 │   └── web_search.py
 │
-├── examples/
-│   └── test_all.py                    # 测试套件
+├── test/                               # 测试套件（pytest 现代化）
+│   ├── conftest.py                      # 共享 fixtures（mock LLM、环境变量、临时目录）
+│   ├── helpers.py                       # 测试辅助函数
+│   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager
+│   ├── test_agents/                     # Agent：能力标签、工具注册
+│   ├── test_swarm/                      # Swarm：events, shared_context
+│   ├── test_memory/                     # 记忆：short_term, entropy_manager
+│   ├── test_constraints/                # 约束验证
+│   ├── test_validation/                 # 自动修复
+│   ├── test_trace/                      # Trace：models, context, collector, storage
+│   ├── test_research/                   # 深度研究：evidence_synthesizer
+│   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
 │
 ├── main.py                            # CLI 入口
 ├── api_main.py                        # Web 服务入口（uvicorn）
@@ -777,9 +797,9 @@ AgentLoop.run()
 
 ### 验证
 
-运行完整测试套件（包含 Harness 测试）：
+运行单元测试套件（无需外部服务）：
 ```bash
-python examples/test_all.py
+pytest test/ -m "unit"
 ```
 
 ## 📊 评估框架
