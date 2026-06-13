@@ -75,6 +75,16 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         session_id=session_id
     )
 
+    # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
+    ltm_task = result.get('_ltm_save_task')
+    if ltm_task and not ltm_task.done():
+        try:
+            await asyncio.wait_for(ltm_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"LTM save timeout in non-stream for session={session_id}")
+        except Exception as e:
+            logger.error(f"LTM save error in non-stream: {e}")
+
     # 持久化到 SQLite + Milvus
     persist_session_id = result.get("session_id", session_id)
     if persist_session_id:

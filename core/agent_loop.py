@@ -543,7 +543,9 @@ class AgentLoop:
             })
 
         # 加载历史对话（短期记忆）
-        if self.short_term_memory and session_id:
+        # 子会话 ID 含 ":" 分隔符（如 main:agent:subtask），为隔离的干净上下文，
+        # 无历史记录，跳过 I/O 查询
+        if session_id and ":" not in session_id and self.short_term_memory:
             history = await self.short_term_memory.get_history(session_id, limit=5)  # 最近5轮对话
             if history:
                 logger.info(f"Loaded {len(history)} historical messages from short-term memory")

@@ -7,6 +7,7 @@ SharedContext：Agent 群体智能的共享环境（信息素系统）
 
 这是去中心化协作的核心：没有中心控制节点，只有共享环境
 """
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -120,6 +121,9 @@ class SharedContext:
         # 事件回调（用于 SSE 流式推送等外部监听）
         self.on_event_callback: Optional[Callable] = None
 
+        # 事件驱动：所有子任务完成时触发，替代轮询等待
+        self.all_completed_event = asyncio.Event()
+
     def publish_event(self, event: Event):
         """
         发布事件
@@ -160,6 +164,7 @@ class SharedContext:
     def add_subtask(self, subtask: SubTask):
         """添加子任务"""
         self.task_decomposition[subtask.id] = subtask
+        self.all_completed_event.clear()  # 新任务加入，重置完成信号
 
         # 发布事件
         self.publish_event(Event(
@@ -247,6 +252,10 @@ class SharedContext:
                 "result_summary": str(result)[:200]  # 简短摘要
             }
         ))
+
+        # 所有子任务完成时触发事件，唤醒等待方
+        if self.is_all_subtasks_completed():
+            self.all_completed_event.set()
 
     def get_contributions(
         self,

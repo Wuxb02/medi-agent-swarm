@@ -104,6 +104,16 @@ async def interactive_mode():
             result = await process_with_swarm(user_input, session_id=session_id)
             end_time = time.time()
 
+            # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
+            ltm_task = result.get('_ltm_save_task')
+            if ltm_task and not ltm_task.done():
+                try:
+                    await asyncio.wait_for(ltm_task, timeout=30.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"LTM save timeout in interactive mode for session={session_id}")
+                except Exception as e:
+                    logger.error(f"LTM save error in interactive mode: {e}")
+
             # 计算执行时间
             execution_time = end_time - start_time
 

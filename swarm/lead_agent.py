@@ -333,33 +333,6 @@ class LeadAgent:
 
         return subtasks
 
-    async def wait_for_completion(
-        self,
-        shared_context: SharedContext,
-        timeout: float = 30.0
-    ) -> bool:
-        """
-        等待所有子任务完成
-
-        这不是"主动控制"，而是"被动等待"
-        Worker 自主完成任务，Lead 只是等待
-        """
-        import asyncio
-
-        start_time = asyncio.get_event_loop().time()
-
-        while True:
-            if shared_context.is_all_subtasks_completed():
-                logger.info("All subtasks completed")
-                return True
-
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed > timeout:
-                logger.warning(f"Timeout waiting for subtasks ({timeout}s)")
-                return False
-
-            await asyncio.sleep(0.5)  # 每 0.5 秒检查一次
-
     async def synthesize_results(
         self,
         question: str,

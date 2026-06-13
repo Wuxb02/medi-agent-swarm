@@ -10,6 +10,10 @@ import yaml
 import os
 from loguru import logger
 
+# Skill 发现缓存：避免每次 Agent 初始化都扫描磁盘 + 动态导入
+_discovered_cache: Optional[List[Dict]] = None
+_discovered_cache_root: Optional[Path] = None
+
 
 def load_skill_function(skill_name: str, script_name: str, function_name: str, project_root: Path = None) -> Callable:
     """
@@ -153,6 +157,9 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
     """
     自动扫描 .claude/skills 目录，发现所有 skills
 
+    结果会缓存在模块级变量中，避免每次 Agent 初始化都扫描磁盘。
+    开发期可通过 invalidate_skill_cache() 手动清除缓存。
+
     Args:
         project_root: 项目根目录（如果为 None，自动检测）
 
@@ -171,8 +178,15 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
             ...
         ]
     """
+    global _discovered_cache, _discovered_cache_root
+
     if project_root is None:
         project_root = Path(__file__).parent.parent
+
+    # 命中缓存直接返回
+    if _discovered_cache is not None and _discovered_cache_root == project_root:
+        logger.debug(f"Using cached skill discovery ({len(_discovered_cache)} skills)")
+        return _discovered_cache
 
     skills_dir = project_root / ".claude" / "skills"
 
@@ -271,7 +285,17 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
                 continue
 
     logger.info(f"Discovered {len(discovered_skills)} skills in total")
+    _discovered_cache = discovered_skills
+    _discovered_cache_root = project_root
     return discovered_skills
+
+
+def invalidate_skill_cache():
+    """清除 Skill 发现缓存，用于开发期手动刷新"""
+    global _discovered_cache, _discovered_cache_root
+    _discovered_cache = None
+    _discovered_cache_root = None
+    logger.info("Skill discovery cache invalidated")
 
 
 def load_all_skills(project_root: Path = None) -> dict:

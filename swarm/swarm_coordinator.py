@@ -105,6 +105,34 @@ class SwarmCoordinator:
         }
         return mapping.get(agent_id)
 
+    async def _retrieve_memories(self, session_id: str, question: str):
+        """并行检索短期记忆和长期记忆
+
+        Returns:
+            (recent_history, similar_memories)，任一失败返回空列表降级
+        """
+        results = await asyncio.gather(
+            self.short_term_memory.get_recent_messages(
+                session_id=session_id,
+                limit=10,  # 最近5轮对话（10条消息）
+            ),
+            self.long_term_memory.search_similar_sessions(
+                query=question,
+                limit=3,
+            ),
+            return_exceptions=True,
+        )
+
+        recent_history = results[0] if not isinstance(results[0], BaseException) else []
+        similar_memories = results[1] if not isinstance(results[1], BaseException) else []
+
+        if isinstance(results[0], BaseException):
+            logger.warning(f"Short-term memory retrieval failed: {results[0]}")
+        if isinstance(results[1], BaseException):
+            logger.warning(f"Long-term memory retrieval failed: {results[1]}")
+
+        return recent_history, similar_memories
+
     async def process(
         self,
         question: str,
@@ -146,25 +174,19 @@ class SwarmCoordinator:
         except ImportError:
             pass
 
+        # ===== 统一的记忆检索（所有模式都使用）=====
+        # 并行检索短期记忆和长期记忆，减少串行等待延迟
+        recent_history, similar_memories = await self._retrieve_memories(
+            session_id=session_id,
+            question=question,
+        )
+
         # 刷新 Worker Agent 的用户档案（可能在会话中被更新）
         personal_text = self.personal_profile.to_text()
         if personal_text != "暂无":
             for worker in self.worker_pool:
                 if hasattr(worker, 'loop'):
                     worker.loop.user_context = personal_text
-
-        # ===== 统一的记忆检索（所有模式都使用）=====
-        # 1. 检索短期记忆（当前会话历史）
-        recent_history = await self.short_term_memory.get_recent_messages(
-            session_id=session_id,
-            limit=10  # 最近5轮对话（10条消息）
-        )
-
-        # 2. 检索长期记忆（相似历史案例）
-        similar_memories = await self.long_term_memory.search_similar_sessions(
-            query=question,
-            limit=3
-        )
 
         # 3. 构建增强上下文（传给 LeadAgent 做任务分解）
         enhanced_context = context or {}
@@ -415,6 +437,7 @@ class SwarmCoordinator:
                 "total_tokens": token_usage.get('total_tokens', 0),
             }
         ))
+        result['_ltm_save_task'] = self.ltm_save_task
 
         await self._flush_trace(_trace_collector, session_id, question, mode, result)
         return result
@@ -495,15 +518,19 @@ class SwarmCoordinator:
 
         # 等待所有 Worker 完成（或超时）
         timeout_occurred = False
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=90.0  # 增加超时时间到 90 秒，应对复杂案例
-            )
-        except asyncio.TimeoutError:
-            timeout_occurred = True
+        done, pending = await asyncio.wait(tasks, timeout=90.0)
+        timeout_occurred = len(pending) > 0
+
+        # 检查已完成的 Worker 是否有异常
+        for completed_task in done:
+            exc = completed_task.exception()
+            if exc:
+                logger.error(f"Worker task failed with exception: {exc}")
+
+        if timeout_occurred:
             logger.warning("Swarm execution timeout (90s)")
-            # 记录哪些 Agent 已完成，哪些未完成
+            for task in pending:
+                task.cancel()
             completed_agents = list(shared_context.agent_contributions.keys())
             claimed_tasks = [
                 (subtask.assigned_to, subtask.type)
@@ -618,6 +645,7 @@ class SwarmCoordinator:
             timeout_occurred=timeout_occurred,
             completed_agents_count=len(completed_agents),
         )
+        result['_ltm_save_task'] = self.ltm_save_task
 
         return result
 
