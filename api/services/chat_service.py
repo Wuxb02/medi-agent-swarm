@@ -112,7 +112,10 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
 
 
 async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
-    """流式问答（换行分隔 JSON）"""
+    """流式问答（换行分隔 JSON）
+
+    支持客户端断开时自动取消后台处理任务，避免浪费 LLM token。
+    """
     bridge = EventBridge()
 
     session_id = request.session_id or (
@@ -160,17 +163,37 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         )
     )
 
-    # 3. 持续从队列读取事件并发送
-    while not process_task.done() or not bridge.queue.empty():
+    # 2.5 启动客户端断开检测任务
+    async def _wait_for_disconnect():
+        """等待客户端断开连接"""
+        while True:
+            if await request.is_disconnected():
+                return
+            await asyncio.sleep(0.1)
+
+    disconnect_task = asyncio.create_task(_wait_for_disconnect())
+
+    # 3. 持续从队列读取事件并发送（同时监控断开和完成）
+    result = None
+    disconnected = False
+    while not process_task.done() and not disconnect_task.done():
+        done, _ = await asyncio.wait(
+            [process_task, disconnect_task],
+            timeout=0.5,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if disconnect_task in done:
+            disconnected = True
+            break
+        if process_task in done:
+            break
+        # 从 bridge 队列读取事件并 yield
         try:
-            event = await asyncio.wait_for(bridge.queue.get(), timeout=0.5)
+            event = await asyncio.wait_for(bridge.queue.get(), timeout=0.1)
             mapped_type = _map_event_type(event.type.value)
-            # 跳过 content delta（多 Worker 的 token 交错会导致格式混乱，
-            # 最终答案由 done 事件携带的完整 answer 提供）
             if mapped_type == "agent_content_delta":
                 continue
             event_dict = event.to_dict()
-            # 问卷事件直接推送到前端（不经过 _map_event_type 映射）
             if event.type.value == "agent_questionnaire":
                 yield _json_line("agent_questionnaire", event_dict)
                 collected_events.append({"event": "agent_questionnaire", "data": event_dict})
@@ -180,28 +203,42 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         except asyncio.TimeoutError:
             continue
 
-    # 4. 获取结果
+    # 4. 处理断开情况
+    if disconnected:
+        logger.info(f"Client disconnected for session={session_id}, cancelling processing")
+        process_task.cancel()
+        try:
+            await process_task
+        except asyncio.CancelledError:
+            logger.info(f"Processing cancelled for session={session_id}")
+        except Exception as e:
+            logger.error(f"Error after cancel for session={session_id}: {e}")
+        remove_manager(session_id)
+        return
+
+    # 5. 正常完成：等待 process_task 结果
+    disconnect_task.cancel()
     try:
-        result = await process_task
+        result = process_task.result()
     except Exception as e:
         logger.error(f"Chat processing error: {e}")
         yield _json_line("error", {"error": str(e)})
         return
 
-    # 5. 发送建议
+    # 6. 发送建议
     suggestions = result.get("suggestions", [])
     if suggestions:
         suggestions_payload = {"suggestions": suggestions}
         yield _json_line("suggestions", suggestions_payload)
         collected_events.append({"event": "suggestions", "data": suggestions_payload})
 
-    # 5.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
+    # 6.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
     try:
         _persist_session_turn(session_id, request, result, collected_events)
     except Exception as e:
         logger.warning(f"Failed to persist session turn: {e}")
 
-    # 6. 发送 done（最后一个事件）
+    # 7. 发送 done（最后一个事件）
     done_data = {
         "session_id": result.get("session_id", session_id),
         "total_time": result.get("total_time", 0.0),
@@ -216,7 +253,7 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
 
-    # 6.5 等待 LTM 保存任务完成（done 已 yield，客户端已收到数据）
+    # 7.5 等待 LTM 保存任务完成（done 已 yield，客户端已收到数据）
     ltm_task = getattr(coordinator, 'ltm_save_task', None)
     if ltm_task and not ltm_task.done():
         try:
@@ -227,16 +264,16 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         except Exception as e:
             logger.error(f"LTM save error in chat_stream: {e}")
 
-    # 7. 持久化事件到 JSON 文件（后台不阻塞返回）
+    # 8. 持久化事件到 JSON 文件（后台不阻塞返回）
     try:
         _save_session_events(session_id, collected_events, result)
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
 
-    # 8. 清理问卷管理器
+    # 9. 清理问卷管理器
     remove_manager(session_id)
 
-    # 9. 清理 trace 回调（确保不留残留引用；正常流程 flush 已清理）
+    # 10. 清理 trace 回调（确保不留残留引用；正常流程 flush 已清理）
     if _TRACE_AVAIL:
         collector.remove_span_callback(session_id, _on_span_complete)
 

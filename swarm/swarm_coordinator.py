@@ -11,6 +11,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 import asyncio
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Callable
 from loguru import logger
@@ -139,16 +140,9 @@ class SwarmCoordinator:
         context: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """
-        处理用户问题
+        """处理用户问题
 
-        Args:
-            question: 用户问题
-            context: 额外上下文（年龄、既往史等）
-            session_id: 会话ID（如果不提供，将自动生成）
-
-        Returns:
-            处理结果
+        Pipeline: 检索 → 澄清 → 分解 → 路由 → 收尾
         """
         start_time = datetime.now()
         if session_id is None:
@@ -156,291 +150,131 @@ class SwarmCoordinator:
 
         logger.info(f"Processing question (session={session_id}): {question[:50]}...")
 
-        # ===== 初始化 Trace =====
-        _trace_collector = None
+        try:
+            # Step 0: 初始化 Trace
+            _trace_collector = self._init_trace(session_id)
+
+            # Step 1: 并行检索记忆 + 刷新 Worker 档案
+            recent_history, similar_memories = await self._retrieve_memories(
+                session_id=session_id, question=question,
+            )
+            self._refresh_worker_profiles()
+
+            # Step 2: 构建增强上下文
+            enhanced_context = self._build_enhanced_context(
+                context or {}, recent_history, similar_memories,
+            )
+
+            # Step 3: 信息澄清 + 任务分解
+            clarify_result = await self._do_clarify(question, enhanced_context, session_id)
+            if clarify_result.get("clarified"):
+                enhanced_context["collected_info"] = clarify_result["collected_info"]
+                logger.info(f"LeadAgent 澄清完成，收集信息: {clarify_result['collected_info'][:100]}...")
+            elif clarify_result.get("timeout_skipped"):
+                logger.warning("信息澄清阶段超时跳过，继续任务分解")
+
+            assessment = await self._do_assess_decompose(question, enhanced_context)
+            subtasks = assessment.get("subtasks", [])
+            logger.info(f"LeadAgent 分解任务：{len(subtasks)} 个")
+
+            # Step 4: 路由并执行
+            result = await self._route_and_execute(
+                subtasks=subtasks, question=question,
+                enhanced_context=enhanced_context,
+                session_id=session_id, start_time=start_time,
+            )
+
+            # Step 5: 统一收尾（单Agent/Fallback 模式；Swarm 已在内部完成）
+            result = await self._finalize(
+                result=result, question=question, session_id=session_id,
+                start_time=start_time, subtasks_count=len(subtasks),
+                _trace_collector=_trace_collector,
+            )
+            return result
+
+        except asyncio.CancelledError:
+            logger.info(f"process() cancelled for session {session_id}")
+            raise
+
+    def _init_trace(self, session_id: str):
+        """惰性初始化 Trace 收集器"""
         try:
             from trace.collector import TraceCollector
             from trace.storage import TraceSqliteStorage
             from trace.context import _current_trace_id
-            from trace.models import TraceAttributes
 
-            _trace_collector = TraceCollector()
-            _trace_collector.begin_trace(session_id)
-            if not hasattr(_trace_collector, '_storage_set') or not _trace_collector._storage_set:
-                _trace_collector.set_storage(TraceSqliteStorage())
-                _trace_collector._storage_set = True
+            collector = TraceCollector()
+            collector.begin_trace(session_id)
+            if not hasattr(collector, '_storage_set') or not collector._storage_set:
+                collector.set_storage(TraceSqliteStorage())
+                collector._storage_set = True
             _current_trace_id.set(session_id)
             logger.debug(f"[Trace] Started for session={session_id}")
+            return collector
         except ImportError:
-            pass
+            return None
 
-        # ===== 统一的记忆检索（所有模式都使用）=====
-        # 并行检索短期记忆和长期记忆，减少串行等待延迟
-        recent_history, similar_memories = await self._retrieve_memories(
-            session_id=session_id,
-            question=question,
-        )
-
-        # 刷新 Worker Agent 的用户档案（可能在会话中被更新）
+    def _refresh_worker_profiles(self):
+        """刷新所有 Worker Agent 的用户档案"""
         personal_text = self.personal_profile.to_text()
         if personal_text != "暂无":
             for worker in self.worker_pool:
                 if hasattr(worker, 'loop'):
                     worker.loop.user_context = personal_text
 
-        # 3. 构建增强上下文（传给 LeadAgent 做任务分解）
-        enhanced_context = context or {}
+    def _build_enhanced_context(
+        self, context: Dict, recent_history: List, similar_memories: List,
+    ) -> Dict:
+        """构建增强上下文（记忆 + 档案注入）"""
+        enhanced = context
 
-        # 注入用户档案（仅已确认信息，不含待确认条目）
         lead_personal = self.personal_profile.to_text()
         if lead_personal != "暂无":
-            enhanced_context["personal_profile"] = lead_personal
+            enhanced["personal_profile"] = lead_personal
 
-        # 注入短期记忆
         if recent_history:
-            enhanced_context["recent_history"] = [
+            enhanced["recent_history"] = [
                 {"role": msg.get("role", ""), "content": msg.get("content", "")}
                 for msg in recent_history
             ]
             logger.info(f"Loaded {len(recent_history)} recent messages from short-term memory")
 
-        # 注入长期记忆（LeadAgent 基于此做更好的任务分解）
         if similar_memories:
-            enhanced_context["historical_cases"] = [
-                {
-                    "summary": mem["content"],
-                    "score": mem["score"]
-                }
+            enhanced["historical_cases"] = [
+                {"summary": mem["content"], "score": mem["score"]}
                 for mem in similar_memories
             ]
             logger.info(f"Found {len(similar_memories)} similar historical cases from long-term memory")
 
-        # Step 0: LeadAgent 信息澄清（在任务分解之前）
+        return enhanced
+
+    async def _do_clarify(
+        self, question: str, enhanced_context: Dict, session_id: str,
+    ) -> Dict:
+        """执行信息澄清阶段（含 Trace span）"""
         _ctx = traced_span(SpanType.STAGE, name="clarify") if _TRACE else None
         if _ctx: _ctx.__enter__()
         try:
-            clarify_result = await self.lead_agent.clarify(
-                question=question,
-                context=enhanced_context,
-                session_id=session_id,
-                event_callback=self.event_callback,
+            return await self.lead_agent.clarify(
+                question=question, context=enhanced_context,
+                session_id=session_id, event_callback=self.event_callback,
+                clarify_timeout=30.0,
             )
         finally:
             if _ctx: _ctx.__exit__(None, None, None)
 
-        if clarify_result.get("clarified"):
-            collected_info = clarify_result["collected_info"]
-            enhanced_context["collected_info"] = collected_info
-            logger.info(f"LeadAgent 澄清完成，收集信息: {collected_info[:100]}...")
-
-        # Step 1: LeadAgent 分解任务
-        _ctx2 = traced_span(SpanType.STAGE, name="assess_decompose") if _TRACE else None
-        if _ctx2: _ctx2.__enter__()
+    async def _do_assess_decompose(
+        self, question: str, enhanced_context: Dict,
+    ) -> Dict:
+        """执行任务分解（含 Trace span）"""
+        _ctx = traced_span(SpanType.STAGE, name="assess_decompose") if _TRACE else None
+        if _ctx: _ctx.__enter__()
         try:
-            assessment = await self.lead_agent.assess_and_decompose(question, enhanced_context)
+            return await self.lead_agent.assess_and_decompose(question, enhanced_context)
         finally:
-            if _ctx2: _ctx2.__exit__(None, None, None)
+            if _ctx: _ctx.__exit__(None, None, None)
 
-        subtasks = assessment.get("subtasks", [])
-
-        logger.info(f"LeadAgent 分解任务：{len(subtasks)} 个")
-
-        # Step 2: 根据任务数量路由
-        final_answer = None
-        mode = None
-
-        if len(subtasks) == 1:
-            # 单任务 → 与 Swarm 模式一致，通过 process_subtask 执行（隔离历史）
-            task = subtasks[0]
-            agent_id = task.get("assigned_agent")
-            agent = self._get_agent_by_id(agent_id)
-
-            if agent is None:
-                # 如果找不到 Agent，降级到 ConsultationAgent
-                logger.warning(f"Unknown agent_id: {agent_id}, fallback to ConsultationAgent")
-                agent = self.consultation_agent
-
-            logger.info(f"Route: Single Agent ({agent_id})")
-            mode = "single_agent"
-
-            # 注入 thinking 回调（单 Agent 模式直接通过 event_callback 推送）
-            if self.event_callback and hasattr(agent, 'set_on_thinking'):
-                self._inject_thinking_callbacks(agent, lambda event: self.event_callback(event))
-
-            # 构造 SubTask 对象，走与 Swarm 模式一致的 process_subtask 路径
-            subtask_obj = SubTask(
-                id=task.get("id", "single"),
-                type=task.get("type", "general"),
-                description=task.get("description", question),
-                assigned_agent=agent_id,
-                status=TaskStatus.PENDING,
-            )
-            sub_session_id = f"{session_id}:{agent_id}:{subtask_obj.id}"
-
-            result = await self._execute_single_agent_traced(
-                agent, subtask_obj, session_id, sub_session_id
-            )
-            final_answer = result.get('answer', '')
-
-            # 提取 token 用量
-            token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
-            session_message_count = result.get('message_count', 0)
-
-            # 清理 thinking 回调
-            if hasattr(agent, 'set_on_thinking'):
-                self._cleanup_thinking_callbacks(agent)
-
-            # 将用户问题和子会话结果合并回主会话
-            await self.short_term_memory.add_message(
-                session_id=session_id,
-                role="user",
-                content=question,
-            )
-            self.short_term_memory.merge_sub_session(
-                main_session_id=session_id,
-                sub_session_id=sub_session_id,
-                summary_text=final_answer if final_answer else "",
-            )
-
-            result.update({
-                'swarm_enabled': False,
-                'session_id': session_id,
-                'route_reason': f'单任务路由到 {agent_id}',
-                'usage': token_usage,
-                'agents_involved': [agent_id],
-            })
-
-            # 确保单Agent模式下也有 disclaimer 字段
-            if 'disclaimer' not in result:
-                result['disclaimer'] = "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
-
-            # 确保单Agent模式下也有 suggestions 字段
-            if 'suggestions' not in result:
-                result['suggestions'] = []
-
-            # 保存单 Agent 会话总结
-            try:
-                end_time = datetime.now()
-                summary = SessionSummary.from_single_agent(
-                    session_id=session_id,
-                    question=question,
-                    agent_id=agent_id,
-                    final_answer=final_answer,
-                    start_time=start_time,
-                    end_time=end_time,
-                    usage=token_usage,
-                    total_messages=session_message_count
-                )
-                self.session_manager.save_summary(summary)
-            except Exception as e:
-                logger.error(f"Failed to save single agent session summary: {e}")
-
-        elif len(subtasks) >= 2:
-            # 多任务 → 启动 Swarm
-            logger.info(f"Route: Swarm (Multi-Agent Collaboration) - {len(subtasks)} tasks")
-            mode = "swarm"
-            self.ltm_save_task = None
-            result = await self._process_with_swarm(
-                question=question,
-                context=enhanced_context,
-                assessment=assessment,
-                session_id=session_id,
-                start_time=start_time
-            )
-            final_answer = result.get('answer', '')
-            # ltm_save_task 已在 _process_with_swarm 中设置
-            await self._flush_trace(_trace_collector, session_id, question, mode, result)
-            return result
-
-        else:
-            # 0个任务 → 降级到 ConsultationAgent
-            logger.warning("No subtasks generated, fallback to ConsultationAgent")
-            mode = "fallback"
-
-            # 注入 thinking 回调
-            if self.event_callback and hasattr(self.consultation_agent, 'set_on_thinking'):
-                self._inject_thinking_callbacks(self.consultation_agent, lambda event: self.event_callback(event))
-
-            # 降级模式也走 process_subtask 路径，隔离历史
-            fallback_subtask = SubTask(
-                id="fallback",
-                type="general",
-                description=question,
-                assigned_agent="consultation_agent",
-                status=TaskStatus.PENDING,
-            )
-            sub_session_id = f"{session_id}:consultation_agent:fallback"
-
-            result = await self._execute_single_agent_traced(
-                self.consultation_agent, fallback_subtask, session_id, sub_session_id
-            )
-            final_answer = result.get('answer', '')
-            token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
-            session_message_count = result.get('message_count', 0)
-
-            # 清理 thinking 回调
-            if hasattr(self.consultation_agent, 'set_on_thinking'):
-                self._cleanup_thinking_callbacks(self.consultation_agent)
-
-            # 将用户问题和子会话结果合并回主会话
-            await self.short_term_memory.add_message(
-                session_id=session_id,
-                role="user",
-                content=question,
-            )
-            self.short_term_memory.merge_sub_session(
-                main_session_id=session_id,
-                sub_session_id=sub_session_id,
-                summary_text=final_answer if final_answer else "",
-            )
-            result.update({
-                'swarm_enabled': False,
-                'session_id': session_id,
-                'usage': token_usage,
-                'agents_involved': ['consultation_agent'],
-            })
-
-            # 保存 fallback 会话总结
-            try:
-                end_time = datetime.now()
-                summary = SessionSummary.from_single_agent(
-                    session_id=session_id,
-                    question=question,
-                    agent_id="consultation_agent",
-                    final_answer=final_answer,
-                    start_time=start_time,
-                    end_time=end_time,
-                    usage=token_usage,
-                    total_messages=session_message_count
-                )
-                self.session_manager.save_summary(summary)
-            except Exception as e:
-                logger.error(f"Failed to save fallback session summary: {e}")
-
-        # ===== 统一的记忆保存（非 Swarm 模式）=====
-        end_time = datetime.now()
-
-        # 将 total_time 写入结果
-        result['total_time'] = (end_time - start_time).total_seconds()
-
-        # 注意：用户问题和最终回答已由上方 merge_sub_session 保存到主会话，子会话已清除
-
-        # fire-and-forget：由 chat_stream 的 finalizer 负责等待完成
-        self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
-            session_id=session_id,
-            question=question,
-            answer=final_answer,
-            metadata={
-                "mode": mode,
-                "subtasks_count": len(subtasks),
-                "total_time": (end_time - start_time).total_seconds(),
-                "total_tokens": token_usage.get('total_tokens', 0),
-            }
-        ))
-        result['_ltm_save_task'] = self.ltm_save_task
-
-        await self._flush_trace(_trace_collector, session_id, question, mode, result)
-        return result
+    # ---- 记忆检索（P0 已抽取）----
 
     async def _flush_trace(self, collector, session_id, question, mode, result):
         """持久化 Trace 数据"""
@@ -466,6 +300,164 @@ class SwarmCoordinator:
         except Exception as e:
             logger.warning(f"[Trace] Flush failed: {e}")
 
+    # ===== 路由与收尾方法（P1-6/7 重构）=====
+
+    async def _route_and_execute(
+        self,
+        subtasks: List[Dict],
+        question: str,
+        enhanced_context: Dict,
+        session_id: str,
+        start_time: datetime,
+    ) -> Dict[str, Any]:
+        """根据子任务数量路由到单 Agent / Swarm / Fallback 分支
+
+        每个分支返回标准化的 result dict，包含 answer/disclaimer/suggestions 等统一字段。
+        """
+        if len(subtasks) == 1:
+            # ---- 单 Agent 模式 ----
+            task = subtasks[0]
+            agent_id = task.get("assigned_agent")
+            agent = self._get_agent_by_id(agent_id)
+            if agent is None:
+                logger.warning(f"Unknown agent_id: {agent_id}, fallback to ConsultationAgent")
+                agent = self.consultation_agent
+                agent_id = self.consultation_agent.agent_id
+
+            logger.info(f"Route: Single Agent ({agent_id})")
+            publish_fn = (lambda event: self.event_callback(event)) if self.event_callback else None
+
+            subtask_obj = SubTask(
+                id=task.get("id", "single"),
+                type=task.get("type", "general"),
+                description=task.get("description", question),
+                assigned_agent=agent_id,
+                status=TaskStatus.PENDING,
+            )
+            sub_session_id = f"{session_id}:{agent_id}:{subtask_obj.id}"
+
+            branch_data = await self._execute_branch_with_agent(
+                agent=agent, subtask=subtask_obj,
+                session_id=session_id, sub_session_id=sub_session_id,
+                question=question, agent_id=agent_id, publish_fn=publish_fn,
+            )
+            self._save_session_summary(
+                session_id=session_id, question=question, agent_id=agent_id,
+                final_answer=branch_data['final_answer'],
+                start_time=start_time, usage=branch_data['token_usage'],
+                message_count=branch_data['message_count'],
+            )
+
+            result = branch_data['result']
+            result.update({
+                'swarm_enabled': False,
+                'session_id': session_id,
+                'route_reason': f'单任务路由到 {agent_id}',
+                'usage': branch_data['token_usage'],
+                'agents_involved': [agent_id],
+                'mode': 'single_agent',
+            })
+            # 确保字段一致性
+            if 'disclaimer' not in result:
+                result['disclaimer'] = "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
+            if 'suggestions' not in result:
+                result['suggestions'] = []
+
+            return result
+
+        elif len(subtasks) >= 2:
+            # ---- Swarm 模式 ----
+            logger.info(f"Route: Swarm (Multi-Agent Collaboration) - {len(subtasks)} tasks")
+            self.ltm_save_task = None
+            result = await self._process_with_swarm(
+                question=question, context=enhanced_context,
+                assessment={"subtasks": subtasks},
+                session_id=session_id, start_time=start_time,
+            )
+            # _process_with_swarm 内部已包含所有后置处理并返回完整 result
+            return result
+
+        else:
+            # ---- Fallback 降级模式 ----
+            logger.warning("No subtasks generated, fallback to ConsultationAgent")
+            agent = self.consultation_agent
+            agent_id = agent.agent_id
+            publish_fn = (lambda event: self.event_callback(event)) if self.event_callback else None
+
+            fallback_subtask = SubTask(
+                id="fallback", type="general", description=question,
+                assigned_agent=agent_id, status=TaskStatus.PENDING,
+            )
+            sub_session_id = f"{session_id}:{agent_id}:fallback"
+
+            branch_data = await self._execute_branch_with_agent(
+                agent=agent, subtask=fallback_subtask,
+                session_id=session_id, sub_session_id=sub_session_id,
+                question=question, agent_id=agent_id, publish_fn=publish_fn,
+            )
+            self._save_session_summary(
+                session_id=session_id, question=question, agent_id=agent_id,
+                final_answer=branch_data['final_answer'],
+                start_time=start_time, usage=branch_data['token_usage'],
+                message_count=branch_data['message_count'],
+            )
+
+            result = branch_data['result']
+            result.update({
+                'swarm_enabled': False,
+                'session_id': session_id,
+                'route_reason': '无可用子任务，降级到 ConsultationAgent',
+                'usage': branch_data['token_usage'],
+                'agents_involved': [agent_id],
+                'mode': 'fallback',
+            })
+            if 'disclaimer' not in result:
+                result['disclaimer'] = "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
+            if 'suggestions' not in result:
+                result['suggestions'] = []
+
+            return result
+
+    async def _finalize(
+        self,
+        result: Dict[str, Any],
+        question: str,
+        session_id: str,
+        start_time: datetime,
+        subtasks_count: int,
+        _trace_collector,
+    ) -> Dict[str, Any]:
+        """统一收尾：记忆保存 + LTM fire-and-forget + trace flush
+
+        适用于单 Agent 和 Fallback 模式；Swarm 模式已在 _process_with_swarm 内部完成收尾，
+        通过 _swarm_finalized 标记跳过。
+        """
+        if result.get('_swarm_finalized'):
+            return result
+
+        end_time = datetime.now()
+        mode = result.get('mode', 'single_agent')
+        usage = result.get('usage', {})
+        final_answer = result.get('answer', '')
+        total_tokens = usage.get('total_tokens', 0) if isinstance(usage, dict) else 0
+
+        result['total_time'] = (end_time - start_time).total_seconds()
+
+        self.ltm_save_task = asyncio.ensure_future(self._save_long_term_memory(
+            session_id=session_id, question=question, answer=final_answer,
+            metadata={
+                "mode": mode, "subtasks_count": subtasks_count,
+                "total_time": result['total_time'],
+                "total_tokens": total_tokens,
+            }
+        ))
+        result['_ltm_save_task'] = self.ltm_save_task
+
+        await self._flush_trace(_trace_collector, session_id, question, mode, result)
+        return result
+
+    # ===== Swarm 协作核心 =====
+
     async def _process_with_swarm(
         self,
         question: str,
@@ -489,10 +481,9 @@ class SwarmCoordinator:
         if self.event_callback:
             shared_context.on_event_callback = self.event_callback
 
-        # 附加 SharedContext 到所有 Worker + 注入 thinking 回调
+        # 附加 SharedContext 到所有 Worker（thinking 回调由 _worker_execute_assigned_tasks 中的 callback_scope 管理）
         for worker in self.worker_pool:
             worker.attach_shared_context(shared_context)
-            self._inject_thinking_callbacks(worker, shared_context.publish_event)
 
         # 发布 Swarm 启动事件
         shared_context.publish_event(Event(
@@ -528,16 +519,22 @@ class SwarmCoordinator:
                 logger.error(f"Worker task failed with exception: {exc}")
 
         if timeout_occurred:
-            logger.warning("Swarm execution timeout (90s)")
+            logger.warning(f"Swarm execution timeout (90s), {len(pending)}/{len(tasks)} workers incomplete")
             for task in pending:
                 task.cancel()
+            # 等待已取消的 Worker 返回中间结果（CancelledError 处理会在 AgentLoop 中写入部分结果）
+            for task in pending:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             completed_agents = list(shared_context.agent_contributions.keys())
             claimed_tasks = [
                 (subtask.assigned_to, subtask.type)
                 for subtask in shared_context.task_decomposition.values()
                 if subtask.status.value == "claimed"
             ]
-            logger.info(f"Completed agents: {completed_agents}")
+            logger.info(f"Completed agents after timeout: {completed_agents}")
             logger.info(f"Timed out tasks: {claimed_tasks}")
 
         # Step 3: LeadAgent 汇总结果
@@ -647,6 +644,7 @@ class SwarmCoordinator:
         )
         result['_ltm_save_task'] = self.ltm_save_task
 
+        result['_swarm_finalized'] = True  # 标记已在 _process_with_swarm 内完成收尾
         return result
 
     async def _worker_execute_assigned_tasks(
@@ -659,25 +657,26 @@ class SwarmCoordinator:
 
         简化后的流程：
         - 查找分配给自己的任务
-        - 执行任务
+        - 在 callback_scope 内执行（自动注入/清理 thinking 回调）
         - 记录结果
         """
-        try:
-            # 获取分配给该 Agent 的任务
-            assigned_tasks = shared_context.get_subtasks_for_agent(worker.agent_id)
+        async with self.callback_scope(worker, shared_context.publish_event):
+            try:
+                # 获取分配给该 Agent 的任务
+                assigned_tasks = shared_context.get_subtasks_for_agent(worker.agent_id)
 
-            if not assigned_tasks:
-                logger.debug(f"{worker.agent_id}: No assigned tasks")
-                return
+                if not assigned_tasks:
+                    logger.debug(f"{worker.agent_id}: No assigned tasks")
+                    return
 
-            # 串行执行所有分配的任务（同一 worker 共享 agent 状态，不能并行）
-            for subtask in assigned_tasks:
-                logger.info(f"{worker.agent_id}: Starting {subtask.type}")
-                shared_context.start_subtask(subtask.id)
-                await self._execute_single_subtask(worker, subtask, shared_context)
+                # 串行执行所有分配的任务（同一 worker 共享 agent 状态，不能并行）
+                for subtask in assigned_tasks:
+                    logger.info(f"{worker.agent_id}: Starting {subtask.type}")
+                    shared_context.start_subtask(subtask.id)
+                    await self._execute_single_subtask(worker, subtask, shared_context)
 
-        except Exception as e:
-            logger.error(f"{worker.agent_id}: Error processing subtask: {e}")
+            except Exception as e:
+                logger.error(f"{worker.agent_id}: Error processing subtask: {e}")
 
     async def _execute_single_subtask(self, worker, subtask, shared_context):
         """执行单个子任务（使用子会话隔离）"""
@@ -1046,6 +1045,79 @@ class SwarmCoordinator:
         worker.set_on_thinking_done(None)
         worker.set_on_content_token(None)
         worker.set_on_questionnaire(None)
+
+    # --- Thinking 回调上下文管理器 ---
+
+    @asynccontextmanager
+    async def callback_scope(self, worker, publish_fn):
+        """注入 thinking 回调的上下文管理器，退出时自动清理
+
+        Usage:
+            async with self.callback_scope(worker, publish_fn):
+                await worker.process_subtask(...)
+        """
+        if not publish_fn or not hasattr(worker, 'set_on_thinking'):
+            yield
+            return
+        try:
+            self._inject_thinking_callbacks(worker, publish_fn)
+            yield
+        finally:
+            self._cleanup_thinking_callbacks(worker)
+
+    # --- 分支执行共用方法（P1-7 去重）---
+
+    async def _execute_branch_with_agent(
+        self, agent, subtask, session_id, sub_session_id,
+        question, agent_id, publish_fn,
+    ):
+        """执行单个 Agent 分支（单Agent / Fallback 模式共用）
+
+        封装：callback_scope → execute → extract → STM 保存
+        """
+        async with self.callback_scope(agent, publish_fn):
+            result = await self._execute_single_agent_traced(
+                agent, subtask, session_id, sub_session_id
+            )
+
+        final_answer = result.get('answer', '')
+        token_usage = result.get('usage', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
+        message_count = result.get('message_count', 0)
+
+        # 将用户问题和子会话结果合并回主会话
+        await self.short_term_memory.add_message(
+            session_id=session_id, role="user", content=question,
+        )
+        self.short_term_memory.merge_sub_session(
+            main_session_id=session_id,
+            sub_session_id=sub_session_id,
+            summary_text=final_answer if final_answer else "",
+        )
+
+        return {
+            'final_answer': final_answer,
+            'token_usage': token_usage,
+            'message_count': message_count,
+            'result': result,
+        }
+
+    def _save_session_summary(
+        self, session_id, question, agent_id, final_answer,
+        start_time, usage, message_count,
+    ):
+        """保存单 Agent / Fallback 模式的 SessionSummary"""
+        try:
+            end_time = datetime.now()
+            summary = SessionSummary.from_single_agent(
+                session_id=session_id, question=question, agent_id=agent_id,
+                final_answer=final_answer, start_time=start_time, end_time=end_time,
+                usage=usage, total_messages=message_count,
+            )
+            self.session_manager.save_summary(summary)
+        except Exception as e:
+            logger.error(f"Failed to save session summary: {e}")
+
+    # --- 建议提取 ---
 
     def _extract_suggestions(self, final_answer: str) -> List[str]:
         """从最终答案中提取建议（简化实现）"""

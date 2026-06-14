@@ -4,6 +4,7 @@ Agent循环引擎
 支持短期记忆集成
 支持约束验证（Harness Engineering）
 """
+import asyncio
 import uuid
 import json
 import time
@@ -439,6 +440,24 @@ class AgentLoop:
                         state.mark_completed(result)
                         break
 
+                except asyncio.CancelledError:
+                    _iter_ctx.__exit__(None, None, None)
+                    logger.info(f"AgentLoop cancelled for task {task_id} (iteration {state.iteration})")
+                    if state.iteration > 0:
+                        state.mark_completed({
+                            "answer": "（回答生成被中断，以下为部分结果）",
+                            "partial": True,
+                            "status": "cancelled",
+                            "iterations": state.iteration,
+                            "usage": {
+                                "prompt_tokens": total_prompt_tokens,
+                                "completion_tokens": total_completion_tokens,
+                                "total_tokens": total_tokens,
+                            },
+                            "message_count": message_count,
+                        })
+                        return state.final_result
+                    raise
                 except Exception as e:
                     _iter_ctx.__exit__(type(e), e, e.__traceback__)
                     logger.error(f"Error in iteration {state.iteration}: {e}")

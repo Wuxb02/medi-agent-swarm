@@ -7,6 +7,7 @@ LeadAgent：任务分解和结果汇总
 - 不直接调用 Worker
 - Worker 自主认领任务并执行
 """
+import asyncio
 import uuid
 import json
 import re
@@ -92,6 +93,7 @@ class LeadAgent:
         context: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
         event_callback: Optional[Any] = None,
+        clarify_timeout: float = 30.0,
     ) -> Dict[str, Any]:
         """
         信息澄清阶段：通过结构化问卷收集用户背景信息
@@ -104,12 +106,14 @@ class LeadAgent:
             context: 已有上下文（记忆等）
             session_id: 会话 ID
             event_callback: 事件回调（用于推送问卷到前端）
+            clarify_timeout: 问卷等待超时秒数（默认 30s）
 
         Returns:
             {
-                "clarified": bool,       # 是否进行了澄清
-                "collected_info": str,    # 收集到的信息文本（用于后续注入）
-                "raw_answers": dict,      # 原始答案字典
+                "clarified": bool,        # 是否进行了澄清
+                "collected_info": str,     # 收集到的信息文本（用于后续注入）
+                "raw_answers": dict,       # 原始答案字典
+                "timeout_skipped": bool,   # 是否因超时跳过（区分于 LLM 判断无需澄清）
             }
         """
         if not self.questionnaire_manager:
@@ -191,10 +195,18 @@ class LeadAgent:
             # 等待用户回答
             try:
                 answers = await self.questionnaire_manager.create_pending(
-                    questionnaire_id, timeout=300.0
+                    questionnaire_id, timeout=clarify_timeout
                 )
+            except asyncio.TimeoutError:
+                logger.warning(f"LeadAgent clarify: 问卷超时（{clarify_timeout}s），跳过澄清")
+                return {
+                    "clarified": False,
+                    "collected_info": "",
+                    "raw_answers": {},
+                    "timeout_skipped": True,
+                }
             except Exception:
-                logger.warning(f"LeadAgent clarify: 问卷超时，跳过澄清")
+                logger.warning(f"LeadAgent clarify: 问卷异常，跳过澄清")
                 break
 
             formatted = format_answers_for_llm(questions, answers)
