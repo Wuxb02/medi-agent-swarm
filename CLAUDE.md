@@ -35,10 +35,12 @@ uv run python api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
 # 运行测试（231 个单元测试 + 20 个集成测试）
-pytest test/ -m "unit"                     # 仅单元测试（快速，无需外部服务）
-pytest test/ -m "integration" --run-integration  # 集成测试（需 LLM/Milvus/Mem0）
-pytest test/ --run-integration             # 全部测试
-pytest test/ -m "unit" --cov --cov-report=html  # 覆盖率报告
+# 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
+# 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
+pytest test/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
+pytest test/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
+pytest test/ --run-integration                        # 全部测试
+pytest test/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
 python -m eval.runner --metrics all

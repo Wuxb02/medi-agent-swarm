@@ -12,11 +12,14 @@ import pytest
 
 # ============================================================
 # 环境变量（autouse，确保 LLMClient 等不因缺 env 崩溃）
+# 集成测试使用真实 .env 配置，单元测试注入伪变量
 # ============================================================
 
 @pytest.fixture(autouse=True)
-def setup_env(monkeypatch):
-    """为所有测试自动设置伪环境变量。"""
+def setup_env(request, monkeypatch):
+    """单元测试注入伪环境变量；集成测试保留真实 .env 配置。"""
+    if request.node.get_closest_marker("integration"):
+        return  # 集成测试使用真实 .env
     monkeypatch.setenv("LLM_API_KEY", "test-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://test-api.example.com/v1")
     monkeypatch.setenv("LLM_MODEL_NAME", "test-model")

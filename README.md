@@ -244,18 +244,20 @@ python knowledge/scripts/import_hardcoded_data.py
 
 ### 5. 运行测试
 
+集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
+
 ```bash
 # 单元测试（231 个，无需外部服务，秒级完成）
-pytest test/ -m "unit"
+pytest test/ -m "not integration"
 
-# 集成测试（20 个，需 LLM/Milvus/Mem0）
+# 集成测试（20 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
 pytest test/ -m "integration" --run-integration
 
 # 全部测试
 pytest test/ --run-integration
 
 # 覆盖率报告
-pytest test/ -m "unit" --cov --cov-report=html
+pytest test/ -m "not integration" --cov --cov-report=html
 ```
 
 ### 6. 开始使用
@@ -799,7 +801,7 @@ AgentLoop.run()
 
 运行单元测试套件（无需外部服务）：
 ```bash
-pytest test/ -m "unit"
+pytest test/ -m "not integration"
 ```
 
 ## 📊 评估框架
