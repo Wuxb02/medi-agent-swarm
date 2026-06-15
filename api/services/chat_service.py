@@ -34,20 +34,59 @@ except ImportError:
 
 # 问卷管理器注册表（session_id → QuestionnaireManager）
 _managers: Dict[str, QuestionnaireManager] = {}
+_manager_last_activity: Dict[str, float] = {}
+
+_TTL_SECONDS = 600  # 10 分钟未活动自动清理
+_MAX_MANAGERS = 1000  # 最大条目数，超出 LRU 淘汰
+
+
+def _cleanup_one(session_id: str):
+    """清理单个 session 的管理器"""
+    _manager_last_activity.pop(session_id, None)
+    mgr = _managers.pop(session_id, None)
+    if mgr:
+        mgr.cancel_all()
+
+
+def _cleanup_expired(now: float):
+    """删除所有超过 TTL 未活动的条目"""
+    expired = [
+        sid for sid, ts in _manager_last_activity.items()
+        if now - ts > _TTL_SECONDS
+    ]
+    for sid in expired:
+        logger.debug(f"QuestionnaireManager TTL expired: {sid}")
+        _cleanup_one(sid)
 
 
 def get_manager(session_id: str) -> QuestionnaireManager:
-    """获取或创建会话的问卷管理器"""
-    if session_id not in _managers:
-        _managers[session_id] = QuestionnaireManager()
+    """获取或创建会话的问卷管理器（自动 TTL 清理 + LRU 淘汰）"""
+    import time
+    now = time.time()
+
+    # 1. TTL 过期清理
+    _cleanup_expired(now)
+
+    # 2. 已存在则更新活动时间并返回
+    if session_id in _managers:
+        _manager_last_activity[session_id] = now
+        return _managers[session_id]
+
+    # 3. 数量上限控制：LRU 淘汰最久未活动的条目
+    if len(_managers) >= _MAX_MANAGERS:
+        lru_sid = min(_manager_last_activity, key=_manager_last_activity.get)
+        logger.warning(f"QuestionnaireManager LRU eviction: {lru_sid}")
+        _cleanup_one(lru_sid)
+
+    # 4. 创建新管理器
+    _managers[session_id] = QuestionnaireManager()
+    _manager_last_activity[session_id] = now
     return _managers[session_id]
 
 
 def remove_manager(session_id: str):
     """清理会话的问卷管理器"""
-    manager = _managers.pop(session_id, None)
-    if manager:
-        manager.cancel_all()
+    _cleanup_one(session_id)
 
 
 class EventBridge:

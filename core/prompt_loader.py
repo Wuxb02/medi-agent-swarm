@@ -4,7 +4,7 @@ Prompt 模板加载器
 基于 Jinja2 的集中式 prompt 管理，所有 prompt 模板存放在 prompt/ 目录下。
 """
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from jinja2 import Environment, FileSystemLoader
 from loguru import logger
 
@@ -16,6 +16,8 @@ class PromptLoader:
     """集中式 Jinja2 prompt 模板加载器"""
 
     _env: Optional[Environment] = None
+    _template_cache: Dict[str, Any] = {}
+    _cache_enabled: bool = True
 
     @classmethod
     def _get_env(cls) -> Environment:
@@ -25,6 +27,7 @@ class PromptLoader:
             cls._env = Environment(
                 loader=FileSystemLoader(str(_PROMPT_DIR)),
                 autoescape=False,
+                auto_reload=True,
                 keep_trailing_newline=True,
                 trim_blocks=False,
                 lstrip_blocks=False,
@@ -43,8 +46,13 @@ class PromptLoader:
         Returns:
             渲染后的字符串
         """
-        env = cls._get_env()
-        template = env.get_template(template_path)
+        if cls._cache_enabled and template_path in cls._template_cache:
+            template = cls._template_cache[template_path]
+        else:
+            env = cls._get_env()
+            template = env.get_template(template_path)
+            if cls._cache_enabled:
+                cls._template_cache[template_path] = template
         return template.render(**kwargs)
 
     @classmethod
@@ -56,3 +64,26 @@ class PromptLoader:
     def exists(cls, template_path: str) -> bool:
         """检查模板文件是否存在"""
         return (_PROMPT_DIR / template_path).is_file()
+
+    @classmethod
+    def invalidate_cache(cls, template_path: Optional[str] = None):
+        """清除模板缓存
+
+        Args:
+            template_path: 指定清除的模板路径，为 None 时清除全部缓存
+        """
+        if template_path:
+            cls._template_cache.pop(template_path, None)
+        else:
+            cls._template_cache.clear()
+
+    @classmethod
+    def disable_cache(cls):
+        """禁用模板缓存（开发/调试用）"""
+        cls._cache_enabled = False
+        cls._template_cache.clear()
+
+    @classmethod
+    def enable_cache(cls):
+        """启用模板缓存"""
+        cls._cache_enabled = True

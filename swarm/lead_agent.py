@@ -279,28 +279,61 @@ class LeadAgent:
         ]
 
         try:
-            content = await self.llm_client.chat(messages)
+            content = await self.llm_client.chat(
+                messages,
+                response_format={'type': 'json_object'}
+            )
 
             logger.debug(f"LeadAgent assessment: {content[:200]}...")
 
             import json
-            import re
 
-            # 尝试提取 JSON
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                return result
+            try:
+                result = json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.warning(f"LeadAgent JSON 解析失败: {e}, content={content[:200]}")
+                return {
+                    "subtasks": [{
+                        "type": "knowledge_search",
+                        "description": "回答用户问题",
+                        "assigned_agent": "consultation_agent"
+                    }],
+                    "reason": "无法解析 LLM 响应，默认使用 ConsultationAgent",
+                    "_parse_error": str(e),
+                }
 
-            # 回退：假设是简单问题，交给 ConsultationAgent
-            return {
-                "subtasks": [{
-                    "type": "knowledge_search",
-                    "description": "回答用户问题",
-                    "assigned_agent": "consultation_agent"
-                }],
-                "reason": "无法解析 LLM 响应，默认使用 ConsultationAgent"
-            }
+            # JSON Schema 校验
+            if not isinstance(result, dict) or "subtasks" not in result:
+                logger.warning(f"LeadAgent 输出不符合 Schema，回退: {str(result)[:200]}")
+                return {
+                    "subtasks": [{
+                        "type": "knowledge_search",
+                        "description": "回答用户问题",
+                        "assigned_agent": "consultation_agent"
+                    }],
+                    "reason": "LLM 输出不符合预期格式，默认使用 ConsultationAgent",
+                    "_schema_violation": True,
+                }
+
+            # 校验每个 subtask 的必需字段
+            for i, st in enumerate(result.get("subtasks", [])):
+                if not isinstance(st, dict):
+                    logger.warning(f"LeadAgent subtask[{i}] 非 dict，回退")
+                    return {
+                        "subtasks": [{
+                            "type": "knowledge_search",
+                            "description": "回答用户问题",
+                            "assigned_agent": "consultation_agent"
+                        }],
+                        "reason": "subtask 格式异常，默认使用 ConsultationAgent",
+                        "_schema_violation": True,
+                    }
+                # 确保必需字段存在
+                st.setdefault("type", "knowledge_search")
+                st.setdefault("description", "回答用户问题")
+                st.setdefault("assigned_agent", "consultation_agent")
+
+            return result
 
         except Exception as e:
             logger.error(f"LeadAgent assessment error: {e}")

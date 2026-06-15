@@ -7,5 +7,18 @@
 {% endif %}{% if recent_history %}## 近期对话历史
 {% for msg in recent_history %}[{{ msg.role }}] {{ msg.content }}
 {% endfor %}{% endif %}{% if historical_cases %}## 历史相似案例
-{% for case in historical_cases %}- {{ case.summary }}（相似度: {{ "%.2f"|format(case.score) }})
+{% for case in historical_cases %}- {{ case.summary }}（相似度: {{ "%.2f"|format(case.score) }}）
 {% endfor %}{% endif %}
+
+## 输出格式
+请严格按照以下 JSON 格式输出，不要输出其他内容（不要用 Markdown 代码块包裹）：
+{
+  "subtasks": [
+    {
+      "type": "knowledge_search | risk_assessment | diagnosis | research",
+      "description": "子任务描述",
+      "assigned_agent": "consultation_agent | diagnostic_agent | research_agent"
+    }
+  ],
+  "reason": "任务分解的原因说明"
+}

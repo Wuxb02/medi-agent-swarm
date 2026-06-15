@@ -266,6 +266,55 @@ class LLMClient:
             logger.error(f"LLM call with tools failed: {e}")
             raise
 
+    async def chat_with_tools_retry(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: str = "auto",
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        **kwargs
+    ) -> LLMResponse:
+        """带指数退避重试的工具调用
+
+        - HTTP 4xx（除 429）: 不重试
+        - HTTP 5xx / 网络错误 / 超时 / 429: 重试
+        - 指数退避: base_delay * 2^attempt
+
+        Args:
+            max_retries: 最大重试次数（含首次，共 max_retries 次尝试）
+            base_delay: 基础退避延迟（秒）
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return await self.chat_with_tools(
+                    messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs
+                )
+            except Exception as e:
+                last_error = e
+                if not _is_retryable(e):
+                    raise
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"LLM call failed after {max_retries} retries: {e}"
+                    )
+                    raise
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"LLM call retry {attempt + 1}/{max_retries - 1} "
+                    f"after {delay:.1f}s: {e}"
+                )
+                await asyncio.sleep(delay)
+        raise last_error  # type: ignore[misc]
+
     async def chat_with_tools_stream(
         self,
         messages: List[Dict[str, Any]],
@@ -445,3 +494,30 @@ class LLMClient:
             "name": tool_name,
             "content": json.dumps(result, ensure_ascii=False)
         }
+
+
+def _is_retryable(error: Exception) -> bool:
+    """判断 LLM 调用异常是否可重试
+
+    - HTTP 429 (Rate Limit): 可重试
+    - HTTP 5xx / 网络错误 / 超时: 可重试
+    - HTTP 4xx (除 429): 不可重试（客户端错误）
+    """
+    error_str = str(error).lower()
+
+    # 429 Rate Limit 可重试
+    if '429' in error_str:
+        return True
+
+    # 4xx 客户端错误不重试
+    _non_retryable_codes = ['400', '401', '403', '404', '422']
+    if any(code in error_str for code in _non_retryable_codes):
+        return False
+
+    # 5xx / 网络 / 超时 可重试
+    _retryable_keywords = [
+        '500', '502', '503', '504',
+        'timeout', 'connection', 'reset', 'refused',
+        'internal', 'unavailable', 'rate limit',
+    ]
+    return any(kw in error_str for kw in _retryable_keywords)

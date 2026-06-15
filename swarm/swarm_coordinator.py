@@ -82,6 +82,10 @@ class SwarmCoordinator:
         self.personal_profile = PersonalProfile()
         self.ltm_save_task = None
 
+        # 熔断器：连续 5 次 LLM 错误后拒绝新请求 30s
+        from core.circuit_breaker import CircuitBreaker
+        self.cb = CircuitBreaker(failure_threshold=5, cooldown_seconds=30.0)
+
         # 将短期记忆和用户档案注入到所有 Worker Agent 的 Loop
         # 注意：LeadAgent 不继承 BaseAgent，没有 loop 属性，不需要注入
         personal_text = self.personal_profile.to_text()
@@ -858,7 +862,8 @@ class SwarmCoordinator:
                 self.llm_client.chat(
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.2,
-                    max_tokens=1024,
+                    max_tokens=2048,
+                    response_format={'type': 'json_object'},
                 ),
                 timeout=60.0,
             )
@@ -869,14 +874,10 @@ class SwarmCoordinator:
             logger.warning(f"Memory eval LLM failed: {e}, session={session_id}")
             return None
 
-        # 4. 解析 JSON
+        # 4. 解析 JSON（response_format 已保证合法 JSON 输出）
         try:
-            text = response.strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1]
-                text = text.rsplit("```", 1)[0]
-            result = json.loads(text.strip())
-        except (json.JSONDecodeError, IndexError) as e:
+            result = json.loads(response)
+        except json.JSONDecodeError as e:
             logger.warning(f"Memory eval JSON parse failed: {e}, session={session_id}")
             return None
 
