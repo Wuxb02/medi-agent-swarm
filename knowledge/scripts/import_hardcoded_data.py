@@ -51,16 +51,28 @@ def load_documents_from_directory(doc_dir: Path) -> list:
             disease_name = parts[2] if len(parts) > 2 else ""
 
             # 确定文档类型和元数据
-            if file_num.startswith('0') and int(file_num) < 10:
-                # 01-09: 生活方式建议
+            # 优先使用文件名中的类型关键词（更可靠）
+            type_from_name = parts[1] if len(parts) > 1 else ""
+            if type_from_name == "lifestyle":
+                doc_type = "lifestyle"
+                source = "生活方式建议数据库"
+            elif type_from_name == "symptoms":
+                doc_type = "lifestyle"
+                source = "生活方式建议数据库"
+            elif type_from_name == "icd10":
+                doc_type = "disease_classification"
+                source = "ICD-10疾病编码数据库"
+            elif type_from_name == "guideline":
+                doc_type = "clinical_guideline"
+                source = "临床指南数据库"
+            # 回退：使用数字范围判断（兼容旧命名）
+            elif file_num.startswith('0') and int(file_num) < 10:
                 doc_type = "lifestyle"
                 source = "生活方式建议数据库"
             elif 10 <= int(file_num) < 20:
-                # 10-19: ICD-10疾病编码
                 doc_type = "disease_classification"
                 source = "ICD-10疾病编码数据库"
             elif 20 <= int(file_num) < 30:
-                # 20-29: 临床指南
                 doc_type = "clinical_guideline"
                 source = "临床指南数据库"
             else:

@@ -68,6 +68,9 @@ memory/profile/*
 
 .claude/settings.local.json
 
+# 医学知识文档（由生成脚本管理，不纳入版本控制）
+knowledge/data/documents/*.txt
+
 # 测评
 eval/data/*.json
 eval/reports/*.md

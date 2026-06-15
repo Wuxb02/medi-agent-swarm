@@ -238,8 +238,22 @@ MEM0_API_KEY=m0-your-api-key-here
 
 ### 4. 初始化知识库
 
+首次使用前需将医学知识文档导入 Milvus 向量数据库：
+
 ```bash
+# 追加导入
 python knowledge/scripts/import_hardcoded_data.py
+
+# 清空后重新导入
+python knowledge/scripts/import_hardcoded_data.py --clean
+```
+
+如需批量生成更多知识文档，可执行生成脚本：
+
+```bash
+python knowledge/scripts/gen_part1_lifestyle_symptom.py  # 30 份生活方式 + 15 份症状识别
+python knowledge/scripts/gen_part2_icd10.py              # 25 份 ICD-10 编码
+python knowledge/scripts/gen_part3_guidelines.py          # 30 份临床指南
 ```
 
 ### 5. 运行测试
@@ -920,7 +934,8 @@ disclaimer = PromptLoader.render(
 - **向量数据库**: Milvus Lite（本地文件，无需服务器）
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
 - **数据存储**: `knowledge/data/documents/` (txt 文档)
-- **初始化**: `python knowledge/scripts/import_hardcoded_data.py`
+- **初始化**: `python knowledge/scripts/import_hardcoded_data.py`（--clean 清空后重导）
+- **文档生成**: `knowledge/scripts/gen_part*.py` 可批量生成新文档（生活方式/症状/ICD-10编码/临床指南共 84+ 份）
 
 ### 知识库管理功能
 
