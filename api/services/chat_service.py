@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, AsyncGenerator, List
 from datetime import datetime
 from loguru import logger
 
+from starlette.requests import Request as StarletteRequest
+
 from swarm.swarm_coordinator import SwarmCoordinator
 from swarm.events import Event
 from api.models.chat import ChatRequest, ChatResponse
@@ -150,14 +152,17 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
     )
 
 
-async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
+async def chat_stream(
+    chat_req: ChatRequest,
+    http_request: StarletteRequest,
+) -> AsyncGenerator[str, None]:
     """流式问答（换行分隔 JSON）
 
     支持客户端断开时自动取消后台处理任务，避免浪费 LLM token。
     """
     bridge = EventBridge()
 
-    session_id = request.session_id or (
+    session_id = chat_req.session_id or (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     )
 
@@ -196,8 +201,8 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
 
     process_task = asyncio.create_task(
         coordinator.process(
-            question=request.question,
-            context=request.context,
+            question=chat_req.question,
+            context=chat_req.context,
             session_id=session_id
         )
     )
@@ -206,43 +211,137 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
     async def _wait_for_disconnect():
         """等待客户端断开连接"""
         while True:
-            if await request.is_disconnected():
+            if await http_request.is_disconnected():
                 return
             await asyncio.sleep(0.1)
 
     disconnect_task = asyncio.create_task(_wait_for_disconnect())
 
     # 3. 持续从队列读取事件并发送（同时监控断开和完成）
+    #
+    # thinking 批量缓冲：避免每个 reasoning token 都生成一条 SSE 事件，
+    # 改为按 agent+iteration 聚合，每隔 THINK_FLUSH_INTERVAL 秒或缓冲区
+    # 达到阈值时批量发送，大幅减少事件数量和网络往返。
+    import time as _time
+    THINK_FLUSH_INTERVAL = 0.08      # 80ms 批量间隔
+    THINK_FLUSH_MIN_CHARS = 20       # 累积至少 20 字符再发送（避免首字符延迟感）
+    _think_buf: Dict[str, Dict[str, Any]] = {}  # key="agent_id:iteration" → {content, agent, iteration, ts}
+    _last_think_flush = _time.monotonic()
+
+    def _flush_think_buffer(force: bool = False):
+        """将缓冲的 thinking token 合并为批量事件并 yield 到外层 generator"""
+        nonlocal _last_think_flush
+        now = _time.monotonic()
+        for key, entry in list(_think_buf.items()):
+            text = entry["content"]
+            if not text:
+                del _think_buf[key]
+                continue
+            # 非强制刷新时：间隔未到且字符数不足则跳过
+            if not force and now - _last_think_flush < THINK_FLUSH_INTERVAL and len(text) < THINK_FLUSH_MIN_CHARS:
+                continue
+            # 合并为一个批量 thinking 事件
+            batch_dict = {
+                "source_agent": entry["agent"],
+                "data": {"content": text, "iteration": entry["iteration"]},
+                "timestamp": datetime.now().isoformat(),
+            }
+            # 使用闭包捕获当前值（非局部变量引用在 generator 中安全）
+            _yield_event("agent_thinking", batch_dict)
+            del _think_buf[key]
+        if force or not _think_buf:
+            _last_think_flush = now
+
+    # 收集 _yield_event 闭包捕获的待发送事件列表
+    _pending_yields: List[tuple] = []
+
+    def _yield_event(evt_name: str, evt_data: Dict[str, Any]):
+        """将事件加入待发送列表（在 _drain_one 中统一 yield）"""
+        _pending_yields.append((evt_name, evt_data))
+
+    def _drain_one(event: Event):
+        """处理单个事件：映射类型 → 加入待发送列表或缓冲"""
+        mapped_type = _map_event_type(event.type.value)
+
+        # content_delta 不发送（答案在 done 事件中整体返回）
+        if mapped_type == "agent_content_delta":
+            return
+
+        # thinking 事件进入批量缓冲
+        if mapped_type == "agent_thinking":
+            d = event.data
+            agent = event.source_agent
+            iteration = d.get("iteration", 0)
+            key = f"{agent}:{iteration}"
+            if key not in _think_buf:
+                _think_buf[key] = {"content": "", "agent": agent, "iteration": iteration}
+            _think_buf[key]["content"] += d.get("content", "")
+            # 达到阈值或 thinking_done 后强制刷新
+            total_chars = len(_think_buf[key]["content"])
+            if total_chars >= THINK_FLUSH_MIN_CHARS or _time.monotonic() - _last_think_flush >= THINK_FLUSH_INTERVAL:
+                _flush_think_buffer(force=False)
+            return
+
+        # 非 thinking 事件到达时，先刷新 thinking 缓冲（保证时序）
+        _flush_think_buffer(force=True)
+
+        if mapped_type == "agent_questionnaire":
+            _yield_event("agent_questionnaire", event.to_dict())
+            return
+
+        _yield_event(mapped_type, event.to_dict())
+
     result = None
     disconnected = False
+
+    # 主事件循环：高效并发等待 queue.get / process_task / disconnect_task
     while not process_task.done() and not disconnect_task.done():
+        get_event = asyncio.ensure_future(bridge.queue.get())
         done, _ = await asyncio.wait(
-            [process_task, disconnect_task],
-            timeout=0.5,
+            [get_event, process_task, disconnect_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
         if disconnect_task in done:
+            get_event.cancel()
             disconnected = True
             break
         if process_task in done:
+            get_event.cancel()
             break
-        # 从 bridge 队列读取事件并 yield
-        try:
-            event = await asyncio.wait_for(bridge.queue.get(), timeout=0.1)
-            mapped_type = _map_event_type(event.type.value)
-            if mapped_type == "agent_content_delta":
-                continue
-            event_dict = event.to_dict()
-            if event.type.value == "agent_questionnaire":
-                yield _json_line("agent_questionnaire", event_dict)
-                collected_events.append({"event": "agent_questionnaire", "data": event_dict})
-                continue
-            yield _json_line(mapped_type, event_dict)
-            collected_events.append({"event": mapped_type, "data": event_dict})
-        except asyncio.TimeoutError:
-            continue
 
-    # 4. 处理断开情况
+        # 处理从队列取到的事件
+        event = get_event.result()
+        _drain_one(event)
+
+        # 定期刷新 thinking 缓冲（时间驱动）
+        if _think_buf and _time.monotonic() - _last_think_flush >= THINK_FLUSH_INTERVAL:
+            _flush_think_buffer(force=True)
+
+        # yield 所有待发送事件
+        for evt_name, evt_data in _pending_yields:
+            json_line = _json_line(evt_name, evt_data)
+            collected_events.append({"event": evt_name, "data": evt_data})
+            yield json_line
+        _pending_yields.clear()
+
+    # 4. 排空队列中残留的事件（process 完成但队列未空）
+    if not disconnected:
+        _flush_think_buffer(force=True)  # 先刷新 thinking 缓冲
+        while not bridge.queue.empty():
+            try:
+                event = bridge.queue.get_nowait()
+                _drain_one(event)
+            except asyncio.QueueEmpty:
+                break
+        _flush_think_buffer(force=True)  # 再次刷新（可能新事件产生了 thinking）
+        # yield 排空阶段的事件
+        for evt_name, evt_data in _pending_yields:
+            json_line = _json_line(evt_name, evt_data)
+            collected_events.append({"event": evt_name, "data": evt_data})
+            yield json_line
+        _pending_yields.clear()
+
+    # 5. 处理断开情况
     if disconnected:
         logger.info(f"Client disconnected for session={session_id}, cancelling processing")
         process_task.cancel()
@@ -255,7 +354,7 @@ async def chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]:
         remove_manager(session_id)
         return
 
-    # 5. 正常完成：等待 process_task 结果
+    # 6. 正常完成：等待 process_task 结果
     disconnect_task.cancel()
     try:
         result = process_task.result()
