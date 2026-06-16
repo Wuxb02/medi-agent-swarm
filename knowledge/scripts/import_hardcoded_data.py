@@ -156,13 +156,6 @@ def main():
     if clean:
         logger.info("\n🗑️  清空旧数据...")
         kb.delete_collection()
-        # 重新创建 collection
-        kb.milvus_client.create_collection(
-            collection_name=kb.collection_name,
-            dimension=kb.embedding_dim,
-            metric_type="COSINE",
-            auto_id=True
-        )
         logger.info("已清空并重建 collection")
 
     # 导入数据

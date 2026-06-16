@@ -85,7 +85,7 @@
         </div>
         <div v-if="span.attributes.llm.output_content_summary" class="mt-2">
           <span class="text-xs text-slate-400">输出内容</span>
-          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-all">{{ span.attributes.llm.output_content_summary }}</pre>
+          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-all">{{ formatContent(span.attributes.llm.output_content_summary) }}</pre>
         </div>
       </template>
 
@@ -106,7 +106,7 @@
         </div>
         <div v-if="span.attributes.tool.result_summary" class="mt-1">
           <span class="text-xs text-slate-400">结果摘要</span>
-          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-60 overflow-y-auto whitespace-pre-wrap break-all">{{ span.attributes.tool.result_summary }}</pre>
+          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-60 overflow-y-auto whitespace-pre-wrap break-all">{{ formatContent(span.attributes.tool.result_summary) }}</pre>
         </div>
       </template>
 
@@ -173,4 +173,14 @@ const statusClass = computed(() =>
   props.span.status === 'timeout' ? 'text-amber-500 font-medium' :
   'text-green-500'
 )
+
+function formatContent(str: string | undefined | null): string {
+  if (!str) return ''
+  try {
+    const parsed = JSON.parse(str)
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return str
+  }
+}
 </script>

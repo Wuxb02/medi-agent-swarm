@@ -40,6 +40,7 @@ dependencies = [
     "aiohttp>=3.8.0",
     "httpx>=0.24.0",
     "milvus-lite>=2.5.1",
+    "jieba>=0.42",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "sse-starlette>=2.1.0",

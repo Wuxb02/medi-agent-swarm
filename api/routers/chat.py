@@ -1,5 +1,5 @@
 """问答路由"""
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from starlette.responses import StreamingResponse
 
 from api.models.chat import ChatRequest, ChatResponse, MessageHistory, MessageItem, AnswerRequest, AnswerResponse
@@ -15,10 +15,10 @@ async def chat(request: ChatRequest):
 
 
 @router.post("/stream")
-async def chat_stream_endpoint(request: ChatRequest):
+async def chat_stream_endpoint(chat_req: ChatRequest, http_request: Request):
     """流式问答（换行分隔 JSON）"""
     return StreamingResponse(
-        chat_stream(request),
+        chat_stream(chat_req, http_request),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",

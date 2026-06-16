@@ -153,17 +153,17 @@ def update_document(
     if not existing:
         raise ValueError(f"Document not found: {doc_id}")
 
-    # 从已有 chunk 的 metadata 中获取原始元数据
+    # 从已有 chunk 获取原始元数据
     old_meta_row = kb.milvus_client.query(
         collection_name=kb.collection_name,
-        filter=f'metadata like "%\\"doc_id\\": \\"{doc_id}\\"%"',
-        output_fields=["metadata"],
+        filter=f'doc_id == "{doc_id}"',
+        output_fields=["doc_type", "disease", "source", "filename"],
         limit=1
     )
-    old_meta = json.loads(old_meta_row[0]["metadata"]) if old_meta_row else {}
+    old_meta = old_meta_row[0] if old_meta_row else {}
 
     metadata = {
-        "type": doc_type or old_meta.get("type", "general"),
+        "type": doc_type or old_meta.get("doc_type", "general"),
         "disease": disease or old_meta.get("disease", ""),
         "source": source or old_meta.get("source", "用户上传"),
         "filename": old_meta.get("filename", ""),
