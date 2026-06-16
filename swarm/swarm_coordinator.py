@@ -10,6 +10,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 """
 import asyncio
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -353,6 +354,8 @@ class SwarmCoordinator:
             )
 
             result = branch_data['result']
+            # 将 AgentLoop 收集的 references 映射为 citations
+            result['citations'] = result.pop('references', [])
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
@@ -407,6 +410,8 @@ class SwarmCoordinator:
             )
 
             result = branch_data['result']
+            # 将 AgentLoop 收集的 references 映射为 citations
+            result['citations'] = result.pop('references', [])
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
@@ -541,6 +546,13 @@ class SwarmCoordinator:
             logger.info(f"Completed agents after timeout: {completed_agents}")
             logger.info(f"Timed out tasks: {claimed_tasks}")
 
+        # Step 2.5: 收集并统一所有 Worker 的知识库引用
+        # 跨 Worker 按 doc_id 去重，重新编号，替换贡献文本中的引用编号
+        swarm_citations, renumber_map = self._unify_swarm_references(shared_context)
+        if renumber_map:
+            # 替换各贡献文本中的引用编号为新编号
+            self._apply_renumber_map(shared_context, renumber_map)
+
         # Step 3: LeadAgent 汇总结果
         # 即使超时，也尝试汇总已完成的部分结果
         final_answer = await self.lead_agent.synthesize_results(
@@ -630,6 +642,7 @@ class SwarmCoordinator:
             'swarm_metadata': shared_context.get_summary(),
             'timeout_occurred': timeout_occurred,
             'usage': token_usage,
+            'citations': swarm_citations,
             'performance_metrics': {
                 'parallel_efficiency': summary.performance.parallel_efficiency,
                 'information_coverage': summary.performance.information_coverage,
@@ -1117,6 +1130,92 @@ class SwarmCoordinator:
             self.session_manager.save_summary(summary)
         except Exception as e:
             logger.error(f"Failed to save session summary: {e}")
+
+    # --- Swarm 引用统一 ---
+
+    def _unify_swarm_references(self, shared_context: "SharedContext") -> tuple:
+        """
+        收集所有 Worker 贡献中的知识库引用，按 doc_id 去重后重新编号。
+
+        Returns:
+            (citations, renumber_map): citations 为统一后的引用列表，
+            renumber_map 为 {agent_id: {old_index: new_index}} 映射
+        """
+        # Step 1: 收集所有 Worker 的 references
+        all_refs: Dict[str, Dict] = {}  # doc_id -> ref
+        agent_ref_map: Dict[str, List[Dict]] = {}  # agent_id -> [(old_index, doc_id)]
+
+        for agent_id, contributions in shared_context.agent_contributions.items():
+            agent_refs = []
+            for contrib in contributions:
+                refs = contrib.result.get("references", [])
+                for ref in refs:
+                    doc_id = ref.get("doc_id", "")
+                    if doc_id and doc_id not in all_refs:
+                        all_refs[doc_id] = ref
+                    if doc_id:
+                        agent_refs.append({"old_index": ref.get("index", 0), "doc_id": doc_id})
+            if agent_refs:
+                agent_ref_map[agent_id] = agent_refs
+
+        if not all_refs:
+            return [], {}
+
+        # Step 2: 按原始 index 排序后重新编号
+        sorted_refs = sorted(all_refs.values(), key=lambda r: r.get("index", 0))
+        citations = []
+        doc_to_new_index: Dict[str, int] = {}
+        for new_idx, ref in enumerate(sorted_refs, 1):
+            ref_copy = dict(ref)
+            ref_copy["index"] = new_idx
+            citations.append(ref_copy)
+            doc_to_new_index[ref.get("doc_id", "")] = new_idx
+
+        # Step 3: 构建 old_index -> new_index 映射（per agent）
+        renumber_map: Dict[str, Dict[int, int]] = {}
+        for agent_id, refs in agent_ref_map.items():
+            mapping = {}
+            for r in refs:
+                old_idx = r["old_index"]
+                doc_id = r["doc_id"]
+                new_idx = doc_to_new_index.get(doc_id, old_idx)
+                mapping[old_idx] = new_idx
+            renumber_map[agent_id] = mapping
+
+        return citations, renumber_map
+
+    def _apply_renumber_map(self, shared_context: "SharedContext", renumber_map: Dict[str, Dict[int, int]]):
+        """将各 Worker 贡献文本中的旧引用编号替换为新编号"""
+        citation_pattern = re.compile(r'\[(\d+(?:[,\-]\d+)*)\]')
+
+        for agent_id, mapping in renumber_map.items():
+            if not mapping:
+                continue
+            contributions = shared_context.agent_contributions.get(agent_id, [])
+            for contrib in contributions:
+                if not isinstance(contrib.result, dict):
+                    continue
+                answer = contrib.result.get("answer", "")
+                if not answer:
+                    continue
+
+                def replace_ref(match):
+                    nums_str = match.group(1)
+                    parts = re.split(r'([,\-])', nums_str)
+                    new_parts = []
+                    for part in parts:
+                        if part in (',', '-'):
+                            new_parts.append(part)
+                        else:
+                            try:
+                                old_num = int(part)
+                                new_num = mapping.get(old_num, old_num)
+                                new_parts.append(str(new_num))
+                            except ValueError:
+                                new_parts.append(part)
+                    return '[' + ''.join(new_parts) + ']'
+
+                contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
 
     # --- 建议提取 ---
 

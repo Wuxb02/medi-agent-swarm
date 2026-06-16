@@ -57,3 +57,27 @@ body {
 .markdown-body table { width: 100%; border-collapse: collapse; margin: 0.5rem 0; }
 .markdown-body th, .markdown-body td { border: 1px solid #e2e8f0; padding: 0.5rem; text-align: left; }
 .markdown-body th { background: #f8fafc; font-weight: 600; }
+
+/* 引用标注样式 */
+.markdown-body .citation-ref {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7em;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 3px;
+  padding: 0 2px;
+  margin: 0 1px;
+  cursor: pointer;
+  line-height: 1.4;
+  vertical-align: super;
+  transition: background 0.15s, border-color 0.15s;
+  user-select: none;
+}
+.markdown-body .citation-ref:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}

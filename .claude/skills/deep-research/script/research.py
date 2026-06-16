@@ -53,6 +53,24 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
         # - summary: str
         # - recommendations: List[str]
 
+        # 从 report.sources 提取结构化 references（仅知识库来源）
+        references = []
+        kb_idx = 0
+        for s in report.sources:
+            if s.get("type") == "knowledge_base":
+                kb_idx += 1
+                references.append({
+                    "index": kb_idx,
+                    "doc_id": s.get("doc_id", ""),
+                    "source": s.get("source", "医学知识库"),
+                    "disease": s.get("disease", ""),
+                    "type": "knowledge_base",
+                    "filename": s.get("filename", ""),
+                    "score": float(s.get("score", 0)),
+                    "snippet": s.get("snippet", ""),
+                    "content": s.get("content", s.get("snippet", "")),
+                })
+
         return {
             "answer": format_research_report(query, report),
             "findings": report.key_findings,
@@ -60,7 +78,8 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "sources": len(report.sources),
             "evidence_level": report.evidence_level,
             "status": "completed",
-            "data_sources": "Web Search + Milvus RAG + Evidence Synthesis"
+            "data_sources": "Web Search + Milvus RAG + Evidence Synthesis",
+            "references": references,
         }
 
     except Exception as e:
@@ -70,7 +89,8 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "findings": [],
             "confidence": "low",
             "sources": 0,
-            "status": "error"
+            "status": "error",
+            "references": [],
         }
 
 
@@ -119,7 +139,16 @@ def format_research_report(query: str, report) -> str:
 
     # 来源数量
     if report.sources:
-        output.append(f"\n参考来源数量：{len(report.sources)}")
+        output.append(f"\nRAG 检索来源（引用编号见括号内，仅知识库结果可引用）：")
+        kb_idx = 0
+        for s in report.sources:
+            if s.get("type") == "knowledge_base":
+                kb_idx += 1
+                score_val = float(s.get("score", 0))
+                score_str = f"相关度: {score_val:.1%}" if score_val > 0 else ""
+                output.append(f"  [{kb_idx}] {s.get('title', '医学知识')}（来源: {s.get('source', '医学知识库')}）{score_str}")
+            else:
+                output.append(f"  · {s.get('title', '未知来源')}（来源: {s.get('url', 'N/A')}）")
 
     output.append("\n💡 数据来源：网络搜索 + 医学知识库（Milvus RAG）+ 证据综合")
 

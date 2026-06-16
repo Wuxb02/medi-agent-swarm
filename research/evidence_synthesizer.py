@@ -193,10 +193,18 @@ class EvidenceSynthesizer:
 
         for doc in kb_results[:5]:
             metadata = doc.get('metadata', {})
+            content = doc.get("content", "")
+            score = doc.get("score", 0.0)
             report.sources.append({
                 "type": "knowledge_base",
-                "title": metadata.get("title", "医学知识"),
-                "id": doc.get('id', 'unknown')
+                "title": metadata.get("disease", "医学知识"),
+                "doc_id": metadata.get("doc_id", ""),
+                "source": metadata.get("source", "医学知识库"),
+                "disease": metadata.get("disease", ""),
+                "filename": metadata.get("filename", ""),
+                "score": str(round(score, 4)),
+                "snippet": content[:200] + ("..." if len(content) > 200 else ""),
+                "content": content,
             })
 
         return report

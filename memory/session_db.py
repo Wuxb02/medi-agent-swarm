@@ -115,6 +115,8 @@ class SessionDB:
                 total_tokens       INTEGER DEFAULT 0,
                 subtasks_completed INTEGER DEFAULT 0,
                 mode               TEXT,
+                citations          TEXT,
+                    -- 知识库引用列表 JSON [{index, doc_id, source, ...}]
                 FOREIGN KEY (session_id)
                     REFERENCES sessions(session_id) ON DELETE CASCADE
             );
@@ -126,9 +128,15 @@ class SessionDB:
     @staticmethod
     def _migrate_tables(conn: sqlite3.Connection):
         """数据库迁移：为已有表添加新列"""
-        for col in ("parallel_efficiency", "information_coverage", "redundancy"):
+        migrations = [
+            ("sessions", "parallel_efficiency", "REAL DEFAULT 0"),
+            ("sessions", "information_coverage", "REAL DEFAULT 0"),
+            ("sessions", "redundancy", "REAL DEFAULT 0"),
+            ("messages", "citations", "TEXT"),
+        ]
+        for table, col, col_type in migrations:
             try:
-                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} REAL DEFAULT 0")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
 
@@ -207,6 +215,7 @@ class SessionDB:
             agent_events = assistant_msg.get("agent_events")
             suggestions = assistant_msg.get("suggestions")
             agents_involved = assistant_msg.get("agents_involved")
+            citations = assistant_msg.get("citations")
 
             conn.execute(
                 """
@@ -214,8 +223,8 @@ class SessionDB:
                     (session_id, turn_index, role, content, timestamp,
                      agent_events, suggestions, disclaimer,
                      agents_involved, total_time, total_tokens,
-                     subtasks_completed, mode)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     subtasks_completed, mode, citations)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -234,6 +243,8 @@ class SessionDB:
                     assistant_msg.get("total_tokens", 0),
                     assistant_msg.get("subtasks_completed", 0),
                     assistant_msg.get("mode"),
+                    json.dumps(citations, ensure_ascii=False, default=str)
+                    if citations else None,
                 ),
             )
 
@@ -275,7 +286,7 @@ class SessionDB:
             for mr in msg_rows:
                 msg = dict(mr)
                 # 反序列化 JSON 字段
-                for field in ("agent_events", "suggestions", "agents_involved"):
+                for field in ("agent_events", "suggestions", "agents_involved", "citations"):
                     val = msg.get(field)
                     if val and isinstance(val, str):
                         try:

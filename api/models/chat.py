@@ -3,6 +3,19 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
 
+class Citation(BaseModel):
+    """知识库引用"""
+    index: int
+    doc_id: str = ""
+    source: str = ""
+    disease: str = ""
+    type: str = ""
+    filename: str = ""
+    score: float = 0.0
+    snippet: str = ""
+    content: str = ""
+
+
 class ChatRequest(BaseModel):
     """问答请求"""
     question: str
@@ -23,6 +36,7 @@ class ChatResponse(BaseModel):
     swarm_metadata: Dict[str, Any] = {}
     timeout_occurred: bool = False
     usage: Dict[str, int] = {}  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
+    citations: List[Citation] = []
 
 
 class MessageItem(BaseModel):

@@ -113,6 +113,9 @@ class AgentLoop:
         self.tool_call_count = 0
         self.session_id = session_id
 
+        # 收集知识库引用（doc_id 去重）
+        collected_references: Dict[str, Dict] = {}
+
         # 重置 Skill 激活状态（每次 loop 开始时无激活的 Skill）
         if hasattr(agent, 'skill_registry') and agent.skill_registry:
             agent.skill_registry.active_skill = None
@@ -285,6 +288,15 @@ class AgentLoop:
                                     arguments=tool_call.arguments
                                 )
 
+                                # 收集知识库引用（用于最终回答的引注展示）
+                                if (isinstance(tool_result, dict)
+                                        and "references" in tool_result
+                                        and isinstance(tool_result["references"], list)):
+                                    for ref in tool_result["references"]:
+                                        doc_id = ref.get("doc_id")
+                                        if doc_id and doc_id not in collected_references:
+                                            collected_references[doc_id] = ref
+
                                 if t:
                                     t.tool_attrs.result_summary = str(tool_result)
                                     t.tool_attrs.success = isinstance(tool_result, dict) and "error" not in str(tool_result).lower()
@@ -395,6 +407,13 @@ class AgentLoop:
                             message_count += 1
                             logger.debug(f"Recorded final answer to short-term memory (session={session_id})")
 
+                        # 将收集到的引用列表附加到结果中
+                        reference_list = list(collected_references.values())
+                        # 按原始 index 排序后重新编号
+                        reference_list.sort(key=lambda r: r.get("index", 0))
+                        for new_idx, ref in enumerate(reference_list, 1):
+                            ref["index"] = new_idx
+
                         result = {
                             'answer': final_answer,
                             'iterations': state.iteration,
@@ -405,6 +424,7 @@ class AgentLoop:
                                 'total_tokens': total_tokens,
                             },
                             'message_count': message_count,
+                            'references': reference_list,
                         }
 
                         # 让 Agent 进行结果后处理（如提取建议等）

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { useMarkdown } from '../../composables/useMarkdown'
 import { useChatStore } from '../../stores/chat'
 import type { ChatMessage, ThinkingBlock } from '../../types'
@@ -7,6 +7,7 @@ import SuggestionChips from './SuggestionChips.vue'
 import DisclaimerBanner from './DisclaimerBanner.vue'
 import ThinkingBlockItem from './ThinkingBlock.vue'
 import QuestionnaireCard from './QuestionnaireCard.vue'
+import CitationPopover from './CitationPopover.vue'
 
 const props = defineProps<{
   message: ChatMessage
@@ -21,6 +22,32 @@ const renderedContent = computed(() => {
 })
 
 const isUser = computed(() => props.message.role === 'user')
+
+// 引用 Popover 状态
+const activeCitationRefs = ref<number[]>([])
+const citationAnchorEl = ref<HTMLElement | null>(null)
+
+function handleCitationClick(event: MouseEvent) {
+  const target = event.target as HTMLElement
+  if (!target.classList.contains('citation-ref')) return
+  const refsStr = target.getAttribute('data-refs')
+  if (!refsStr) return
+  const refNumbers = refsStr.split(',').map(Number).filter(n => !isNaN(n))
+  activeCitationRefs.value = refNumbers
+  citationAnchorEl.value = target
+}
+
+function closeCitationPopover() {
+  activeCitationRefs.value = []
+  citationAnchorEl.value = null
+}
+
+// 流式内容更新后，等待 DOM 更新
+watch(() => props.message.content, () => {
+  nextTick(() => {
+    closeCitationPopover()
+  })
+})
 
 const agentNameMap: Record<string, string> = {
   swarm_coordinator: '汇总输出',
@@ -148,6 +175,16 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
               v-if="message.content"
               class="markdown-body text-sm text-slate-700 leading-relaxed mt-2"
               v-html="renderedContent"
+              @click="handleCitationClick"
+            />
+
+            <!-- 引用 Popover -->
+            <CitationPopover
+              v-if="activeCitationRefs.length > 0 && citationAnchorEl"
+              :citations="message.citations || []"
+              :ref-numbers="activeCitationRefs"
+              :anchor-el="citationAnchorEl"
+              @close="closeCitationPopover"
             />
 
             <!-- 交互式问卷 -->

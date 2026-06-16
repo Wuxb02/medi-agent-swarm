@@ -29,6 +29,7 @@ export interface ChatMessage {
   agentEvents?: AgentEvent[]
   thinkingBlocks?: ThinkingBlock[]
   questionnaire?: QuestionnaireData
+  citations?: Citation[]
   metadata?: {
     swarmEnabled: boolean
     agentsInvolved: string[]
@@ -86,6 +87,18 @@ export interface KnowledgeItem {
   content: string
   metadata: Record<string, any>
   score: number
+}
+
+export interface Citation {
+  index: number
+  doc_id: string
+  source: string
+  disease: string
+  type: string
+  filename: string
+  score: number
+  snippet: string
+  content: string
 }
 
 export interface DocumentSummary {

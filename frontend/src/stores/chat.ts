@@ -376,6 +376,7 @@ export const useChatStore = defineStore('chat', () => {
           if (msg) {
             msg.content = data.answer || msg.content
             msg.disclaimer = data.disclaimer || ''
+            msg.citations = data.citations || []
             msg.isStreaming = false
             msg.metadata = {
               swarmEnabled: data.swarm_enabled,
@@ -454,7 +455,7 @@ export const useChatStore = defineStore('chat', () => {
           if (turn.assistant_message?.content) {
             const rawEvents = turn.assistant_message.agent_events || []
             const { agentEvents, thinkingBlocks } = reconstructFromEvents(rawEvents)
-            const am = turn.assistant_message
+            const am = turn.assistant_message as Record<string, any>
             messages.value.push({
               id: genId(),
               role: 'assistant',
@@ -463,6 +464,7 @@ export const useChatStore = defineStore('chat', () => {
               isStreaming: false,
               suggestions: am.suggestions || [],
               disclaimer: am.disclaimer || '',
+              citations: am.citations || [],
               agentEvents,
               thinkingBlocks,
               metadata: {

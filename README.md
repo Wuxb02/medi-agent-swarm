@@ -953,6 +953,100 @@ Web 界面的知识库页面提供三个 Tab：
 python knowledge/scripts/deduplicate.py
 ```
 
+### 三路混合检索
+
+知识库检索采用 **Dense + BM25 + Entity Boost** 三路融合策略，在 `MedicalKnowledgeBase.search()` 内部透明完成，所有 Skill 无需改动。
+
+#### 检索架构
+
+```
+用户查询
+    │
+    ├─ Path 1: 稠密向量检索 (Dense)
+    │     BAAI/bge-small-zh-v1.5 → IP ANN (Milvus FLAT)
+    │
+    ├─ Path 2: BM25 稀疏检索 (Sparse)
+    │     Milvus 内置 BM25 Function → SPARSE_INVERTED_INDEX
+    │
+    └─ Path 3: 医学实体精确匹配 (Entity Boost)
+          jieba 分词 → 内存倒排索引 → 精确命中加权
+```
+
+#### 融合策略
+
+| 阶段 | 方法 | 说明 |
+|------|------|------|
+| **Path 1+2 融合** | Milvus RRF (RRFRanker, k=60) | Dense 与 BM25 结果在 Milvus 内部做倒数排名融合 |
+| **Path 3 加权** | App-level Entity Boost | 实体精确命中的 doc_id 获得 `+0.15` 得分加成 |
+| **最终归一化** | `final_score = min(RRF_norm + entity_bonus × 0.15, 1.0)` | 分数裁剪到 [0, 1] |
+| **去重** | 按 `doc_id` 保留最高分 | 每份文档只返回最匹配的一个 chunk |
+
+#### 实体倒排索引
+
+`MedicalEntityIndex` 在启动时从 Milvus 全量文档中自抽取医学实体：
+
+- **分词**: jieba 中文分词
+- **过滤**: 保留中文字符 2-12 字、ICD 编码、药品后缀、英文缩写；排除停用词
+- **索引**: `entity → Set[doc_id]` 内存映射
+- **查询**: 用户 query 分词后取并集，按命中实体数归一化到 [0, 1]
+- **更新**: 文档增删时增量同步
+
+### 知识库引用标注
+
+LeadAgent 基于 RAG 结果生成最终回答时，引用的检索内容句尾自动附加可点击的引用标注 `[N]` `[N,M]`，点击后弹出浮层展示 chunk 的完整元数据与全文。
+
+#### 后端引用链路
+
+```
+search-knowledge / clinical-guideline / deep-research
+    │  返回 answer（含引用编号 [N]）+ 结构化 references 数组
+    │  references: [{index, doc_id, source, disease, type, filename, score, snippet, content}]
+    ▼
+AgentLoop
+    │  工具执行后自动收集 references，按 doc_id 去重，附入 Worker 最终 result
+    ▼
+SwarmCoordinator
+    ├─ 单Agent/降级模式 : references → citations 透传
+    └─ Swarm 模式       : 跨 Worker 收集 → doc_id 去重 → 重编号 → 替换贡献文本中的旧编号
+    ▼
+LeadAgent.synthesize_results()
+    │  synthesis.j2 指示保留引用编号，综合后最终回答含统一编号
+    ▼
+ChatService
+    │  SSE done 事件 + JSON 事件文件 + non-stream ChatResponse 均携带 citations
+    ▼
+SQLite (messages.citations) / JSON 事件文件
+    │  持久化引用数据，历史会话可回放
+    ▼
+前端 ChatMessage.citations
+```
+
+#### 前端渲染与交互
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| **useMarkdown** | `frontend/src/composables/useMarkdown.ts` | markdown 渲染后正则匹配 `[N]` `[N,M]` `[N-M]` → `<sup class="citation-ref">`，保护代码块 |
+| **CitationPopover** | `frontend/src/components/chat/CitationPopover.vue` | Teleport 浮层，scroll/resize 实时跟随引用位置；外部点击关闭；固定高度滚动区展示完整 chunk 全文 |
+| **ChatMessage** | `frontend/src/components/chat/ChatMessage.vue` | 绑定 citation-ref 点击事件驱动 Popover，流式更新时自动关闭 |
+
+#### Popover 展示字段
+
+| 字段 | 说明 |
+|------|------|
+| 引用编号 | `[N]`，带分数 `XX% 相关` |
+| 内容全文 | 完整 chunk，`max-h-48` 固定高度滚动，`whitespace-pre-wrap` 保留换行 |
+| 来源 | `source`（如"临床指南数据库""生活方式建议数据库"） |
+| 疾病 | `disease` |
+| 类型 | `type`（lifestyle / clinical_guideline / disease_classification 等） |
+| 文件 | `filename`，溢出省略 |
+
+#### 分数展示
+
+三个 RAG 工具检索时均将 `score`（0-1 的相关度）透传到前端：
+
+- **search-knowledge**：格式化输出中 `相关度: 85.00%`，LLM 可见以辅助内容可信度判断
+- **clinical-guideline**：`format_guideline` 追加 `相关度: XX%`
+- **deep-research**：`format_research_report` 来源列表逐条展示分数
 
 ## 🤝 技术架构
 

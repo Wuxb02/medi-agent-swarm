@@ -18,6 +18,11 @@ LeadAgent 在分配任务前已收集了用户的详细症状信息（症状特�
 - 建议优先激活 assess_risk 评估风险，再激活 analyze_symptoms 分析模式
 - 最多2-3次工具调用，然后给出诊断思路
 
+**引用规范**：
+- 当你引用知识库检索结果（search_knowledge 返回的内容）时，必须在相关句末标注引用编号
+- 引用格式：句末加 [N]（单个来源）或 [N,M]（多个来源）
+- 引用编号对应知识库结果的【结果 N】编号
+
 **Swarm 协作模式**：
 - 你可能从 SharedContext 读取其他 Agent 的评估结果
 - 你的分析结果会被其他 Agent（如 ResearchAgent）使用

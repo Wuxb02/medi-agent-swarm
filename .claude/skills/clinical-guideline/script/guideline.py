@@ -46,13 +46,28 @@ async def clinical_guideline(query: str, max_results: int = 1) -> Dict[str, Any]
     if results and results[0]["score"] > 0.1:
         doc = results[0]
         metadata = doc["metadata"]
+        content = doc["content"]
+        ref_score = doc["score"]
+
+        references = [{
+            "index": 1,
+            "doc_id": metadata.get("doc_id", ""),
+            "source": metadata.get("source", "临床指南数据库"),
+            "disease": metadata.get("disease", query),
+            "type": metadata.get("type", "clinical_guideline"),
+            "filename": metadata.get("filename", ""),
+            "score": ref_score,
+            "snippet": content[:200] + ("..." if len(content) > 200 else ""),
+            "content": content,
+        }]
 
         return {
-            "answer": format_guideline(doc["content"], metadata),
+            "answer": format_guideline(content, metadata, ref_score),
             "guideline_title": f"{metadata.get('disease', query)}相关临床指南",
             "organization": metadata.get("organization", "N/A"),
             "year": metadata.get("year", "N/A"),
-            "source": "向量数据库"
+            "source": "向量数据库",
+            "references": references,
         }
     else:
         # 未找到相关内容
@@ -61,19 +76,22 @@ async def clinical_guideline(query: str, max_results: int = 1) -> Dict[str, Any]
             "answer": f"未找到'{query}'的相关临床指南，建议使用更具体的疾病名称或联系专业机构获取权威指南。",
             "guideline_title": "",
             "organization": "",
-            "source": "未找到"
+            "source": "未找到",
+            "references": [],
         }
 
 
-def format_guideline(content: str, metadata: Dict[str, Any]) -> str:
+def format_guideline(content: str, metadata: Dict[str, Any], score: float = 0.0) -> str:
     """格式化临床指南信息"""
     output = [
-        "【临床诊疗指南】\n",
+        "【临床诊疗指南】（引用编号: [1]）",
         f"指南名称：{metadata.get('disease', 'N/A')}相关临床指南",
         f"发布机构：{metadata.get('organization', 'N/A')}",
         f"发布年份：{metadata.get('year', 'N/A')}",
-        f"\n内容：\n{content}"
     ]
+    if score > 0:
+        output.append(f"相关度: {score:.2%}")
+    output.append(f"\n内容：\n{content}")
 
     return "\n".join(output)
 

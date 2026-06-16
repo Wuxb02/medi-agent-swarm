@@ -11,7 +11,7 @@ from starlette.requests import Request as StarletteRequest
 
 from swarm.swarm_coordinator import SwarmCoordinator
 from swarm.events import Event
-from api.models.chat import ChatRequest, ChatResponse
+from api.models.chat import ChatRequest, ChatResponse, Citation
 from core.questionnaire_manager import QuestionnaireManager
 
 # 事件持久化目录（与 SessionSummaryManager 一致）
@@ -149,6 +149,9 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         swarm_metadata=result.get("swarm_metadata", {}),
         timeout_occurred=result.get("timeout_occurred", False),
         usage=result.get("usage", {}),
+        citations=[
+            Citation(**c) for c in result.get("citations", [])
+        ],
     )
 
 
@@ -372,7 +375,7 @@ async def chat_stream(
 
     # 6.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
     try:
-        _persist_session_turn(session_id, request, result, collected_events)
+        _persist_session_turn(session_id, chat_req, result, collected_events)
     except Exception as e:
         logger.warning(f"Failed to persist session turn: {e}")
 
@@ -387,6 +390,7 @@ async def chat_stream(
         "answer": result.get("answer", ""),
         "usage": result.get("usage", {}),
         "performance_metrics": result.get("performance_metrics", {}),
+        "citations": result.get("citations", []),
     }
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
@@ -488,6 +492,7 @@ def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: 
         "swarm_enabled": result.get("swarm_enabled", False),
         "usage": result.get("usage", {}),
         "performance_metrics": result.get("performance_metrics", {}),
+        "citations": result.get("citations", []),
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
@@ -559,6 +564,7 @@ def _persist_session_turn(
             "parallel_efficiency": result.get("performance_metrics", {}).get("parallel_efficiency", 0),
             "information_coverage": result.get("performance_metrics", {}).get("information_coverage", 0),
             "redundancy": result.get("performance_metrics", {}).get("redundancy", 0),
+            "citations": result.get("citations", []),
         },
     )
 

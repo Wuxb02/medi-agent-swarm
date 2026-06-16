@@ -102,7 +102,8 @@ cd frontend && npm run build
 | `memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
 | `memory/personal_profile.py` | 个人健康档案（`memory/profile/PERSONAL.md`） |
 | `memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
-| `knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例） |
+| `knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
+| `knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
 | `research/deep_research_workflow.py` | 多步骤研究流水线 |
 | `constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
 | `validation/auto_fixer.py` | 自动修复违规输出（添加免责声明、警告等） |
@@ -121,7 +122,39 @@ cd frontend && npm run build
 
 调用流程：LLM 看到所有 Skill 描述 → `activate_skill("name")` → 指令注入 system prompt + 工具动态加载 → 执行任务 → 激活新 Skill 自动停用前一个。
 
-9 个医疗 Skills：`search-knowledge`、`assess-risk`、`analyze-symptoms`、`recommend-lifestyle`、`disease-code`、`clinical-guideline`、`deep-research`、`search-history`、`search-similar-cases`
+10 个医疗 Skills：`search-knowledge`、`assess-risk`、`analyze-symptoms`、`recommend-lifestyle`、`disease-code`、`clinical-guideline`、`deep-research`、`search-history`、`search-similar-cases`、`render-markdown-html`
+
+### 知识库 — 三路混合检索
+
+`MedicalKnowledgeBase.search()` 内部采用 **Dense + BM25 + Entity Boost** 三路融合，对外签名不变，所有 Skill 无需改动。
+
+| 路径 | 方法 | 说明 |
+| --- | --- | --- |
+| Path 1 — Dense | bge-small-zh-v1.5 → IP ANN | 稠密语义向量检索 |
+| Path 2 — BM25 | Milvus 内置 BM25 Function → SPARSE_INVERTED_INDEX | 稀疏关键词检索 |
+| Path 3 — Entity | jieba 分词 + 内存倒排索引 | 医学实体精确命中加权 |
+
+融合：Milvus RRF (Path 1+2, k=60) + App-level Entity Boost (+0.15)，最终 `min(RRF_norm + entity_bonus × 0.15, 1.0)`。按 `doc_id` 去重保留最高分。
+
+`MedicalEntityIndex`（`knowledge/entity_index.py`）：启动时从 Milvus 全量文档自抽取实体（中文字符 2-12 字、ICD 编码、药品后缀），构建 `entity → Set[doc_id]` 内存倒排；文档增删时增量同步。
+
+### 知识库引用标注
+
+LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 `[N]` `[N,M]` 可点击引用标注。
+
+**后端链路**：
+- 三个 RAG Skill（`search-knowledge` / `clinical-guideline` / `deep-research`）统一返回结构化 `references` 数组：`[{index, doc_id, source, disease, type, filename, score, snippet, content}]`
+- `AgentLoop` 工具执行后自动收集 references，按 `doc_id` 去重，附入 Worker 最终 result
+- `SwarmCoordinator`：单 Agent 直接透传；Swarm 模式跨 Worker 收集 → 去重 → 重编号 → 替换贡献文本旧编号
+- `synthesis.j2` 指示 LeadAgent 保留引用编号
+- SS done / JSON 事件文件 / non-stream ChatResponse 三路径携带 `citations`
+
+**前端渲染**：
+- `useMarkdown.ts`：渲染后正则匹配 `[N]` `[N,M]` `[N-M]` 替换为 `<sup class="citation-ref">`
+- `CitationPopover.vue`：Teleport 浮层，scroll/resize 实时跟随引用位置，外部点击关闭，固定高度滚动区展示 chunk 全文 + 来源/疾病/类型/相关度
+- `ChatMessage.vue`：集成点击事件驱动 Popover
+
+**持久化**：`messages` 表新增 `citations TEXT` 列（自动迁移），`save_turn` 写入 / `get_session` 反序列化；历史会话加载后引用标注仍可点击。
 
 ### Prompt 管理
 

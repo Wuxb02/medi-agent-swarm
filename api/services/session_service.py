@@ -168,6 +168,10 @@ def _build_detail_from_db(session_data: Dict[str, Any]) -> SessionDetail:
                 assistant_msg["subtasks_completed"] = msg["subtasks_completed"]
             if msg.get("mode"):
                 assistant_msg["mode"] = msg["mode"]
+            # citations 可能为空列表，始终传递（排除 None 即旧会话无此字段）
+            citations_val = msg.get("citations")
+            if citations_val is not None:
+                assistant_msg["citations"] = citations_val
 
             current_turn["assistant_message"] = assistant_msg
 
@@ -370,6 +374,10 @@ def _merge_events_json(md_filepath: str, detail: SessionDetail):
                 detail.subtasks_completed = data.get("subtasks_completed", 0)
                 if data.get("answer"):
                     detail.answer = data["answer"]
+                # 将 citations 附加到最后一轮 assistant_message（向后兼容）
+                citations = data.get("citations", [])
+                if citations and detail.turns:
+                    detail.turns[-1].assistant_message["citations"] = citations
                 usage = data.get("usage", {})
                 if usage:
                     detail.total_tokens = usage.get(

@@ -28,9 +28,10 @@ async def search_knowledge(query: str, max_results: int = 5) -> Dict[str, Any]:
 
     Returns:
         {
-            "answer": "格式化的知识库检索结果",
+            "answer": "格式化的知识库检索结果（含引用编号 [N]）",
             "total_found": 检索到的结果数,
-            "query": "原始查询"
+            "query": "原始查询",
+            "references": [{index, doc_id, source, disease, type, filename, score, snippet}, ...]
         }
     """
     logger.info(f"Searching knowledge base: query={query}, max_results={max_results}")
@@ -45,15 +46,30 @@ async def search_knowledge(query: str, max_results: int = 5) -> Dict[str, Any]:
         filter_type=None
     )
 
-    # 格式化结果
+    # 格式化结果（同时构建 references）
     formatted_results = []
-    for doc in results:
+    references = []
+    for i, doc in enumerate(results, 1):
+        metadata = doc["metadata"]
+        content = doc["content"]
         formatted_results.append({
-            "title": f"关于{doc['metadata'].get('disease', query)}的医学信息",
-            "content": doc["content"],
-            "source": doc["metadata"].get("source", "医学知识库"),
+            "title": f"关于{metadata.get('disease', query)}的医学信息",
+            "content": content,
+            "source": metadata.get("source", "医学知识库"),
             "score": doc["score"],
-            "type": doc["metadata"].get("type")
+            "type": metadata.get("type"),
+            "index": i,
+        })
+        references.append({
+            "index": i,
+            "doc_id": metadata.get("doc_id", ""),
+            "source": metadata.get("source", "医学知识库"),
+            "disease": metadata.get("disease", ""),
+            "type": metadata.get("type", ""),
+            "filename": metadata.get("filename", ""),
+            "score": doc["score"],
+            "snippet": content[:200] + ("..." if len(content) > 200 else ""),
+            "content": content,
         })
 
     # Skill 的格式化输出
@@ -61,13 +77,15 @@ async def search_knowledge(query: str, max_results: int = 5) -> Dict[str, Any]:
         return {
             "answer": format_results(formatted_results),
             "total_found": len(formatted_results),
-            "query": query
+            "query": query,
+            "references": references,
         }
     else:
         return {
             "answer": f"未找到关于'{query}'的相关医学知识，请尝试更具体的查询。",
             "total_found": 0,
-            "query": query
+            "query": query,
+            "references": [],
         }
 
 
@@ -86,7 +104,7 @@ def format_results(results: list) -> str:
 
     output = []
     for i, doc in enumerate(results, 1):
-        output.append(f"【结果 {i}】")
+        output.append(f"【结果 {i}】（引用编号: [{i}]，来源: {doc.get('source', '医学知识库')}）")
         output.append(doc.get("content", "无内容"))
 
         # 显示相关度分数（如果有）
