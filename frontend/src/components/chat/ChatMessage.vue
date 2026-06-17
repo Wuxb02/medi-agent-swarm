@@ -51,17 +51,37 @@ watch(() => props.message.content, () => {
 
 const agentNameMap: Record<string, string> = {
   swarm_coordinator: '汇总输出',
+  lead_agent: '任务协调',
   consultation_agent: '健康咨询',
   diagnostic_agent: '症状诊断',
   research_agent: '医学研究',
 }
 
-// 按 agentId 分组 thinkingBlocks
-const groupedThinkingBlocks = computed(() => {
-  if (!props.message.thinkingBlocks || props.message.thinkingBlocks.length === 0) return []
+// 拆分为 LeadAgent 和 WorkerAgent 的 thinking blocks
+const leadBlocks = computed(() =>
+  (props.message.thinkingBlocks || []).filter(b => b.agentId === 'lead_agent')
+)
+
+const leadDecomposeBlocks = computed(() =>
+  leadBlocks.value.filter(b => b.iteration === 1)
+)
+
+const leadSynthesizeBlocks = computed(() =>
+  leadBlocks.value.filter(b => b.iteration === 2)
+)
+
+const workerBlocks = computed(() =>
+  (props.message.thinkingBlocks || []).filter(b => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator')
+)
+
+const hasLeadThinking = computed(() => leadBlocks.value.length > 0)
+
+// WorkerAgent 分组（按 agentId）
+const workerGroups = computed(() => {
+  if (workerBlocks.value.length === 0) return []
   const groups: { agentId: string; agentName: string; blocks: ThinkingBlock[]; isActive: boolean }[] = []
   const map: Record<string, number> = {}
-  for (const block of props.message.thinkingBlocks) {
+  for (const block of workerBlocks.value) {
     if (map[block.agentId] === undefined) {
       map[block.agentId] = groups.length
       groups.push({
@@ -79,22 +99,30 @@ const groupedThinkingBlocks = computed(() => {
   return groups
 })
 
-// Agent 分组展开/收起状态（默认展开）
-const collapsedGroups = ref<Record<string, boolean>>({})
+// LeadAgent 折叠状态
+const leadCollapsed = ref(false)
 
-function toggleGroup(agentId: string) {
-  collapsedGroups.value[agentId] = !collapsedGroups.value[agentId]
+// Worker 分组折叠状态
+const collapsedWorkerGroups = ref<Record<string, boolean>>({})
+
+// "Agent 执行过程" 整体折叠状态
+const workerSectionCollapsed = ref(false)
+
+function toggleWorkerGroup(agentId: string) {
+  collapsedWorkerGroups.value[agentId] = !collapsedWorkerGroups.value[agentId]
 }
 
-function isGroupCollapsed(agentId: string): boolean {
-  return collapsedGroups.value[agentId] === true
+function isWorkerCollapsed(agentId: string): boolean {
+  return collapsedWorkerGroups.value[agentId] === true
 }
 
 // 流式输出结束后自动折叠所有分组框
 watch(() => props.message.isStreaming, (val, oldVal) => {
   if (oldVal === true && val === false) {
-    for (const group of groupedThinkingBlocks.value) {
-      collapsedGroups.value[group.agentId] = true
+    leadCollapsed.value = true
+    workerSectionCollapsed.value = true
+    for (const group of workerGroups.value) {
+      collapsedWorkerGroups.value[group.agentId] = true
     }
   }
 })
@@ -125,22 +153,145 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
               </span>
             </div>
 
-            <!-- Thinking 内容块（按 Agent 分组） -->
-            <div v-if="groupedThinkingBlocks.length > 0" class="space-y-2 mt-2">
+            <!-- Thinking 内容块 -->
+            <!-- Swarm 模式：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
+            <div v-if="hasLeadThinking" class="space-y-2 mt-2">
+              <div class="border border-blue-200 rounded-lg overflow-hidden text-xs bg-blue-50/30">
+                <!-- LeadAgent 标题栏 -->
+                <button
+                  @click="leadCollapsed = !leadCollapsed"
+                  class="w-full flex items-center gap-2 px-3 py-2 bg-blue-100 hover:bg-blue-200 transition text-left border-b border-blue-200"
+                >
+                  <svg
+                    class="w-3 h-3 text-blue-500 transition-transform shrink-0"
+                    :class="{ 'rotate-90': !leadCollapsed }"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                  </svg>
+                  <span class="w-2 h-2 rounded-full" :class="leadBlocks.some(b => !b.isCollapsed) ? 'bg-blue-400 animate-pulse' : 'bg-blue-400'" />
+                  <span class="font-medium text-blue-700">任务协调</span>
+                  <span class="text-blue-500">({{ leadBlocks.length }} 次迭代)</span>
+                  <span v-if="leadBlocks.some(b => !b.isCollapsed)" class="ml-auto flex gap-0.5">
+                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:0ms" />
+                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:150ms" />
+                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+                  </span>
+                </button>
+
+                <!-- LeadAgent 自身思考 + 委派信息 + WorkerAgent 思考 -->
+                <div v-if="!leadCollapsed" class="p-2 space-y-3">
+                  <!-- 1. 分解任务 (iteration=1) -->
+                  <div v-if="leadDecomposeBlocks.length > 0" class="space-y-1.5">
+                    <ThinkingBlockItem
+                      v-for="block in leadDecomposeBlocks"
+                      :key="block.id"
+                      :thinking="block.thinking"
+                      :agent-id="block.agentId"
+                      :iteration="block.iteration"
+                      :tool-steps="block.toolSteps"
+                      :elapsed-seconds="block.elapsedSeconds"
+                      :is-collapsed="block.isCollapsed"
+                      label="分解任务"
+                    />
+                  </div>
+
+                  <!-- 2. WorkerAgent 执行过程 -->
+                  <div v-if="workerGroups.length > 0" class="space-y-2">
+                    <button
+                      @click="workerSectionCollapsed = !workerSectionCollapsed"
+                      class="flex items-center gap-1.5 text-[11px] text-slate-500 font-medium pl-1 hover:text-slate-700 transition w-full text-left"
+                    >
+                      <svg
+                        class="w-2.5 h-2.5 text-slate-400 transition-transform shrink-0"
+                        :class="{ 'rotate-90': !workerSectionCollapsed }"
+                        fill="currentColor"
+                        viewBox="0 0 20 20"
+                      >
+                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                      </svg>
+                      Agent 执行过程
+                    </button>
+                    <div v-if="!workerSectionCollapsed">
+                    <div
+                      v-for="wGroup in workerGroups"
+                      :key="wGroup.agentId"
+                      class="ml-3 border-l-2 border-blue-100 pl-3"
+                    >
+                      <!-- Worker 分组标题 -->
+                      <button
+                        @click="toggleWorkerGroup(wGroup.agentId)"
+                        class="w-full flex items-center gap-1.5 py-1 text-left hover:opacity-80 transition"
+                      >
+                        <svg
+                          class="w-2.5 h-2.5 text-slate-400 transition-transform shrink-0"
+                          :class="{ 'rotate-90': !isWorkerCollapsed(wGroup.agentId) }"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                        >
+                          <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                        </svg>
+                        <span class="w-1.5 h-1.5 rounded-full" :class="wGroup.isActive ? 'bg-green-400 animate-pulse' : 'bg-green-400'" />
+                        <span class="font-medium text-slate-600">{{ wGroup.agentName }}</span>
+                        <span class="text-slate-400">({{ wGroup.blocks.length }} 次迭代)</span>
+                        <span v-if="wGroup.isActive" class="flex gap-0.5 ml-1">
+                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:0ms" />
+                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:150ms" />
+                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+                        </span>
+                      </button>
+                      <!-- Worker 迭代块 -->
+                      <div v-if="!isWorkerCollapsed(wGroup.agentId)" class="space-y-1 pt-0.5">
+                        <ThinkingBlockItem
+                          v-for="block in wGroup.blocks"
+                          :key="block.id"
+                          :thinking="block.thinking"
+                          :agent-id="block.agentId"
+                          :iteration="block.iteration"
+                          :tool-steps="block.toolSteps"
+                          :elapsed-seconds="block.elapsedSeconds"
+                          :is-collapsed="block.isCollapsed"
+                        />
+                      </div>
+                    </div>
+                    </div>
+                  </div>
+
+                  <!-- 3. 生成回答 (iteration=2) -->
+                  <div v-if="leadSynthesizeBlocks.length > 0" class="space-y-1.5">
+                    <ThinkingBlockItem
+                      v-for="block in leadSynthesizeBlocks"
+                      :key="block.id"
+                      :thinking="block.thinking"
+                      :agent-id="block.agentId"
+                      :iteration="block.iteration"
+                      :tool-steps="block.toolSteps"
+                      :elapsed-seconds="block.elapsedSeconds"
+                      :is-collapsed="block.isCollapsed"
+                      label="生成回答"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 非 Swarm 模式：保持扁平布局 -->
+            <div v-else-if="workerGroups.length > 0" class="space-y-2 mt-2">
               <div
-                v-for="group in groupedThinkingBlocks"
+                v-for="group in workerGroups"
                 :key="group.agentId"
                 class="border border-slate-200 rounded-lg overflow-hidden text-xs"
               >
                 <!-- Agent 分组标题（可点击展开/收起） -->
                 <button
-                  @click="toggleGroup(group.agentId)"
+                  @click="toggleWorkerGroup(group.agentId)"
                   class="w-full flex items-center gap-2 px-3 py-2 bg-slate-100 hover:bg-slate-200 transition text-left border-b border-slate-200"
                 >
                   <!-- 展开/折叠箭头 -->
                   <svg
                     class="w-3 h-3 text-slate-400 transition-transform shrink-0"
-                    :class="{ 'rotate-90': !isGroupCollapsed(group.agentId) }"
+                    :class="{ 'rotate-90': !isWorkerCollapsed(group.agentId) }"
                     fill="currentColor"
                     viewBox="0 0 20 20"
                   >
@@ -156,7 +307,7 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
                   </span>
                 </button>
                 <!-- 各迭代子块（收起时隐藏） -->
-                <div v-if="!isGroupCollapsed(group.agentId)" class="p-1.5 space-y-1.5 bg-slate-50">
+                <div v-if="!isWorkerCollapsed(group.agentId)" class="p-1.5 space-y-1.5 bg-slate-50">
                   <ThinkingBlockItem
                     v-for="block in group.blocks"
                     :key="block.id"

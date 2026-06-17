@@ -9,7 +9,14 @@ const props = defineProps<{
   toolSteps: ToolStep[]
   elapsedSeconds?: number
   isCollapsed: boolean
+  label?: string
 }>()
+
+// 标题显示文本：优先用 label，否则走默认 "迭代N"
+const displayLabel = computed(() => {
+  if (props.label) return props.label
+  return `迭代${props.iteration}`
+})
 
 const isExpanded = ref(!props.isCollapsed)
 
@@ -81,7 +88,7 @@ const displayElapsed = computed(() => {
         <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
       </svg>
 
-      <span class="text-slate-500">迭代{{ iteration }}</span>
+      <span class="text-slate-500">{{ displayLabel }}</span>
 
       <!-- 推理中：跳动点动画 -->
       <span v-if="!isCollapsed" class="ml-auto flex gap-0.5">

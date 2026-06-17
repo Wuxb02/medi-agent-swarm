@@ -272,6 +272,25 @@ class SwarmCoordinator:
         self, question: str, enhanced_context: Dict,
     ) -> Dict:
         """执行任务分解（含 Trace span）"""
+        # 注入 LeadAgent thinking 回调
+        if self.event_callback:
+            def on_think(content, iteration):
+                self.event_callback(Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent="lead_agent",
+                    data={"content": content, "iteration": iteration},
+                ))
+
+            def on_think_done(iteration, elapsed_seconds):
+                self.event_callback(Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent="lead_agent",
+                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds},
+                ))
+
+            self.lead_agent.set_on_thinking(on_think)
+            self.lead_agent.set_on_thinking_done(on_think_done)
+
         _ctx = traced_span(SpanType.STAGE, name="assess_decompose") if _TRACE else None
         if _ctx: _ctx.__enter__()
         try:
@@ -575,6 +594,25 @@ class SwarmCoordinator:
 
         # Step 3: LeadAgent 汇总结果
         # 即使超时，也尝试汇总已完成的部分结果
+        # 注入 thinking 回调（synthesize 阶段）
+        if self.event_callback:
+            def on_think_synth(content, iteration):
+                self.event_callback(Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent="lead_agent",
+                    data={"content": content, "iteration": iteration},
+                ))
+
+            def on_think_done_synth(iteration, elapsed_seconds):
+                self.event_callback(Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent="lead_agent",
+                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds},
+                ))
+
+            self.lead_agent.set_on_thinking(on_think_synth)
+            self.lead_agent.set_on_thinking_done(on_think_done_synth)
+
         final_answer = await self.lead_agent.synthesize_results(
             question=question,
             shared_context=shared_context,

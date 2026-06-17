@@ -28,6 +28,7 @@ export interface ChatMessage {
   disclaimer?: string
   agentEvents?: AgentEvent[]
   thinkingBlocks?: ThinkingBlock[]
+  delegations?: TaskDelegation[]
   questionnaire?: QuestionnaireData
   citations?: Citation[]
   metadata?: {
@@ -58,6 +59,13 @@ export interface AgentEvent {
   toolName?: string
   timestamp: string
   data?: Record<string, any>
+}
+
+export interface TaskDelegation {
+  subtaskId: string
+  type: string
+  description: string
+  assignedAgent: string
 }
 
 export interface ToolStep {

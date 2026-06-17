@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import type { ChatMessage, ThinkingBlock, AgentEvent, SessionTurn } from '../types'
+import type { ChatMessage, ThinkingBlock, AgentEvent, TaskDelegation, SessionTurn } from '../types'
 import { useSSE } from '../composables/useSSE'
 import { getSessionDetail } from '../api/session'
 
@@ -40,9 +40,11 @@ const SKIP_EVENT_TYPES = new Set([
 function reconstructFromEvents(rawEvents: any[]): {
   agentEvents: AgentEvent[]
   thinkingBlocks: ThinkingBlock[]
+  delegations: TaskDelegation[]
 } {
   const agentEvents: AgentEvent[] = []
   const thinkingBlocks: ThinkingBlock[] = []
+  const delegations: TaskDelegation[] = []
 
   // 记录哪些 agent 有显式 thinking 事件
   const agentsWithThinking = new Set<string>()
@@ -65,6 +67,15 @@ function reconstructFromEvents(rawEvents: any[]): {
           timestamp: data.timestamp || new Date().toISOString(),
           data,
         })
+        // 构建委派信息（数据嵌套在 data.data 中）
+        if (data.data) {
+          delegations.push({
+            subtaskId: data.data.subtask_id || data.data.id || '',
+            type: data.data.type || data.data.subtask_type || '',
+            description: data.data.description || '',
+            assignedAgent: data.data.assigned_agent || 'unknown',
+          })
+        }
         break
 
       case 'agent_start': {
@@ -205,7 +216,7 @@ function reconstructFromEvents(rawEvents: any[]): {
     }
   }
 
-  return { agentEvents, thinkingBlocks }
+  return { agentEvents, thinkingBlocks, delegations }
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -266,6 +277,17 @@ export const useChatStore = defineStore('chat', () => {
               timestamp: new Date().toISOString(),
               data,
             })
+            // 构建委派信息（数据嵌套在 data.data 中）
+            if (!msg.delegations) msg.delegations = []
+            const inner = data?.data || data || {}
+            if (inner.subtask_id || inner.type) {
+              msg.delegations.push({
+                subtaskId: inner.subtask_id || '',
+                type: inner.type || '',
+                description: inner.description || '',
+                assignedAgent: inner.assigned_agent || 'unknown',
+              })
+            }
           }
         },
         onAgentStart(data) {
@@ -463,7 +485,7 @@ export const useChatStore = defineStore('chat', () => {
           // 助手消息
           if (turn.assistant_message?.content) {
             const rawEvents = turn.assistant_message.agent_events || []
-            const { agentEvents, thinkingBlocks } = reconstructFromEvents(rawEvents)
+            const { agentEvents, thinkingBlocks, delegations } = reconstructFromEvents(rawEvents)
             const am = turn.assistant_message as Record<string, any>
             messages.value.push({
               id: genId(),
@@ -476,6 +498,7 @@ export const useChatStore = defineStore('chat', () => {
               citations: am.citations || [],
               agentEvents,
               thinkingBlocks,
+              delegations,
               metadata: {
                 swarmEnabled: am.mode === 'swarm',
                 agentsInvolved: am.agents_involved || [],

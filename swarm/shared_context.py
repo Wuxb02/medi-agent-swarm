@@ -173,6 +173,7 @@ class SharedContext:
             data={
                 "subtask_id": subtask.id,
                 "type": subtask.type,
+                "description": subtask.description,
                 "assigned_agent": subtask.assigned_agent
             }
         ))

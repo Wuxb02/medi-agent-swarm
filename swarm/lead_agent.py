@@ -11,7 +11,8 @@ import asyncio
 import uuid
 import json
 import re
-from typing import Dict, Any, List, Optional
+import time
+from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
 
 from core.llm_client import LLMClient
@@ -78,6 +79,14 @@ class LeadAgent:
         self.agent_id = "lead_agent"
         self.llm_client = llm_client or LLMClient()
         self.questionnaire_manager = questionnaire_manager
+        self.on_thinking: Optional[Callable] = None
+        self.on_thinking_done: Optional[Callable] = None
+
+    def set_on_thinking(self, callback: Optional[Callable]):
+        self.on_thinking = callback
+
+    def set_on_thinking_done(self, callback: Optional[Callable]):
+        self.on_thinking_done = callback
 
     def _get_system_prompt(self) -> str:
         """获取系统提示词"""
@@ -266,6 +275,15 @@ class LeadAgent:
         - subtasks: List[SubTask] - 子任务列表
           每个子任务包含：type（工具名）、description（描述）、assigned_agent（负责的Agent）
         """
+        # 发射 thinking 开始
+        iteration = 1
+        think_start = time.monotonic()
+        if self.on_thinking:
+            self.on_thinking(
+                content=f"正在分析用户问题：「{question[:80]}{'...' if len(question) > 80 else ''}」",
+                iteration=iteration,
+            )
+
         messages = [
             {"role": "system", "content": self._get_system_prompt()},
             {"role": "user", "content": PromptLoader.render(
@@ -292,7 +310,7 @@ class LeadAgent:
                 result = json.loads(content)
             except json.JSONDecodeError as e:
                 logger.warning(f"LeadAgent JSON 解析失败: {e}, content={content[:200]}")
-                return {
+                result = {
                     "subtasks": [{
                         "type": "knowledge_search",
                         "description": "回答用户问题",
@@ -305,7 +323,7 @@ class LeadAgent:
             # JSON Schema 校验
             if not isinstance(result, dict) or "subtasks" not in result:
                 logger.warning(f"LeadAgent 输出不符合 Schema，回退: {str(result)[:200]}")
-                return {
+                result = {
                     "subtasks": [{
                         "type": "knowledge_search",
                         "description": "回答用户问题",
@@ -319,7 +337,7 @@ class LeadAgent:
             for i, st in enumerate(result.get("subtasks", [])):
                 if not isinstance(st, dict):
                     logger.warning(f"LeadAgent subtask[{i}] 非 dict，回退")
-                    return {
+                    result = {
                         "subtasks": [{
                             "type": "knowledge_search",
                             "description": "回答用户问题",
@@ -328,15 +346,42 @@ class LeadAgent:
                         "reason": "subtask 格式异常，默认使用 ConsultationAgent",
                         "_schema_violation": True,
                     }
+                    break
                 # 确保必需字段存在
                 st.setdefault("type", "knowledge_search")
                 st.setdefault("description", "回答用户问题")
                 st.setdefault("assigned_agent", "consultation_agent")
 
+            # 发射 thinking 内容：以可读文本描述分解结果
+            if self.on_thinking:
+                subtasks_list = result.get("subtasks", [])
+                agent_name_map = {
+                    "consultation_agent": "健康咨询",
+                    "diagnostic_agent": "症状诊断",
+                    "research_agent": "医学研究",
+                }
+                thinking_parts = [f"问题分解完成，共 {len(subtasks_list)} 个子任务："]
+                for i, st in enumerate(subtasks_list, 1):
+                    agent_display = agent_name_map.get(st.get("assigned_agent", ""), st.get("assigned_agent", "未知"))
+                    thinking_parts.append(
+                        f"{i}. {agent_display} Agent — {st.get('description', '未知任务')}"
+                    )
+                if result.get("reason"):
+                    thinking_parts.append(f"\n分解依据：{result['reason']}")
+                self.on_thinking(content="\n".join(thinking_parts), iteration=iteration)
+
+            # 发射 thinking_done
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+
             return result
 
         except Exception as e:
             logger.error(f"LeadAgent assessment error: {e}")
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
             return {
                 "subtasks": [],
                 "reason": f"评估失败：{e}"
@@ -394,15 +439,29 @@ class LeadAgent:
             shared_context: 共享上下文
             timeout_occurred: 是否发生超时
         """
+        # 发射 thinking 开始
+        iteration = 2  # iteration 1 = assess_decompose, iteration 2 = synthesize
+        think_start = time.monotonic()
+        if self.on_thinking:
+            completed_count = len(shared_context.agent_contributions)
+            self.on_thinking(
+                content=f"正在综合 {completed_count} 个 Agent 的分析结果{'(部分超时)' if timeout_occurred else ''}...",
+                iteration=iteration,
+            )
+
         # 收集所有贡献
         all_contributions = shared_context.get_contributions()
 
         if not all_contributions:
             # 如果没有任何贡献
             if timeout_occurred:
-                return PromptLoader.load("swarm/timeout_fallback.j2")
+                result = PromptLoader.load("swarm/timeout_fallback.j2")
             else:
-                return "抱歉，Swarm 未能提供有效分析结果。"
+                result = "抱歉，Swarm 未能提供有效分析结果。"
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+            return result
 
         # 构建汇总提示
         contributions_text = []
@@ -442,8 +501,16 @@ class LeadAgent:
                 {"role": "user", "content": synthesis_prompt}
             ])
 
+            # 发射 thinking_done
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+
             return response
 
         except Exception as e:
             logger.error(f"Synthesis error: {e}")
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
             return f"汇总结果时出错：{e}"
