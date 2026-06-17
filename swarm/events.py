@@ -23,6 +23,7 @@ class EventType(Enum):
     AGENT_THINKING_DONE = "agent_thinking_done"  # Agent 推理轮次结束（含耗时）
     AGENT_CONTENT_DELTA = "agent_content_delta"  # Agent 最终回答 token 流式输出
     AGENT_QUESTIONNAIRE = "agent_questionnaire"  # Agent 向前端发送结构化问卷
+    AGENT_QUESTIONNAIRE_CANCELLED = "agent_questionnaire_cancelled"  # 问卷被取消（超时/系统取消）
     TRACE_SPAN = "trace_span"                    # Trace span 完成事件（实时推送）
 
 

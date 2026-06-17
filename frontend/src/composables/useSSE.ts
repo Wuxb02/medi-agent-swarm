@@ -11,6 +11,7 @@ export interface StreamCallbacks {
   onAgentThinkingDone?: (data: any) => void
   onAgentContentDelta?: (data: any) => void
   onAgentQuestionnaire?: (data: any) => void
+  onAgentQuestionnaireCancelled?: (data: any) => void
   onTraceSpan?: (data: any) => void
   onSuggestions?: (data: any) => void
   onDone?: (data: any) => void
@@ -69,6 +70,7 @@ export function useSSE() {
               case 'agent_thinking_done': callbacks.onAgentThinkingDone?.(data); break
               case 'agent_content_delta': callbacks.onAgentContentDelta?.(data); break
               case 'agent_questionnaire': callbacks.onAgentQuestionnaire?.(data); break
+              case 'agent_questionnaire_cancelled': callbacks.onAgentQuestionnaireCancelled?.(data); break
               case 'trace_span': callbacks.onTraceSpan?.(data); break
               case 'suggestions': callbacks.onSuggestions?.(data); break
               case 'done':

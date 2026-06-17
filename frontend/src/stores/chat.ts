@@ -366,6 +366,15 @@ export const useChatStore = defineStore('chat', () => {
             }
           }
         },
+        onAgentQuestionnaireCancelled(data) {
+          // 问卷被系统取消（如 Swarm 超时），移除问卷卡片
+          const d = data.data || data
+          const qid = d.questionnaire_id
+          if (qid) {
+            const msg = messages.value.find((m) => m.questionnaire?.questionnaire_id === qid)
+            if (msg) msg.questionnaire = undefined
+          }
+        },
         onSuggestions(data) {
           const msg = messages.value.find((m) => m.id === assistantMsg.id)
           if (msg) msg.suggestions = data.suggestions

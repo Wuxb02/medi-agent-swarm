@@ -4,6 +4,7 @@ LLM客户端
 支持 function calling
 """
 import os
+import re
 import asyncio
 import json
 from typing import List, Dict, Any, Optional
@@ -164,6 +165,30 @@ class LLMClient:
         """
         return {"role": role, "content": content}
 
+    # Regex: 匹配 Anthropic 格式的 invoke/parameter XML 标签（含换行），防止模型将其作为文本输出
+    _TOOL_CALL_XML_RE = re.compile(
+        r'<invoke\s+name="[^"]*"\s*>.*?</invoke>',
+        re.DOTALL,
+    )
+
+    @staticmethod
+    def _sanitize_content(content: Optional[str]) -> Optional[str]:
+        """清洗 content 中的原始工具调用 XML 标签
+
+        某些模型（如通过 OpenAI 兼容代理接入的 Anthropic Claude）可能将
+        function calling 输出为 <invoke name="...">...</invoke> 原始 XML 文本混入 content，
+        而非通过原生 tool_calls 字段。这会导致最终回答中出现无意义的工具调用标记。
+
+        此方法在解析阶段剥离这些 XML，确保它们不会泄露到：
+        - 最终回答（AgentLoop 情况2）
+        - thinking 文本（AgentLoop 第 238 行）
+        - 对话历史（_create_assistant_message_with_tools）
+        """
+        if not content:
+            return content
+        cleaned = LLMClient._TOOL_CALL_XML_RE.sub('', content).strip()
+        return cleaned or None
+
     @staticmethod
     def _parse_response(response) -> LLMResponse:
         """解析 OpenAI 响应为 LLMResponse"""
@@ -190,7 +215,7 @@ class LLMClient:
             }
 
         return LLMResponse(
-            content=message.content,
+            content=LLMClient._sanitize_content(message.content),
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,
@@ -402,6 +427,10 @@ class LLMClient:
         tools_notified = False
         usage = None
 
+        # 流式 XML 过滤状态机：防止模型将 tool call 输出为原始 <invoke> XML 文本
+        _xml_suppress = False
+        _xml_buf = ""  # 滚动窗口，跨 token 检测 <invoke / </invoke>
+
         async for chunk in stream:
             if hasattr(chunk, 'usage') and chunk.usage:
                 usage = {
@@ -422,7 +451,19 @@ class LLMClient:
             if delta.content:
                 content_parts.append(delta.content)
                 if on_content_token:
-                    on_content_token(delta.content)
+                    token = delta.content
+                    _xml_buf += token
+                    # 保持滚动窗口不超过 256 字符，避免内存无限增长
+                    if len(_xml_buf) > 256:
+                        _xml_buf = _xml_buf[-128:]
+                    if not _xml_suppress and '<invoke' in _xml_buf:
+                        _xml_suppress = True
+                    if _xml_suppress:
+                        if '</invoke>' in _xml_buf:
+                            _xml_suppress = False
+                            _xml_buf = ""
+                    else:
+                        on_content_token(token)
 
             if getattr(delta, 'reasoning_content', None):
                 reasoning_parts.append(delta.reasoning_content)
@@ -464,7 +505,7 @@ class LLMClient:
         reasoning_content = "".join(reasoning_parts) or None
 
         return LLMResponse(
-            content=content,
+            content=LLMClient._sanitize_content(content),
             tool_calls=parsed_tool_calls,
             finish_reason=finish_reason,
             reasoning_content=reasoning_content,

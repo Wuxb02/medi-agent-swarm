@@ -61,7 +61,7 @@ class AgentLoop:
         Args:
             max_iterations: 最大迭代次数（防止无限循环）
             short_term_memory: 短期记忆管理器（可选）
-            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认2次）
+            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认2次，activate_skill 不计入）
             on_thinking: thinking 内容回调（可选）
             on_tool_step: 工具步骤回调（可选）
             on_thinking_done: 推理轮次结束回调（可选）
@@ -221,8 +221,9 @@ class AgentLoop:
 
                     # 情况1: LLM 返回 tool_calls，执行 tool
                     if llm_response.has_tool_calls():
-                        # 硬性限制：检查是否已达到最大调用次数
-                        if self.tool_call_count >= self.max_tool_calls:
+                        # 硬性限制：检查是否已达到最大调用次数（activate_skill 不计入）
+                        non_activate_calls = [tc for tc in llm_response.tool_calls if tc.name != "activate_skill"]
+                        if non_activate_calls and self.tool_call_count >= self.max_tool_calls:
                             logger.warning(f"⚠️ 已达到最大 Skill 调用次数限制 ({self.max_tool_calls})，强制生成最终答案")
                             # 强制要求 LLM 提供最终答案
                             messages.append({
@@ -259,8 +260,9 @@ class AgentLoop:
 
                         # 执行每个 Skill 调用
                         for tool_call in llm_response.tool_calls:
-                            # 增加计数
-                            self.tool_call_count += 1
+                            # 增加计数（activate_skill 不计入）
+                            if tool_call.name != "activate_skill":
+                                self.tool_call_count += 1
                             logger.debug(f"Executing: {tool_call.name}({tool_call.arguments}) - 第 {self.tool_call_count} 次调用")
 
                             # Harness Engineering: 验证调用

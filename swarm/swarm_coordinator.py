@@ -510,11 +510,13 @@ class SwarmCoordinator:
 
         # Step 2: Worker 执行分配的任务（并行）
         tasks = []
+        task_to_worker = {}  # task → worker 映射，超时时用于检查问卷状态
         for worker in self.worker_pool:
             task = asyncio.create_task(
                 self._worker_execute_assigned_tasks(worker, shared_context)
             )
             tasks.append(task)
+            task_to_worker[task] = worker
 
         # 等待所有 Worker 完成（或超时）
         timeout_occurred = False
@@ -530,6 +532,24 @@ class SwarmCoordinator:
         if timeout_occurred:
             logger.warning(f"Swarm execution timeout (90s), {len(pending)}/{len(tasks)} workers incomplete")
             for task in pending:
+                worker = task_to_worker.get(task)
+                if worker and hasattr(worker, 'loop'):
+                    qm = worker.loop.questionnaire_manager
+                    if qm and qm.has_pending:
+                        # 取消待处理的问卷，让 Worker 自然超时返回部分结果
+                        # 同时通知前端关闭问卷窗口
+                        for qid in qm.pending_ids:
+                            logger.info(f"取消问卷 {qid}（Swarm 超时），worker={worker.agent_id}")
+                            qm.cancel(qid)
+                            shared_context.publish_event(Event(
+                                type=EventType.AGENT_QUESTIONNAIRE_CANCELLED,
+                                source_agent="swarm_coordinator",
+                                data={
+                                    "questionnaire_id": qid,
+                                    "reason": "swarm_timeout",
+                                }
+                            ))
+                # 取消任务（如果问卷已被取消，Worker 会快速返回；否则暴力取消）
                 task.cancel()
             # 等待已取消的 Worker 返回中间结果（CancelledError 处理会在 AgentLoop 中写入部分结果）
             for task in pending:
