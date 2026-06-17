@@ -3,7 +3,6 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useMarkdown } from '../../composables/useMarkdown'
 import { useChatStore } from '../../stores/chat'
 import type { ChatMessage, ThinkingBlock } from '../../types'
-import SuggestionChips from './SuggestionChips.vue'
 import DisclaimerBanner from './DisclaimerBanner.vue'
 import ThinkingBlockItem from './ThinkingBlock.vue'
 import QuestionnaireCard from './QuestionnaireCard.vue'
@@ -74,7 +73,8 @@ const workerBlocks = computed(() =>
   (props.message.thinkingBlocks || []).filter(b => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator')
 )
 
-const hasLeadThinking = computed(() => leadBlocks.value.length > 0)
+// 只有 LeadAgent 真正执行了合成（iteration=2）才算完整 Swarm 周期
+const hasFullSwarmCycle = computed(() => leadSynthesizeBlocks.value.length > 0)
 
 // WorkerAgent 分组（按 agentId）
 const workerGroups = computed(() => {
@@ -154,8 +154,8 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
             </div>
 
             <!-- Thinking 内容块 -->
-            <!-- Swarm 模式：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
-            <div v-if="hasLeadThinking" class="space-y-2 mt-2">
+            <!-- 完整 Swarm 周期（分解+合成）：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
+            <div v-if="hasFullSwarmCycle" class="space-y-2 mt-2">
               <div class="border border-blue-200 rounded-lg overflow-hidden text-xs bg-blue-50/30">
                 <!-- LeadAgent 标题栏 -->
                 <button
@@ -343,13 +343,6 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
               v-if="message.questionnaire"
               :questionnaire="message.questionnaire"
               @submit="(answers) => chatStore.submitAnswers(message.questionnaire?.questionnaire_id || '', answers)"
-              class="mt-3"
-            />
-
-            <!-- 建议 -->
-            <SuggestionChips
-              v-if="message.suggestions && message.suggestions.length > 0"
-              :suggestions="message.suggestions"
               class="mt-3"
             />
 

@@ -538,13 +538,13 @@ def _rebuild_events_from_md(content: str, detail: SessionDetail):
             )
 
     disclaimer_match = re.search(
-        r"【免责声明】\s*\n(.+?)(?=\n---|\n## |\Z)", content, re.DOTALL
+        r"(?:【免责声明】|## 免责声明)\s*\n(.+?)(?=\n---|\n## |\Z)", content, re.DOTALL
     )
     if disclaimer_match:
         detail.disclaimer = disclaimer_match.group(1).strip()
 
     suggestions_match = re.search(
-        r"【核心建议】\s*\n([\s\S]*?)(?=\n---|\n【)", content
+        r"(?:【核心建议】|## 核心建议)\s*\n([\s\S]*?)(?=\n---|\n(?:## |【))", content
     )
     if suggestions_match:
         items = re.findall(

@@ -297,6 +297,9 @@ class SwarmCoordinator:
             return await self.lead_agent.assess_and_decompose(question, enhanced_context)
         finally:
             if _ctx: _ctx.__exit__(None, None, None)
+            # 清理分解阶段的 thinking 回调，避免残留
+            self.lead_agent.set_on_thinking(None)
+            self.lead_agent.set_on_thinking_done(None)
 
     # ---- 记忆检索（P0 已抽取）----
 
@@ -375,6 +378,13 @@ class SwarmCoordinator:
             result = branch_data['result']
             # 将 AgentLoop 收集的 references 映射为 citations
             result['citations'] = result.pop('references', [])
+
+            # 程序化追加参考资料章节
+            if result['citations']:
+                ref_section = self._format_references_section(result['citations'])
+                if ref_section and result.get('answer'):
+                    result['answer'] += "\n" + ref_section
+
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
@@ -431,6 +441,13 @@ class SwarmCoordinator:
             result = branch_data['result']
             # 将 AgentLoop 收集的 references 映射为 citations
             result['citations'] = result.pop('references', [])
+
+            # 程序化追加参考资料章节
+            if result['citations']:
+                ref_section = self._format_references_section(result['citations'])
+                if ref_section and result.get('answer'):
+                    result['answer'] += "\n" + ref_section
+
             result.update({
                 'swarm_enabled': False,
                 'session_id': session_id,
@@ -618,6 +635,12 @@ class SwarmCoordinator:
             shared_context=shared_context,
             timeout_occurred=timeout_occurred
         )
+
+        # 程序化追加参考资料章节（不依赖 LLM 生成）
+        if swarm_citations:
+            ref_section = self._format_references_section(swarm_citations)
+            if ref_section:
+                final_answer += "\n" + ref_section
 
         # Step 3.5: 合并 Worker 子会话到主会话
         await self._merge_worker_subsessions(
@@ -1277,22 +1300,45 @@ class SwarmCoordinator:
 
     # --- 建议提取 ---
 
+    @staticmethod
+    def _format_references_section(citations: list) -> str:
+        """将引用列表格式化为 ## 参考资料 Markdown 章节"""
+        if not citations:
+            return ""
+
+        lines = ["", "## 参考资料", ""]
+        for ref in citations:
+            index = ref.get("index", "")
+            filename = ref.get("filename", "")
+
+            if filename:
+                lines.append(f"[{index}] {filename}")
+            else:
+                lines.append(f"[{index}]")
+
+            lines.append("")
+
+        return "\n".join(lines)
+
     def _extract_suggestions(self, final_answer: str) -> List[str]:
         """从最终答案中提取建议（简化实现）"""
         suggestions = []
 
-        # 简单的文本匹配
-        if "【核心建议】" in final_answer:
-            # 提取核心建议部分
-            start_idx = final_answer.find("【核心建议】")
-            end_idx = final_answer.find("【", start_idx + 1)
-            if end_idx == -1:
+        # 匹配 ## 核心建议 章节（兼容【核心建议】旧格式）
+        if "## 核心建议" in final_answer or "【核心建议】" in final_answer:
+            # 查找章节起始位置
+            start_marker = "## 核心建议" if "## 核心建议" in final_answer else "【核心建议】"
+            start_idx = final_answer.find(start_marker) + len(start_marker)
+            # 查找下一个 ## 标题作为结束边界
+            end_match = re.search(r'\n## ', final_answer[start_idx:])
+            if end_match:
+                end_idx = start_idx + end_match.start()
+            else:
                 end_idx = len(final_answer)
 
             suggestions_text = final_answer[start_idx:end_idx]
 
             # 提取编号列表
-            import re
             matches = re.findall(r'\d+\.\s*([^\n]+)', suggestions_text)
             suggestions = matches[:5]  # 最多5条
 
