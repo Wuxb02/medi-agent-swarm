@@ -19,32 +19,32 @@ uv sync
 cp .env.example .env  # 编辑填入 LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME 等
 
 # 初始化知识库（Milvus 向量数据库）
-python knowledge/scripts/import_hardcoded_data.py
-python knowledge/scripts/deduplicate.py  # 数据去重
+python mediZJ/knowledge/scripts/import_hardcoded_data.py
+python mediZJ/knowledge/scripts/deduplicate.py  # 数据去重
 
 # 初始化会话数据库（SQLite + Milvus）
-python memory/scripts/init_session_db.py          # 首次初始化
-python memory/scripts/init_session_db.py --clean  # 清除后重新初始化
+python mediZJ/memory/scripts/init_session_db.py          # 首次初始化
+python mediZJ/memory/scripts/init_session_db.py --clean  # 清除后重新初始化
 
 # 运行应用
-python main.py          # 交互模式
-python main.py -v       # 详细日志模式
+python mediZJ/main.py          # 交互模式
+python mediZJ/main.py -v       # 详细日志模式
 
 # Web 模式（两个终端）
-uv run python api_main.py                      # 后端 API，默认 8000 端口
+uv run python mediZJ/api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
 # 运行测试（231 个单元测试 + 20 个集成测试）
 # 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
 # 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
-pytest test/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
-pytest test/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
-pytest test/ --run-integration                        # 全部测试
-pytest test/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
+pytest tests/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
+pytest tests/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
+pytest tests/ --run-integration                        # 全部测试
+pytest tests/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
-python -m eval.runner --metrics all
-python -m eval.runner --metrics routing,retrieval
+python -m mediZJ.eval.runner --metrics all
+python -m mediZJ.eval.runner --metrics routing,retrieval
 
 # 前端构建
 cd frontend && npm run build
@@ -55,7 +55,7 @@ cd frontend && npm run build
 ### 请求处理流程
 
 ```text
-用户输入 → main.py/api_main.py → SwarmCoordinator
+用户输入 → mediZJ/main.py / mediZJ/api_main.py → SwarmCoordinator
   │
   ├─ 检索长短期记忆，构建增强上下文
   │
@@ -80,33 +80,33 @@ cd frontend && npm run build
 
 | 模块 | 职责 |
 | --- | --- |
-| `core/llm_client.py` | OpenAI 兼容的异步 LLM 客户端，支持流式、function calling |
-| `core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证、自动修复、动态工具刷新、问卷暂停/恢复 |
-| `core/skill_registry.py` | 双层注册：Skill（能力包）+ Tool（底层函数），compat_mode 自动检测 |
-| `core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能，提取 SKILL.md 正文作为指令 |
-| `core/skill_models.py` | `SkillDefinition` 数据模型 |
-| `core/prompt_loader.py` | Jinja2 模板加载器，从 `prompt/` 目录加载模板 |
-| `core/questionnaire_manager.py` | asyncio.Future 问卷暂停/恢复管理器 |
-| `core/tools/activate_skill.py` | `activate_skill` 工具工厂 |
-| `core/tools/questionnaire.py` | `question_for_user` 工具（XML 问卷解析） |
-| `agents/base_agent.py` | Agent 抽象基类，集成 SkillRegistry + AgentLoop |
-| `agents/skill_registry_mixin.py` | Worker Agent 共享的技能自动注册 Mixin |
-| `swarm/swarm_coordinator.py` | 顶层协调器：记忆检索 + 路由分发 + 并行调度（90s 超时） |
-| `swarm/lead_agent.py` | 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
-| `swarm/shared_context.py` | 共享黑板系统（SubTask/Contribution 生命周期管理） |
-| `swarm/events.py` | 事件驱动通信（13 种事件类型，含 AGENT_QUESTIONNAIRE） |
-| `memory/short_term.py` | 短期记忆（单例，写时增量压缩，支持内存/Redis） |
-| `memory/long_term.py` | 长期记忆（Mem0 云服务，经 LLM 质量门控过滤） |
-| `memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
-| `memory/session_db.py` | SQLite 会话数据库（sessions + messages 表） |
-| `memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
-| `memory/personal_profile.py` | 个人健康档案（`memory/profile/PERSONAL.md`） |
-| `memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
-| `knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
-| `knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
-| `research/deep_research_workflow.py` | 多步骤研究流水线 |
-| `constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
-| `validation/auto_fixer.py` | 自动修复违规输出（添加免责声明、警告等） |
+| `mediZJ/core/llm_client.py` | OpenAI 兼容的异步 LLM 客户端，支持流式、function calling |
+| `mediZJ/core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证、自动修复、动态工具刷新、问卷暂停/恢复 |
+| `mediZJ/core/skill_registry.py` | 双层注册：Skill（能力包）+ Tool（底层函数），compat_mode 自动检测 |
+| `mediZJ/core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能，提取 SKILL.md 正文作为指令 |
+| `mediZJ/core/skill_models.py` | `SkillDefinition` 数据模型 |
+| `mediZJ/core/prompt_loader.py` | Jinja2 模板加载器，从 `mediZJ/prompt/` 目录加载模板 |
+| `mediZJ/core/questionnaire_manager.py` | asyncio.Future 问卷暂停/恢复管理器 |
+| `mediZJ/core/tools/activate_skill.py` | `activate_skill` 工具工厂 |
+| `mediZJ/core/tools/questionnaire.py` | `question_for_user` 工具（XML 问卷解析） |
+| `mediZJ/agents/base_agent.py` | Agent 抽象基类，集成 SkillRegistry + AgentLoop |
+| `mediZJ/agents/skill_registry_mixin.py` | Worker Agent 共享的技能自动注册 Mixin |
+| `mediZJ/swarm/swarm_coordinator.py` | 顶层协调器：记忆检索 + 路由分发 + 并行调度（90s 超时） |
+| `mediZJ/swarm/lead_agent.py` | 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
+| `mediZJ/swarm/shared_context.py` | 共享黑板系统（SubTask/Contribution 生命周期管理） |
+| `mediZJ/swarm/events.py` | 事件驱动通信（13 种事件类型，含 AGENT_QUESTIONNAIRE） |
+| `mediZJ/memory/short_term.py` | 短期记忆（单例，写时增量压缩，支持内存/Redis） |
+| `mediZJ/memory/long_term.py` | 长期记忆（Mem0 云服务，经 LLM 质量门控过滤） |
+| `mediZJ/memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
+| `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages 表） |
+| `mediZJ/memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
+| `mediZJ/memory/personal_profile.py` | 个人健康档案（`mediZJ/memory/profile/PERSONAL.md`） |
+| `mediZJ/memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
+| `mediZJ/knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
+| `mediZJ/knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
+| `mediZJ/research/deep_research_workflow.py` | 多步骤研究流水线 |
+| `mediZJ/constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
+| `mediZJ/validation/auto_fixer.py` | 自动修复违规输出（添加免责声明、警告等） |
 
 ### 关键设计模式
 
@@ -136,7 +136,7 @@ cd frontend && npm run build
 
 融合：Milvus RRF (Path 1+2, k=60) + App-level Entity Boost (+0.15)，最终 `min(RRF_norm + entity_bonus × 0.15, 1.0)`。按 `doc_id` 去重保留最高分。
 
-`MedicalEntityIndex`（`knowledge/entity_index.py`）：启动时从 Milvus 全量文档自抽取实体（中文字符 2-12 字、ICD 编码、药品后缀），构建 `entity → Set[doc_id]` 内存倒排；文档增删时增量同步。
+`MedicalEntityIndex`（`mediZJ/knowledge/entity_index.py`）：启动时从 Milvus 全量文档自抽取实体（中文字符 2-12 字、ICD 编码、药品后缀），构建 `entity → Set[doc_id]` 内存倒排；文档增删时增量同步。
 
 ### 知识库引用标注
 
@@ -158,10 +158,10 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 ### Prompt 管理
 
-所有 prompt 集中在 `prompt/` 目录，基于 Jinja2 模板引擎，18 个 `.j2` 模板分 6 个子目录：
+所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，18 个 `.j2` 模板分 6 个子目录：
 
 ```python
-from core.prompt_loader import PromptLoader
+from mediZJ.core.prompt_loader import PromptLoader
 system_prompt = PromptLoader.load("agents/consultation_system.j2")
 user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recent_history=[...])
 ```
@@ -170,16 +170,16 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 
 每轮对话完成后自动持久化，三层回退加载（SQLite → .json → .md）。
 
-- **SQLite**（`memory/data/sessions.db`）：结构化消息存储，事务原子写入
-- **Milvus**（`memory/data/session_vectors.db`）：会话摘要向量索引，语义搜索
-- **初始化**：`python memory/scripts/init_session_db.py`
+- **SQLite**（`mediZJ/memory/data/sessions.db`）：结构化消息存储，事务原子写入
+- **Milvus**（`mediZJ/memory/data/session_vectors.db`）：会话摘要向量索引，语义搜索
+- **初始化**：`python mediZJ/memory/scripts/init_session_db.py`
 
 ### 记忆系统（三层）
 
 | 层级 | 存储 | 用途 |
 | --- | --- | --- |
 | 短期记忆 | 内存（默认）/Redis | 会话级对话历史，写时增量压缩，仅供 LeadAgent 参考 |
-| 个人档案 | `memory/profile/PERSONAL.md`（本地文件） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
+| 个人档案 | `mediZJ/memory/profile/PERSONAL.md`（本地文件） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
 | 长期记忆 | Mem0 云服务 | 跨会话可复用医学事实，经 LLM 质量门控（score < 5 跳过） |
 
 未设置 `MEM0_API_KEY` 时优雅降级，仅使用短期记忆和个人档案。
@@ -193,8 +193,8 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - `MEM0_API_KEY` — 可选，Mem0 长期记忆服务
 
 约束定义（YAML）：
-- `constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为
-- `constraints/swarm_constraints.yaml` — Swarm 协作规则、任务分解策略
+- `mediZJ/constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为
+- `mediZJ/constraints/swarm_constraints.yaml` — Swarm 协作规则、任务分解策略
 
 ## 已知问题
 

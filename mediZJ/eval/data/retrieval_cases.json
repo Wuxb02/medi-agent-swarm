@@ -1,0 +1,212 @@
+[
+  {
+    "id": "retr_001",
+    "query": "高血压患者应该吃什么",
+    "expected_doc_ids": ["lifestyle_01_lifestyle_hypertension"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["钠", "饮食", "高血压"]
+  },
+  {
+    "id": "retr_002",
+    "query": "糖尿病日常饮食注意事项",
+    "expected_doc_ids": ["lifestyle_02_lifestyle_diabetes"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["血糖", "饮食", "糖尿病"]
+  },
+  {
+    "id": "retr_003",
+    "query": "感冒了怎么调理身体",
+    "expected_doc_ids": ["lifestyle_03_lifestyle_cold"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["感冒", "休息", "饮水"]
+  },
+  {
+    "id": "retr_004",
+    "query": "心血管疾病 ICD 编码",
+    "expected_doc_ids": ["disease_classification_10_icd10_cardiovascular"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["ICD", "I10", "心血管"]
+  },
+  {
+    "id": "retr_005",
+    "query": "内分泌疾病分类编码",
+    "expected_doc_ids": ["disease_classification_11_icd10_endocrine"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["ICD", "E11", "内分泌"]
+  },
+  {
+    "id": "retr_006",
+    "query": "高血压最新治疗指南",
+    "expected_doc_ids": ["clinical_guideline_20_guideline_hypertension"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["指南", "高血压", "治疗"]
+  },
+  {
+    "id": "retr_007",
+    "query": "糖尿病临床诊疗规范",
+    "expected_doc_ids": ["clinical_guideline_21_guideline_diabetes"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["指南", "糖尿病", "诊疗"]
+  },
+  {
+    "id": "retr_008",
+    "query": "急救症状有哪些",
+    "expected_doc_ids": ["lifestyle_05_symptoms_emergency"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["紧急", "急救", "症状"]
+  },
+  {
+    "id": "retr_009",
+    "query": "传染病分类编码",
+    "expected_doc_ids": ["disease_classification_12_icd10_infectious"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["ICD", "传染病", "感染"]
+  },
+  {
+    "id": "retr_010",
+    "query": "日常健康保健知识",
+    "expected_doc_ids": ["lifestyle_04_lifestyle_general_health"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["健康", "保健", "预防"]
+  },
+  {
+    "id": "retr_011",
+    "query": "高血压低盐饮食的具体做法",
+    "expected_doc_ids": ["lifestyle_01_lifestyle_hypertension"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["低盐", "钠", "饮食"]
+  },
+  {
+    "id": "retr_012",
+    "query": "高血压运动建议，每周运动多久",
+    "expected_doc_ids": ["lifestyle_01_lifestyle_hypertension"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["运动", "有氧", "每周"]
+  },
+  {
+    "id": "retr_013",
+    "query": "高血压常用药物有哪些",
+    "expected_doc_ids": ["lifestyle_01_lifestyle_hypertension"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["降压药", "钙通道阻滞剂", "ACEI"]
+  },
+  {
+    "id": "retr_014",
+    "query": "糖尿病血糖控制目标是多少",
+    "expected_doc_ids": ["lifestyle_02_lifestyle_diabetes"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["血糖", "糖化血红蛋白", "控制"]
+  },
+  {
+    "id": "retr_015",
+    "query": "糖尿病患者如何选择食物",
+    "expected_doc_ids": ["lifestyle_02_lifestyle_diabetes"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["食物", "GI", "碳水化合物"]
+  },
+  {
+    "id": "retr_016",
+    "query": "感冒发热怎么处理",
+    "expected_doc_ids": ["lifestyle_03_lifestyle_cold"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["发热", "退烧", "感冒"]
+  },
+  {
+    "id": "retr_017",
+    "query": "一般健康生活方式有哪些",
+    "expected_doc_ids": ["lifestyle_04_lifestyle_general_health"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["健康", "饮食", "运动", "睡眠"]
+  },
+  {
+    "id": "retr_018",
+    "query": "哪些症状需要立即就医",
+    "expected_doc_ids": ["lifestyle_05_symptoms_emergency"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["紧急", "就医", "症状"]
+  },
+  {
+    "id": "retr_019",
+    "query": "心脏病的编码分类",
+    "expected_doc_ids": ["disease_classification_10_icd10_cardiovascular"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["I", "心脏", "心血管"]
+  },
+  {
+    "id": "retr_020",
+    "query": "高血压 ICD 编码是多少",
+    "expected_doc_ids": ["disease_classification_10_icd10_cardiovascular"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["I10", "高血压"]
+  },
+  {
+    "id": "retr_021",
+    "query": "糖尿病编码 E11",
+    "expected_doc_ids": ["disease_classification_11_icd10_endocrine"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["E11", "糖尿病", "内分泌"]
+  },
+  {
+    "id": "retr_022",
+    "query": "甲状腺疾病的 ICD 分类",
+    "expected_doc_ids": ["disease_classification_11_icd10_endocrine"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["E", "甲状腺", "内分泌"]
+  },
+  {
+    "id": "retr_023",
+    "query": "结核病编码分类",
+    "expected_doc_ids": ["disease_classification_12_icd10_infectious"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["A", "结核", "感染"]
+  },
+  {
+    "id": "retr_024",
+    "query": "病毒性肝炎的编码",
+    "expected_doc_ids": ["disease_classification_12_icd10_infectious"],
+    "expected_doc_types": ["disease_classification"],
+    "relevant_keywords": ["B", "肝炎", "感染"]
+  },
+  {
+    "id": "retr_025",
+    "query": "高血压指南推荐的降压目标",
+    "expected_doc_ids": ["clinical_guideline_20_guideline_hypertension"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["降压", "目标", "指南"]
+  },
+  {
+    "id": "retr_026",
+    "query": "高血压分级标准",
+    "expected_doc_ids": ["clinical_guideline_20_guideline_hypertension"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["分级", "1级", "2级", "3级"]
+  },
+  {
+    "id": "retr_027",
+    "query": "糖尿病分型标准",
+    "expected_doc_ids": ["clinical_guideline_21_guideline_diabetes"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["分型", "1型", "2型", "诊断"]
+  },
+  {
+    "id": "retr_028",
+    "query": "糖尿病并发症筛查指南",
+    "expected_doc_ids": ["clinical_guideline_21_guideline_diabetes"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["并发症", "筛查", "视网膜"]
+  },
+  {
+    "id": "retr_029",
+    "query": "高血压合并糖尿病的治疗原则",
+    "expected_doc_ids": ["clinical_guideline_20_guideline_hypertension", "clinical_guideline_21_guideline_diabetes"],
+    "expected_doc_types": ["clinical_guideline"],
+    "relevant_keywords": ["合并", "治疗", "原则"]
+  },
+  {
+    "id": "retr_030",
+    "query": "紧急情况下的急救处理方法",
+    "expected_doc_ids": ["lifestyle_05_symptoms_emergency"],
+    "expected_doc_types": ["lifestyle"],
+    "relevant_keywords": ["急救", "处理", "紧急"]
+  }
+]

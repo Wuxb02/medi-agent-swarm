@@ -49,29 +49,27 @@ htmlcov/
 .mem0/
 
 # 会话记录
-session_summaries/*.md
-agent_identities/*.md
+mediZJ/memory/swarm/session_summaries/*
 
 # 数据库
-knowledge/data/milvus_lite.db
-knowledge/data/.milvus_lite.db.lock
-knowledge/scripts/knowledge/data/milvus_lite.db
-memory/data/*.db
-memory/data/*.db-shm
-memory/data/*.db-wal
-memory/data/.milvus_lite.db.lock
-memory/data/.session_vectors.db.lock
+mediZJ/knowledge/data/milvus_lite.db
+mediZJ/knowledge/data/.milvus_lite.db.lock
+mediZJ/knowledge/scripts/knowledge/data/milvus_lite.db
+mediZJ/memory/data/*.db
+mediZJ/memory/data/*.db-shm
+mediZJ/memory/data/*.db-wal
+mediZJ/memory/data/.milvus_lite.db.lock
+mediZJ/memory/data/.session_vectors.db.lock
 
 # 对话记录
-memory/swarm/session_summaries/*
-memory/profile/*
+mediZJ/memory/profile/*
 
 .claude/settings.local.json
 
 # 医学知识文档（由生成脚本管理，不纳入版本控制）
-knowledge/data/documents/*
+mediZJ/knowledge/data/documents/*
 
 # 测评
-eval/data/*.json
-eval/reports/*.md
-eval/reports/*.json
+mediZJ/eval/data/*.json
+mediZJ/eval/reports/*.md
+mediZJ/eval/reports/*.json

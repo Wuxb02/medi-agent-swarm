@@ -1,0 +1,502 @@
+[
+  {
+    "id": "route_001",
+    "question": "感冒了怎么办？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "单一常见症状，单 Agent 足够"
+  },
+  {
+    "id": "route_002",
+    "question": "高血压患者饮食应该注意什么？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "生活方式建议，单 Agent 足够"
+  },
+  {
+    "id": "route_003",
+    "question": "糖尿病的 ICD-10 编码是什么？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "编码查询，research_agent 擅长"
+  },
+  {
+    "id": "route_004",
+    "question": "头痛一周了，越来越严重，需要做哪些检查？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["diagnostic_agent"],
+    "difficulty": "medium",
+    "category": "diagnostic_query",
+    "annotation_note": "症状持续加重，需要风险评估和检查建议"
+  },
+  {
+    "id": "route_005",
+    "question": "最新的高血压治疗指南有哪些推荐？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "medium",
+    "category": "guideline_query",
+    "annotation_note": "明确要求指南，research_agent 擅长"
+  },
+  {
+    "id": "route_006",
+    "question": "头痛伴恶心呕吐，严重吗？需要怎么办？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "moderate_case",
+    "annotation_note": "多症状组合 + 严重性询问，需要诊断评估 + 咨询建议"
+  },
+  {
+    "id": "route_007",
+    "question": "高血压的最新治疗方案是什么？日常饮食有什么建议？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["research_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "evidence_plus_lifestyle",
+    "annotation_note": "需要循证证据 + 生活方式建议"
+  },
+  {
+    "id": "route_008",
+    "question": "35岁女性，持续头痛伴发热、颈部僵硬、恶心呕吐，有高血压病史",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent", "research_agent"],
+    "difficulty": "hard",
+    "category": "complex_case",
+    "annotation_note": "多症状 + 既往史 + 可能的紧急情况，需要全面分析"
+  },
+  {
+    "id": "route_009",
+    "question": "胸闷心悸，活动后加重，还伴有出冷汗",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "high_risk_symptoms",
+    "annotation_note": "高危症状组合（胸闷+心悸+冷汗），必须包含 diagnostic_agent"
+  },
+  {
+    "id": "route_010",
+    "question": "糖尿病患者如何运动？有没有相关的临床指南推荐？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["consultation_agent", "research_agent"],
+    "difficulty": "medium",
+    "category": "lifestyle_plus_evidence",
+    "annotation_note": "生活方式建议 + 指南查询，双 Agent 合作"
+  },
+  {
+    "id": "route_011",
+    "question": "咳嗽怎么缓解？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "单一常见症状"
+  },
+  {
+    "id": "route_012",
+    "question": "发烧了应该吃什么药？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "常见症状用药建议"
+  },
+  {
+    "id": "route_013",
+    "question": "如何预防流感？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "prevention",
+    "annotation_note": "健康科普，单 Agent 足够"
+  },
+  {
+    "id": "route_014",
+    "question": "失眠怎么办？有什么好的调理方法？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "生活方式调理建议"
+  },
+  {
+    "id": "route_015",
+    "question": "过敏性鼻炎的日常护理方法",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "日常护理指导"
+  },
+  {
+    "id": "route_016",
+    "question": "胃疼吃什么食物好？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "饮食建议，单 Agent"
+  },
+  {
+    "id": "route_017",
+    "question": "高血压的 ICD-10 编码分类",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "编码查询"
+  },
+  {
+    "id": "route_018",
+    "question": "2型糖尿病属于哪一类疾病编码？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "疾病分类查询"
+  },
+  {
+    "id": "route_019",
+    "question": "感染性疾病的 ICD-10 分类范围",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "分类范围查询"
+  },
+  {
+    "id": "route_020",
+    "question": "心血管疾病的编码体系是什么？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "编码体系查询"
+  },
+  {
+    "id": "route_021",
+    "question": "内分泌疾病的编码范围 ICD-10",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "disease_code_query",
+    "annotation_note": "编码范围查询"
+  },
+  {
+    "id": "route_022",
+    "question": "头痛三天了，伴有视力模糊，应该做什么检查？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["diagnostic_agent"],
+    "difficulty": "medium",
+    "category": "diagnostic_query",
+    "annotation_note": "症状持续+视力问题，需要检查建议"
+  },
+  {
+    "id": "route_023",
+    "question": "反复低烧一个月，需要排查什么疾病？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["diagnostic_agent"],
+    "difficulty": "medium",
+    "category": "diagnostic_query",
+    "annotation_note": "长期低烧需要鉴别诊断"
+  },
+  {
+    "id": "route_024",
+    "question": "关节疼痛游走性的，需要做哪些检查排除风湿？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["diagnostic_agent"],
+    "difficulty": "medium",
+    "category": "diagnostic_query",
+    "annotation_note": "游走性关节痛需要检查排查"
+  },
+  {
+    "id": "route_025",
+    "question": "最新的糖尿病治疗指南怎么说的？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "guideline_query",
+    "annotation_note": "明确要求指南"
+  },
+  {
+    "id": "route_026",
+    "question": "有没有关于高血压的专家共识？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "guideline_query",
+    "annotation_note": "专家共识查询"
+  },
+  {
+    "id": "route_027",
+    "question": "腹泻两天了，吃什么可以缓解？需要注意什么？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "常见消化问题+饮食建议"
+  },
+  {
+    "id": "route_028",
+    "question": "嗓子疼有痰，怎么在家护理？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "家庭护理建议"
+  },
+  {
+    "id": "route_029",
+    "question": "感冒咳嗽吃什么好得快？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "常见疾病饮食调理"
+  },
+  {
+    "id": "route_030",
+    "question": "头痛发热，脖子也僵硬，这是什么情况？严重吗？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "high_risk_symptoms",
+    "annotation_note": "头痛+发热+颈僵硬，疑似脑膜炎，需要紧急评估"
+  },
+  {
+    "id": "route_031",
+    "question": "胸痛放射到左臂，伴有大汗淋漓，这是心脏病吗？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "high_risk_symptoms",
+    "annotation_note": "典型心梗症状，需要紧急诊断评估+处理建议"
+  },
+  {
+    "id": "route_032",
+    "question": "呼吸困难，嘴唇发紫，应该怎么办？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "high_risk_symptoms",
+    "annotation_note": "呼吸困难+紫绀，高危症状"
+  },
+  {
+    "id": "route_033",
+    "question": "突然看不清东西了，还伴有剧烈头痛",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "high_risk_symptoms",
+    "annotation_note": "突然视力丧失+剧烈头痛，需排除脑血管意外"
+  },
+  {
+    "id": "route_034",
+    "question": "糖尿病患者血压也高了，怎么综合管理？最新的指南有什么建议？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent", "research_agent"],
+    "difficulty": "hard",
+    "category": "complex_case",
+    "annotation_note": "糖尿病+高血压共病管理+指南查询"
+  },
+  {
+    "id": "route_035",
+    "question": "40岁男性，最近心悸频发，活动后气短，有吸烟史20年，父亲有冠心病",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "complex_case",
+    "annotation_note": "心悸+气短+危险因素（吸烟+家族史），需要综合评估"
+  },
+  {
+    "id": "route_036",
+    "question": "反复发热两周，伴有盗汗、体重下降，需要排查什么？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "moderate_case",
+    "annotation_note": "发热+盗汗+体重下降，需排查结核/肿瘤等"
+  },
+  {
+    "id": "route_037",
+    "question": "咳嗽带血丝，持续两周了，是什么原因？需要做什么检查？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "moderate_case",
+    "annotation_note": "咯血需要鉴别诊断+检查建议"
+  },
+  {
+    "id": "route_038",
+    "question": "高血压合并慢性肾病，最新的降压药物治疗方案有什么推荐？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["research_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "evidence_plus_lifestyle",
+    "annotation_note": "共病+指南查询+用药建议"
+  },
+  {
+    "id": "route_039",
+    "question": "糖尿病足的预防和最新护理指南",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["research_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "evidence_plus_lifestyle",
+    "annotation_note": "指南查询+护理建议"
+  },
+  {
+    "id": "route_040",
+    "question": "心衰患者的运动康复有什么循证依据？日常应该注意什么？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["research_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "evidence_plus_lifestyle",
+    "annotation_note": "循证查询+日常指导"
+  },
+  {
+    "id": "route_041",
+    "question": "腹痛位置在右下腹，按压更痛，还伴有低烧恶心",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "hard",
+    "category": "moderate_case",
+    "annotation_note": "右下腹痛+压痛+发热+恶心，疑似阑尾炎"
+  },
+  {
+    "id": "route_042",
+    "question": "腿肿了一周，按下去有个坑，还伴有尿量减少",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "moderate_case",
+    "annotation_note": "凹陷性水肿+尿量减少，需排查肾脏/心脏问题"
+  },
+  {
+    "id": "route_043",
+    "question": "60岁老人，最近记忆力明显下降，走路也不稳了",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "moderate_case",
+    "annotation_note": "认知下降+共济失调，需神经科评估"
+  },
+  {
+    "id": "route_044",
+    "question": "糖尿病患者合并高血压，ACEI和ARB的选择有什么最新证据？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["research_agent", "diagnostic_agent"],
+    "difficulty": "hard",
+    "category": "complex_case",
+    "annotation_note": "共病管理+药物选择的循证依据"
+  },
+  {
+    "id": "route_045",
+    "question": "慢性阻塞性肺疾病急性加重的处理，有什么指南推荐？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "medium",
+    "category": "guideline_query",
+    "annotation_note": "明确的指南查询"
+  },
+  {
+    "id": "route_046",
+    "question": "肺炎的临床诊疗指南",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["research_agent"],
+    "difficulty": "easy",
+    "category": "guideline_query",
+    "annotation_note": "明确的指南查询"
+  },
+  {
+    "id": "route_047",
+    "question": "运动的时候膝盖疼，休息就好，需要看医生吗？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "simple_query",
+    "annotation_note": "运动损伤+是否就医的建议"
+  },
+  {
+    "id": "route_048",
+    "question": "高血压运动注意事项？每天走多少步合适？",
+    "context": {},
+    "expected_mode": "single_agent",
+    "expected_agents": ["consultation_agent"],
+    "difficulty": "easy",
+    "category": "lifestyle_advice",
+    "annotation_note": "运动建议，单 Agent"
+  },
+  {
+    "id": "route_049",
+    "question": "孕期血糖偏高怎么办？饮食上有什么建议？需要查糖化血红蛋白吗？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent"],
+    "difficulty": "medium",
+    "category": "moderate_case",
+    "annotation_note": "孕期特殊状况+饮食+检查建议"
+  },
+  {
+    "id": "route_050",
+    "question": "老年人夜间多尿，白天嗜睡，血压波动大，怎么评估和管理？",
+    "context": {},
+    "expected_mode": "swarm",
+    "expected_agents": ["diagnostic_agent", "consultation_agent", "research_agent"],
+    "difficulty": "hard",
+    "category": "complex_case",
+    "annotation_note": "老年综合征：多尿+嗜睡+血压波动，需综合评估"
+  }
+]

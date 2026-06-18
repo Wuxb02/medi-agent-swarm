@@ -1,0 +1,64 @@
+"""
+评估辅助工具
+
+测试隔离：session_id 生成、PersonalProfile mock
+"""
+import uuid
+from pathlib import Path
+from contextlib import contextmanager
+
+from mediZJ.memory.personal_profile import PROFILE_PATH, PENDING_PATH
+
+# 复用 PersonalProfile 的路径定义（基于 __file__，不依赖工作目录）
+_PERSONAL_PROFILE_PATH = PROFILE_PATH
+_PENDING_PATH = PENDING_PATH
+
+
+def make_session_id(prefix: str) -> str:
+    """生成隔离的评估用 session_id，避免 LTM 交叉污染"""
+    return f"eval-{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+@contextmanager
+def isolated_coordinator():
+    """
+    创建评估专用 SwarmCoordinator，自动处理 PersonalProfile 隔离
+
+    使用方式：
+        with isolated_coordinator() as coordinator:
+            result = await coordinator.process(question, session_id=session_id)
+    """
+    from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
+
+    # 备份原始文件内容
+    original_personal = None
+    original_pending = None
+    if _PERSONAL_PROFILE_PATH.exists():
+        original_personal = _PERSONAL_PROFILE_PATH.read_text(encoding="utf-8")
+    if _PENDING_PATH.exists():
+        original_pending = _PENDING_PATH.read_text(encoding="utf-8")
+
+    try:
+        # 重置为空，避免评估间信息泄漏
+        _PERSONAL_PROFILE_PATH.write_text(
+            "# 患者档案\n\n## 个人信息\n- 暂无\n\n## 病史记录\n- 暂无\n\n",
+            encoding="utf-8",
+        )
+        _PENDING_PATH.write_text("# 待确认信息\n\n", encoding="utf-8")
+
+        coordinator = SwarmCoordinator()
+        # 同步到所有 Worker 的 user_context
+        for worker in coordinator.worker_pool:
+            if hasattr(worker, 'loop'):
+                worker.loop.user_context = coordinator.personal_profile.to_text()
+        yield coordinator
+    finally:
+        # 恢复原始内容
+        if original_personal is not None:
+            _PERSONAL_PROFILE_PATH.write_text(original_personal, encoding="utf-8")
+        else:
+            _PERSONAL_PROFILE_PATH.unlink(missing_ok=True)
+        if original_pending is not None:
+            _PENDING_PATH.write_text(original_pending, encoding="utf-8")
+        else:
+            _PENDING_PATH.unlink(missing_ok=True)

@@ -1,7 +1,7 @@
 # MediZJ多智能体医疗助手
 
 基于 Skill + Tool 双层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
-![alt text](assets/image.png)
+![alt text](mediZJ/assets/image.png)
 
 ## 📋 项目概述
 
@@ -19,7 +19,7 @@
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
-- **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
+- **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 - **🔍 Trace 追踪**: 全链路请求追踪，六种 Span 类型（TRACE/STAGE/AGENT/ITERATION/LLM/TOOL），瀑布图可视化，per-agent/tool/llm 聚合统计 ✅
 
 ## 🎯 Skill + Tool 双层架构
@@ -68,7 +68,7 @@
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（10条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
-   - 个人档案：`memory/profile/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
+   - 个人档案：`mediZJ/memory/profile/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
@@ -152,12 +152,12 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| **question_for_user 工具** | `core/tools/questionnaire.py` | XML 问卷解析 + 结构化数据构建 |
-| **QuestionnaireManager** | `core/questionnaire_manager.py` | asyncio.Future 暂停/恢复管理 |
-| **LeadAgent.clarify()** | `swarm/lead_agent.py` | LLM tool calling 收集信息 |
-| **AGENT_QUESTIONNAIRE 事件** | `swarm/events.py` | 向前端推送问卷 |
+| **question_for_user 工具** | `mediZJ/core/tools/questionnaire.py` | XML 问卷解析 + 结构化数据构建 |
+| **QuestionnaireManager** | `mediZJ/core/questionnaire_manager.py` | asyncio.Future 暂停/恢复管理 |
+| **LeadAgent.clarify()** | `mediZJ/swarm/lead_agent.py` | LLM tool calling 收集信息 |
+| **AGENT_QUESTIONNAIRE 事件** | `mediZJ/swarm/events.py` | 向前端推送问卷 |
 | **QuestionnaireCard 组件** | `frontend/src/components/chat/QuestionnaireCard.vue` | Tab 切换式问卷 UI |
-| **答案提交端点** | `api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 |
+| **答案提交端点** | `mediZJ/api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 |
 
 ### XML 问卷格式
 
@@ -242,18 +242,18 @@ MEM0_API_KEY=m0-your-api-key-here
 
 ```bash
 # 追加导入
-python knowledge/scripts/import_hardcoded_data.py
+python mediZJ/knowledge/scripts/import_hardcoded_data.py
 
 # 清空后重新导入
-python knowledge/scripts/import_hardcoded_data.py --clean
+python mediZJ/knowledge/scripts/import_hardcoded_data.py --clean
 ```
 
 如需批量生成更多知识文档，可执行生成脚本：
 
 ```bash
-python knowledge/scripts/gen_part1_lifestyle_symptom.py  # 30 份生活方式 + 15 份症状识别
-python knowledge/scripts/gen_part2_icd10.py              # 25 份 ICD-10 编码
-python knowledge/scripts/gen_part3_guidelines.py          # 30 份临床指南
+python mediZJ/knowledge/scripts/gen_part1_lifestyle_symptom.py  # 30 份生活方式 + 15 份症状识别
+python mediZJ/knowledge/scripts/gen_part2_icd10.py              # 25 份 ICD-10 编码
+python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床指南
 ```
 
 ### 5. 运行测试
@@ -262,16 +262,16 @@ python knowledge/scripts/gen_part3_guidelines.py          # 30 份临床指南
 
 ```bash
 # 单元测试（231 个，无需外部服务，秒级完成）
-pytest test/ -m "not integration"
+pytest tests/ -m "not integration"
 
 # 集成测试（20 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
-pytest test/ -m "integration" --run-integration
+pytest tests/ -m "integration" --run-integration
 
 # 全部测试
-pytest test/ --run-integration
+pytest tests/ --run-integration
 
 # 覆盖率报告
-pytest test/ -m "not integration" --cov --cov-report=html
+pytest tests/ -m "not integration" --cov --cov-report=html
 ```
 
 ### 6. 开始使用
@@ -280,7 +280,7 @@ pytest test/ -m "not integration" --cov --cov-report=html
 
 ```bash
 # 终端 1：启动后端 API 服务
-uv run python api_main.py
+uv run python mediZJ/api_main.py
 
 # 终端 2：启动前端开发服务器
 cd frontend && npm install && npm run dev
@@ -292,142 +292,128 @@ cd frontend && npm install && npm run dev
 **方式二：CLI 交互**
 
 ```bash
-python main.py
+python mediZJ/main.py
 ```
 
 ## 📦 项目结构
 
 ```
 medix-agent-swarm/
-├── api/                               # FastAPI 后端 API 层
-│   ├── main.py                        # FastAPI 应用入口、CORS
-│   ├── routers/
-│   │   ├── chat.py                    # /api/chat 问答接口（含流式）
-│   │   ├── knowledge.py               # /api/knowledge 知识库检索
-│   │   ├── sessions.py                # /api/sessions 会话管理
-│   │   ├── dashboard.py               # /api/dashboard 仪表盘 + 健康检查
-│   │   └── personal.py                # /api/personal 个人健康档案
-│   ├── models/                        # Pydantic 请求/响应模型
-│   ├── services/                      # 业务逻辑封装
-│   └── dependencies.py               # 依赖注入
+├── mediZJ/                              # 后端核心包
+│   ├── main.py                          # CLI 入口
+│   ├── api_main.py                      # Web 服务入口（uvicorn）
+│   ├── api/                             # FastAPI 后端 API 层
+│   │   ├── main.py                      # FastAPI 应用入口、CORS
+│   │   ├── routers/
+│   │   │   ├── chat.py                  # /api/chat 问答接口（含流式）
+│   │   │   ├── knowledge.py             # /api/knowledge 知识库检索
+│   │   │   ├── sessions.py              # /api/sessions 会话管理
+│   │   │   ├── dashboard.py             # /api/dashboard 仪表盘 + 健康检查
+│   │   │   └── personal.py              # /api/personal 个人健康档案
+│   │   ├── models/                      # Pydantic 请求/响应模型
+│   │   ├── services/                    # 业务逻辑封装
+│   │   └── dependencies.py             # 依赖注入
+│   ├── agents/                          # Agent 实现
+│   │   ├── base_agent.py                # Agent 基类
+│   │   ├── consultation_agent.py        # 健康咨询 Agent
+│   │   ├── diagnostic_agent.py          # 症状诊断 Agent
+│   │   ├── research_agent.py            # 医学研究 Agent
+│   │   └── skill_registry_mixin.py      # Skill 注册混入
+│   ├── core/                            # 核心引擎
+│   │   ├── agent_loop.py                # Agent Loop（集成约束验证，动态工具刷新，用户档案注入，问卷暂停/恢复）
+│   │   ├── llm_client.py                # LLM 客户端
+│   │   ├── prompt_loader.py             # Jinja2 Prompt 模板加载器
+│   │   ├── skill_loader.py              # 动态加载 Skills（支持多函数加载、指令提取）
+│   │   ├── skill_registry.py            # Skill 注册表（双层注册、compat_mode 自动检测）
+│   │   ├── skill_models.py              # SkillDefinition 数据模型
+│   │   ├── questionnaire_manager.py     # 问卷 Future 暂停/恢复管理器
+│   │   ├── tools/                       # 统一基础工具目录
+│   │   │   ├── __init__.py              # 统一导出
+│   │   │   ├── activate_skill.py        # activate_skill 工具工厂
+│   │   │   └── questionnaire.py         # question_for_user 工具（XML 解析 + 格式化）
+│   │   └── state_manager.py             # 状态管理
+│   ├── prompt/                          # Prompt 模板（Jinja2，集中管理）
+│   │   ├── agents/                      # Agent 系统提示词
+│   │   │   ├── consultation_system.j2
+│   │   │   ├── consultation_user_input.j2
+│   │   │   ├── diagnostic_system.j2
+│   │   │   └── research_system.j2
+│   │   ├── swarm/                       # Swarm 协调相关提示词
+│   │   │   ├── lead_system.j2
+│   │   │   ├── lead_clarify.j2          # LeadAgent 澄清阶段系统提示词
+│   │   │   ├── lead_clarify_user.j2     # LeadAgent 澄清阶段用户提示词
+│   │   │   ├── synthesis.j2
+│   │   │   ├── assessment_user.j2
+│   │   │   └── timeout_fallback.j2
+│   │   ├── research/                    # 研究模块提示词
+│   │   │   ├── evidence_synthesis.j2
+│   │   │   └── query_planning.j2
+│   │   ├── memory/                      # 记忆相关提示词
+│   │   │   ├── compression_system.j2
+│   │   │   ├── compression_user.j2
+│   │   │   └── quality_eval.j2          # 质量评估 + 信息分类
+│   │   ├── agent_loop/                  # Agent Loop 控制消息
+│   │   │   ├── tool_limit.j2
+│   │   │   └── force_answer.j2
+│   │   └── validation/                  # 输出验证模板
+│   │       ├── disclaimer.j2
+│   │       ├── high_risk_warning.j2
+│   │       ├── truncation_notice.j2
+│   │       └── swarm_disclaimer.j2
+│   ├── swarm/                           # Swarm 协调器
+│   │   ├── events.py                    # 事件驱动通信（含 AGENT_QUESTIONNAIRE）
+│   │   ├── lead_agent.py                # 信息澄清 + 任务分解 + 结果汇总
+│   │   ├── shared_context.py            # 共享环境（信息素）
+│   │   └── swarm_coordinator.py         # 智能路由（clarify → decompose → route）
+│   ├── trace/                           # Agent 追踪系统
+│   │   ├── __init__.py                  # 模块导出
+│   │   ├── models.py                    # Span 数据模型（6 种类型 + 4 类属性）
+│   │   ├── context.py                   # traced_span 上下文管理器（contextvars，异步安全）
+│   │   ├── collector.py                 # Span 收集器（单例，内存缓冲 → flush SQLite）
+│   │   ├── analysis.py                  # 聚合分析（per-agent/tool/llm 统计、慢请求、错误）
+│   │   └── storage/
+│   │       └── __init__.py              # SQLite 存储（traces + spans 表，树 JSON + 扁平行）
+│   ├── memory/                          # 记忆管理（集成熵管理）
+│   │   ├── long_term.py                 # 长期记忆（Mem0）
+│   │   ├── short_term.py                # 短期记忆（单例，写时增量压缩 + 子会话隔离）
+│   │   ├── personal_profile.py          # 个人健康档案（mediZJ/memory/profile/）
+│   │   ├── session_summary.py           # 会话总结
+│   │   ├── entropy_manager.py           # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
+│   │   └── embedding.py                 # 共享 embedding 工具（模型加载 + 余弦相似度）
+│   ├── constraints/                     # 约束系统
+│   │   ├── agent_constraints.yaml       # Agent 能力边界
+│   │   ├── swarm_constraints.yaml       # Swarm 协作规则
+│   │   └── validator.py                 # 约束验证器
+│   ├── validation/                      # 输出验证和修复
+│   │   └── auto_fixer.py                # 自动修复器
+│   ├── knowledge/                       # Milvus 知识库
+│   │   ├── milvus_kb.py                 # 知识库封装（CRUD + 语义搜索）
+│   │   ├── data/documents/              # 医学知识文档
+│   │   └── scripts/
+│   │       ├── import_hardcoded_data.py # 批量导入文档
+│   │       └── deduplicate.py           # 数据去重脚本
+│   ├── research/                        # DeepResearch 模块
+│   │   ├── deep_research_workflow.py
+│   │   ├── evidence_synthesizer.py
+│   │   └── web_search.py
+│   └── eval/                            # 评估框架
+│       ├── runner.py                    # 评估统一入口
+│       ├── evaluators/                  # 各维度评估器
+│       ├── data/                        # 评估数据集
+│       └── reports/                     # 评估报告
 │
-├── frontend/                          # Vue 3 前端项目
+├── frontend/                            # Vue 3 前端项目
 │   ├── src/
-│   │   ├── views/                     # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView
-│   │   ├── components/                # 组件：chat/, agents/, knowledge/, dashboard/, layout/, trace/
-│   │   ├── stores/                    # Pinia 状态管理
-│   │   ├── api/                       # API 调用层（chat, knowledge, sessions, dashboard, personal, trace）
-│   │   ├── composables/               # useSSE (流式), useMarkdown
-│   │   └── types/                     # TypeScript 类型定义
+│   │   ├── views/                       # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView
+│   │   ├── components/                  # 组件：chat/, agents/, knowledge/, dashboard/, layout/, trace/
+│   │   ├── stores/                      # Pinia 状态管理
+│   │   ├── api/                         # API 调用层（chat, knowledge, sessions, dashboard, personal, trace）
+│   │   ├── composables/                 # useSSE (流式), useMarkdown
+│   │   └── types/                       # TypeScript 类型定义
 │   ├── vite.config.ts
 │   └── package.json
 │
-├── .claude/skills/                    # Claude Code Skills (10个)
-│   ├── search-knowledge/              # 搜索医学知识库
-│   ├── assess-risk/                   # 风险评估
-│   ├── analyze-symptoms/              # 症状分析
-│   ├── recommend-lifestyle/           # 生活方式建议
-│   ├── disease-code/                  # ICD-10疾病编码
-│   ├── clinical-guideline/            # 临床指南检索
-│   ├── deep-research/                 # 深度研究
-│   ├── search-history/                # 搜索会话历史（短期记忆）
-│   ├── search-similar-cases/          # 搜索相似案例（长期记忆）
-│   └── render-markdown-html/          # Markdown 与 HTML 互转
-│
-├── agents/                            # Agent 实现
-│   ├── base_agent.py                  # Agent 基类
-│   ├── consultation_agent.py          # 健康咨询 Agent
-│   ├── diagnostic_agent.py            # 症状诊断 Agent
-│   ├── research_agent.py              # 医学研究 Agent
-│   └── skill_registry_mixin.py        # Skill 注册混入
-│
-├── core/                              # 核心引擎
-│   ├── agent_loop.py                  # Agent Loop（集成约束验证，动态工具刷新，用户档案注入，问卷暂停/恢复）
-│   ├── llm_client.py                  # LLM 客户端
-│   ├── prompt_loader.py               # Jinja2 Prompt 模板加载器
-│   ├── skill_loader.py                # 动态加载 Skills（支持多函数加载、指令提取）
-│   ├── skill_registry.py              # Skill 注册表（双层注册、compat_mode 自动检测）
-│   ├── skill_models.py                # SkillDefinition 数据模型
-│   ├── questionnaire_manager.py       # 问卷 Future 暂停/恢复管理器
-│   ├── tools/                         # 统一基础工具目录
-│   │   ├── __init__.py                # 统一导出
-│   │   ├── activate_skill.py          # activate_skill 工具工厂
-│   │   └── questionnaire.py           # question_for_user 工具（XML 解析 + 格式化）
-│   └── state_manager.py               # 状态管理
-│
-├── prompt/                            # Prompt 模板（Jinja2，集中管理）
-│   ├── agents/                        # Agent 系统提示词
-│   │   ├── consultation_system.j2
-│   │   ├── consultation_user_input.j2
-│   │   ├── diagnostic_system.j2
-│   │   └── research_system.j2
-│   ├── swarm/                         # Swarm 协调相关提示词
-│   │   ├── lead_system.j2
-│   │   ├── lead_clarify.j2            # LeadAgent 澄清阶段系统提示词
-│   │   ├── lead_clarify_user.j2       # LeadAgent 澄清阶段用户提示词
-│   │   ├── synthesis.j2
-│   │   ├── assessment_user.j2
-│   │   └── timeout_fallback.j2
-│   ├── research/                      # 研究模块提示词
-│   │   ├── evidence_synthesis.j2
-│   │   └── query_planning.j2
-│   ├── memory/                        # 记忆相关提示词
-│   │   ├── compression_system.j2
-│   │   ├── compression_user.j2
-│   │   └── quality_eval.j2            # 质量评估 + 信息分类
-│   ├── agent_loop/                    # Agent Loop 控制消息
-│   │   ├── tool_limit.j2
-│   │   └── force_answer.j2
-│   └── validation/                    # 输出验证模板
-│       ├── disclaimer.j2
-│       ├── high_risk_warning.j2
-│       ├── truncation_notice.j2
-│       └── swarm_disclaimer.j2
-│
-├── swarm/                             # Swarm 协调器
-│   ├── events.py                      # 事件驱动通信（含 AGENT_QUESTIONNAIRE）
-│   ├── lead_agent.py                  # 信息澄清 + 任务分解 + 结果汇总
-│   ├── shared_context.py              # 共享环境（信息素）
-│   └── swarm_coordinator.py           # 智能路由（clarify → decompose → route）
-│
-├── trace/                             # Agent 追踪系统
-│   ├── __init__.py                    # 模块导出
-│   ├── models.py                      # Span 数据模型（6 种类型 + 4 类属性）
-│   ├── context.py                     # traced_span 上下文管理器（contextvars，异步安全）
-│   ├── collector.py                   # Span 收集器（单例，内存缓冲 → flush SQLite）
-│   ├── analysis.py                    # 聚合分析（per-agent/tool/llm 统计、慢请求、错误）
-│   └── storage/
-│       └── __init__.py                # SQLite 存储（traces + spans 表，树 JSON + 扁平行）
-│
-├── memory/                            # 记忆管理（集成熵管理）
-│   ├── long_term.py                   # 长期记忆（Mem0）
-│   ├── short_term.py                  # 短期记忆（单例，写时增量压缩 + 子会话隔离）
-│   ├── personal_profile.py            # 个人健康档案（memory/profile/）
-│   ├── session_summary.py             # 会话总结
-│   ├── entropy_manager.py             # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
-│   └── embedding.py                   # 共享 embedding 工具（模型加载 + 余弦相似度）
-│
-├── constraints/                       # 约束系统
-│   ├── agent_constraints.yaml         # Agent 能力边界
-│   ├── swarm_constraints.yaml         # Swarm 协作规则
-│   └── validator.py                   # 约束验证器
-│
-├── validation/                        # 输出验证和修复
-│   └── auto_fixer.py                  # 自动修复器
-│
-├── knowledge/                         # Milvus 知识库
-│   ├── milvus_kb.py                   # 知识库封装（CRUD + 语义搜索）
-│   ├── data/documents/                # 医学知识文档
-│   └── scripts/
-│       ├── import_hardcoded_data.py   # 批量导入文档
-│       └── deduplicate.py             # 数据去重脚本
-│
-├── research/                          # DeepResearch 模块
-│   ├── deep_research_workflow.py
-│   ├── evidence_synthesizer.py
-│   └── web_search.py
-│
-├── test/                               # 测试套件（pytest 现代化）
+├── tests/                               # 测试套件（pytest 现代化）
 │   ├── conftest.py                      # 共享 fixtures（mock LLM、环境变量、临时目录）
 │   ├── helpers.py                       # 测试辅助函数
 │   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager
@@ -440,14 +426,27 @@ medix-agent-swarm/
 │   ├── test_research/                   # 深度研究：evidence_synthesizer
 │   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
 │
-├── main.py                            # CLI 入口
-├── api_main.py                        # Web 服务入口（uvicorn）
-├── pyproject.toml                     # 项目配置和依赖
-└── .env                               # 环境变量配置
+├── .claude/skills/                      # Claude Code Skills (10个)
+│   ├── search-knowledge/                # 搜索医学知识库
+│   ├── assess-risk/                     # 风险评估
+│   ├── analyze-symptoms/                # 症状分析
+│   ├── recommend-lifestyle/             # 生活方式建议
+│   ├── disease-code/                    # ICD-10疾病编码
+│   ├── clinical-guideline/              # 临床指南检索
+│   ├── deep-research/                   # 深度研究
+│   ├── search-history/                  # 搜索会话历史（短期记忆）
+│   ├── search-similar-cases/            # 搜索相似案例（长期记忆）
+│   └── render-markdown-html/            # Markdown 与 HTML 互转
+│
+├── docs/                                # 文档
+├── logs/                                # 日志
+├── pyproject.toml                       # 项目配置和依赖
+├── CLAUDE.md                            # Claude Code 项目指南
+└── .env                                 # 环境变量配置
 ```
 
 **架构说明**：
-- ✅ **Web + CLI 双入口**：`api_main.py`（Web）/ `main.py`（CLI）
+- ✅ **Web + CLI 双入口**：`mediZJ/api_main.py`（Web）/ `mediZJ/main.py`（CLI）
 - ✅ **统一配置**：使用项目根目录 `.env` 文件管理环境变量
 - ✅ **统一 Agent 委派**：单 Agent / Swarm / 降级均走 `process_subtask()` + 子会话隔离，路由自动决定
 
@@ -511,7 +510,7 @@ medix-agent-swarm/
    ↓ fetch + ReadableStream
 Vite Dev Proxy (/api → localhost:8000)
    ↓
-FastAPI (api_main.py)
+FastAPI (mediZJ/api_main.py)
    ↓
 api/routers/chat.py → api/services/chat_service.py
    ↓ EventBridge (asyncio.Queue)
@@ -584,7 +583,7 @@ MEM0_API_KEY=m0-your-api-key-here
 **配置**：
 ```python
 # 方式1: 内存存储（默认，无需配置）
-from memory.short_term import ShortTermMemory
+from mediZJ.memory.short_term import ShortTermMemory
 memory = ShortTermMemory(storage_type="memory")
 
 # 方式2: Redis持久化（可选）
@@ -610,7 +609,7 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 
 **作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），全局单文件。
 
-**存储路径**：`memory/profile/PERSONAL.md`
+**存储路径**：`mediZJ/memory/profile/PERSONAL.md`
 
 **工作方式**：
 - LLM 每轮对话自动提取个人信息，增量合并写入
@@ -647,9 +646,9 @@ MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
 ```
 对话完成
   ↓
-LLM 评估（prompt/memory/quality_eval.j2）
+LLM 评估（mediZJ/prompt/memory/quality_eval.j2）
   ├─ 质量评分（1-10）
-  ├─ 提取个人信息 → memory/profile/PERSONAL.md
+  ├─ 提取个人信息 → mediZJ/memory/profile/PERSONAL.md
   └─ 提取可复用事实 → Mem0
 ```
 
@@ -709,9 +708,9 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 
 | 原则 | MediZJ 实现 | 位置 |
 |------|-----------|------|
-| **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 Skill 调用和输出 | `constraints/` |
-| **自动修复** | 缺少免责声明自动添加，高危症状自动提醒就医 | `validation/` |
-| **熵管理** | 记忆自动去重和压缩，防止系统膨胀（详见下方） | `memory/entropy_manager.py` |
+| **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 Skill 调用和输出 | `mediZJ/constraints/` |
+| **自动修复** | 缺少免责声明自动添加，高危症状自动提醒就医 | `mediZJ/validation/` |
+| **熵管理** | 记忆自动去重和压缩，防止系统膨胀（详见下方） | `mediZJ/memory/entropy_manager.py` |
 
 ### 熵管理全流程
 
@@ -793,10 +792,10 @@ LLM 不可用或调用失败时，自动降级为截断模式：将 user + assis
 
 | 集成点 | 位置 | 作用 |
 |--------|------|------|
-| **ShortTermMemory.add_message()** | `memory/short_term.py` | 写入时调用 `_maybe_compress_incremental()`，熵驱动增量压缩 |
-| **ShortTermMemory.get_recent_messages()** | `memory/short_term.py` | 读取时直接返回 messages 列表，零压缩开销 |
-| **LongTermMemory** | `memory/long_term.py` | 轻量使用：在 `search_similar_sessions()` 中仅调用 `deduplicate_sessions()`，无 LLM 客户端 |
-| **SwarmCoordinator** | `swarm/swarm_coordinator.py` | 传入 LLM 客户端，使短期记忆具备 LLM 压缩能力 |
+| **ShortTermMemory.add_message()** | `mediZJ/memory/short_term.py` | 写入时调用 `_maybe_compress_incremental()`，熵驱动增量压缩 |
+| **ShortTermMemory.get_recent_messages()** | `mediZJ/memory/short_term.py` | 读取时直接返回 messages 列表，零压缩开销 |
+| **LongTermMemory** | `mediZJ/memory/long_term.py` | 轻量使用：在 `search_similar_sessions()` 中仅调用 `deduplicate_sessions()`，无 LLM 客户端 |
+| **SwarmCoordinator** | `mediZJ/swarm/swarm_coordinator.py` | 传入 LLM 客户端，使短期记忆具备 LLM 压缩能力 |
 
 核心流程：
 
@@ -815,7 +814,7 @@ AgentLoop.run()
 
 运行单元测试套件（无需外部服务）：
 ```bash
-pytest test/ -m "not integration"
+pytest tests/ -m "not integration"
 ```
 
 ## 📊 评估框架
@@ -836,34 +835,34 @@ pytest test/ -m "not integration"
 
 ```bash
 # 运行全部评估
-python -m eval.runner --metrics all
+python -m mediZJ.eval.runner --metrics all
 
 # 单指标
-python -m eval.runner --metrics routing
-python -m eval.runner --metrics retrieval
-python -m eval.runner --metrics latency
-python -m eval.runner --metrics multiturn
-python -m eval.runner --metrics abtest
+python -m mediZJ.eval.runner --metrics routing
+python -m mediZJ.eval.runner --metrics retrieval
+python -m mediZJ.eval.runner --metrics latency
+python -m mediZJ.eval.runner --metrics multiturn
+python -m mediZJ.eval.runner --metrics abtest
 
 # 多指标
-python -m eval.runner --metrics routing,retrieval
+python -m mediZJ.eval.runner --metrics routing,retrieval
 
 # AB 测试评分计算（需要先填写 scores 字段）
-python -m eval.runner --score-abtest
+python -m mediZJ.eval.runner --score-abtest
 ```
 
 ### 评估报告
 
 运行后自动生成：
-- `eval/reports/eval_report_{timestamp}.md` — Markdown 评估报告
-- `eval/reports/eval_result_{timestamp}.json` — JSON 结构化结果
-- `eval/reports/abtest_blind_review.json` — AB 盲评数据（待人工评分）
+- `mediZJ/eval/reports/eval_report_{timestamp}.md` — Markdown 评估报告
+- `mediZJ/eval/reports/eval_result_{timestamp}.json` — JSON 结构化结果
+- `mediZJ/eval/reports/abtest_blind_review.json` — AB 盲评数据（待人工评分）
 
 ---
 
 ## 📝 Prompt 集中管理
 
-所有 LLM prompt 统一存放在 `prompt/` 目录下，使用 Jinja2 模板引擎管理，实现 prompt 与代码解耦。
+所有 LLM prompt 统一存放在 `mediZJ/prompt/` 目录下，使用 Jinja2 模板引擎管理，实现 prompt 与代码解耦。
 
 ### 动态”卡带式” System Prompt
 
@@ -880,10 +879,10 @@ python -m eval.runner --score-abtest
 
 ```
 prompt/
-├── agents/                # Agent 系统提示词（4 个）
-├── swarm/                 # Swarm 协调提示词（6 个）
-├── research/              # 研究模块提示词（2 个）
-├── memory/                # 记忆相关提示词（3 个）
+├── mediZJ/agents/                # Agent 系统提示词（4 个）
+├── mediZJ/swarm/                 # Swarm 协调提示词（6 个）
+├── mediZJ/research/              # 研究模块提示词（2 个）
+├── mediZJ/memory/                # 记忆相关提示词（3 个）
 ├── agent_loop/            # Agent Loop 控制消息（2 个）
 └── validation/            # 输出验证模板（4 个）
 ```
@@ -891,7 +890,7 @@ prompt/
 ### 使用方式
 
 ```python
-from core.prompt_loader import PromptLoader
+from mediZJ.core.prompt_loader import PromptLoader
 
 # 加载静态模板（无变量）
 system_prompt = PromptLoader.load("agents/consultation_system.j2")
@@ -917,15 +916,15 @@ disclaimer = PromptLoader.render(
 
 | 模板 | 变量 | 说明 |
 | --- | --- | --- |
-| `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
-| `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
-| `swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
-| `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
-| `research/query_planning.j2` | `question` | 查询拆解 |
-| `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
-| `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
+| `mediZJ/agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
+| `mediZJ/swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
+| `mediZJ/swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
+| `mediZJ/research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
+| `mediZJ/research/query_planning.j2` | `question` | 查询拆解 |
+| `mediZJ/memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
+| `mediZJ/memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
 | `agent_loop/tool_limit.j2` | `max_tool_calls` | 工具调用上限 |
-| `validation/swarm_disclaimer.j2` | `timeout_occurred`, `completed_agents_count` | Swarm 免责声明 |
+| `mediZJ/validation/swarm_disclaimer.j2` | `timeout_occurred`, `completed_agents_count` | Swarm 免责声明 |
 
 ---
 
@@ -933,9 +932,9 @@ disclaimer = PromptLoader.render(
 
 - **向量数据库**: Milvus Lite（本地文件，无需服务器）
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
-- **数据存储**: `knowledge/data/documents/` (txt 文档)
-- **初始化**: `python knowledge/scripts/import_hardcoded_data.py`（--clean 清空后重导）
-- **文档生成**: `knowledge/scripts/gen_part*.py` 可批量生成新文档（生活方式/症状/ICD-10编码/临床指南共 84+ 份）
+- **数据存储**: `mediZJ/knowledge/data/documents/` (txt 文档)
+- **初始化**: `python mediZJ/knowledge/scripts/import_hardcoded_data.py`（--clean 清空后重导）
+- **文档生成**: `mediZJ/knowledge/scripts/gen_part*.py` 可批量生成新文档（生活方式/症状/ICD-10编码/临床指南共 84+ 份）
 
 ### 知识库管理功能
 
@@ -950,7 +949,7 @@ Web 界面的知识库页面提供三个 Tab：
 如因多次导入导致数据重复，运行去重脚本：
 
 ```bash
-python knowledge/scripts/deduplicate.py
+python mediZJ/knowledge/scripts/deduplicate.py
 ```
 
 ### 三路混合检索

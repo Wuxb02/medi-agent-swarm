@@ -49,7 +49,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["agents*", "constraints*", "core*", "knowledge*", "memory*", "research*", "swarm*", "validation*"]
+include = ["mediZJ*", "mediZJ.*"]
 
 [project.optional-dependencies]
 test = [
@@ -69,7 +69,7 @@ dev = [
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["test"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -82,12 +82,11 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["agents", "core", "swarm", "memory", "knowledge", "constraints", "validation", "research", "trace"]
+source = ["mediZJ"]
 omit = [
     "*/__pycache__/*",
-    "test/*",
+    "tests/*",
     "examples/*",
-    "eval/*",
 ]
 
 [tool.coverage.report]

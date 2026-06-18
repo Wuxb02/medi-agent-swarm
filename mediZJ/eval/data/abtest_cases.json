@@ -1,0 +1,212 @@
+[
+  {
+    "id": "ab_001",
+    "question": "感冒了怎么办？",
+    "difficulty": "easy",
+    "category": "common_cold",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_002",
+    "question": "高血压患者日常饮食和运动有什么建议？",
+    "difficulty": "easy",
+    "category": "lifestyle",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_003",
+    "question": "头痛伴恶心呕吐是什么原因？需要做什么检查？",
+    "difficulty": "medium",
+    "category": "symptom_analysis",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_004",
+    "question": "最新的高血压治疗指南推荐了哪些药物？",
+    "difficulty": "medium",
+    "category": "guideline",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_005",
+    "question": "35岁男性，持续胸闷心悸，活动后加重，有家族心脏病史，应该怎么办？",
+    "difficulty": "hard",
+    "category": "complex_case",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_006",
+    "question": "咳嗽有痰已经两周了，吃药不见好怎么办？",
+    "difficulty": "easy",
+    "category": "common_symptom",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_007",
+    "question": "糖尿病患者能吃什么水果？",
+    "difficulty": "easy",
+    "category": "lifestyle",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_008",
+    "question": "失眠一个月了，每天只能睡三四个小时，怎么调理？",
+    "difficulty": "easy",
+    "category": "lifestyle",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_009",
+    "question": "高血压160/100需要吃药吗？吃什么药好？",
+    "difficulty": "medium",
+    "category": "medication",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_010",
+    "question": "过敏性鼻炎怎么根治？",
+    "difficulty": "easy",
+    "category": "chronic_disease",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_011",
+    "question": "胃痛饭后加重，反酸打嗝，可能是什么病？",
+    "difficulty": "medium",
+    "category": "symptom_analysis",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_012",
+    "question": "2型糖尿病的诊断标准是什么？",
+    "difficulty": "medium",
+    "category": "diagnosis",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_013",
+    "question": "感冒发烧39度，吃了退烧药不退怎么办？",
+    "difficulty": "medium",
+    "category": "emergency_judgment",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_014",
+    "question": "腰椎间盘突出怎么保守治疗？",
+    "difficulty": "medium",
+    "category": "treatment",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_015",
+    "question": "孕期血糖高怎么控制？对胎儿有什么影响？",
+    "difficulty": "medium",
+    "category": "pregnancy",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_016",
+    "question": "痛风急性发作怎么办？怎么预防复发？",
+    "difficulty": "medium",
+    "category": "acute_and_prevention",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_017",
+    "question": "高血压合并糖尿病，用药有什么需要注意的？",
+    "difficulty": "medium",
+    "category": "comorbidity",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_018",
+    "question": "体检发现甲状腺结节，需要进一步检查吗？",
+    "difficulty": "medium",
+    "category": "screening",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_019",
+    "question": "老年人突然说话含糊不清，一侧肢体无力，这是什么情况？",
+    "difficulty": "hard",
+    "category": "emergency",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_020",
+    "question": "孩子反复咳嗽两个月了，夜间加重，是什么原因？",
+    "difficulty": "medium",
+    "category": "pediatric",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_021",
+    "question": "抑郁症的表现有哪些？怎么判断自己是不是抑郁了？",
+    "difficulty": "medium",
+    "category": "mental_health",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_022",
+    "question": "慢性肾病患者饮食有什么限制？蛋白质摄入怎么控制？",
+    "difficulty": "medium",
+    "category": "lifestyle",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_023",
+    "question": "心脏支架术后需要吃哪些药？要吃多久？",
+    "difficulty": "medium",
+    "category": "post_surgery",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_024",
+    "question": "更年期症状怎么缓解？可以吃激素替代治疗吗？",
+    "difficulty": "medium",
+    "category": "hormonal",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_025",
+    "question": "骨质疏松怎么预防和治疗？",
+    "difficulty": "easy",
+    "category": "prevention",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_026",
+    "question": "40岁女性，心悸、手抖、体重下降、怕热多汗，可能是什么病？需要做哪些检查？",
+    "difficulty": "hard",
+    "category": "differential_diagnosis",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_027",
+    "question": "慢性阻塞性肺疾病稳定期怎么管理？急性加重怎么办？",
+    "difficulty": "hard",
+    "category": "chronic_management",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_028",
+    "question": "焦虑症和心脏病的症状很像，怎么区分？",
+    "difficulty": "hard",
+    "category": "differential_diagnosis",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_029",
+    "question": "高血压的分级标准是什么？各级怎么治疗？",
+    "difficulty": "medium",
+    "category": "classification",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  },
+  {
+    "id": "ab_030",
+    "question": "65岁老人同时有高血压、糖尿病、高血脂，应该怎么综合管理？用药需要注意什么？",
+    "difficulty": "hard",
+    "category": "multimorbidity",
+    "dimensions": ["accuracy", "completeness", "safety"]
+  }
+]

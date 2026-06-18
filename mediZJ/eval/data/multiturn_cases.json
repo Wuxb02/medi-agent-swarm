@@ -1,0 +1,558 @@
+[
+  {
+    "id": "mt_001",
+    "description": "头痛 → 饮食 → 就医，测试指代消解",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我最近总是头痛，已经持续一周了",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "那饮食方面需要注意什么？",
+        "expect_context_keywords": ["头痛"],
+        "expect_refers_to": "turn_0",
+        "annotation": "指代'那'应关联上一轮的头痛"
+      },
+      {
+        "role": "user",
+        "content": "需要去医院检查吗？",
+        "expect_context_keywords": ["头痛"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "结合前两轮上下文给出就医建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_002",
+    "description": "高血压 → 药物 → 副作用，测试疾病上下文连贯",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我有高血压，高压160低压100",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "应该吃什么药？",
+        "expect_context_keywords": ["高血压"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应关联高血压，给出用药建议"
+      },
+      {
+        "role": "user",
+        "content": "这些药有什么副作用？",
+        "expect_context_keywords": ["高血压", "药"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "应回顾前文提到的降压药物，讨论副作用"
+      }
+    ]
+  },
+  {
+    "id": "mt_003",
+    "description": "糖尿病 → 运动 → 并发症，测试多轮信息积累",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我被诊断为2型糖尿病",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "平时可以做什么运动？",
+        "expect_context_keywords": ["糖尿病"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于糖尿病给出运动建议"
+      },
+      {
+        "role": "user",
+        "content": "饮食上有什么禁忌吗？",
+        "expect_context_keywords": ["糖尿病"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于糖尿病给出饮食建议"
+      },
+      {
+        "role": "user",
+        "content": "这种病容易引起什么并发症？",
+        "expect_context_keywords": ["糖尿病"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应讨论糖尿病相关并发症"
+      }
+    ]
+  },
+  {
+    "id": "mt_004",
+    "description": "感冒 → 用药 → 加重 → 就医，测试症状演变追踪",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我感冒了，流鼻涕打喷嚏",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "可以吃什么药缓解一下？",
+        "expect_context_keywords": ["感冒", "鼻涕", "喷嚏"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于感冒症状推荐用药"
+      },
+      {
+        "role": "user",
+        "content": "现在开始发烧了，38度5",
+        "expect_context_keywords": ["感冒"],
+        "expect_refers_to": "turn_0",
+        "annotation": "感冒加重出现发热"
+      },
+      {
+        "role": "user",
+        "content": "这种情况需要去医院吗？",
+        "expect_context_keywords": ["感冒", "发烧", "38"],
+        "expect_refers_to": "turn_0,turn_1,turn_2",
+        "annotation": "综合前几轮（感冒→用药→发热）给出就医建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_005",
+    "description": "失眠 → 原因 → 调理 → 药物，测试渐进式追问",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我最近总是失眠，晚上翻来覆去睡不着",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "是什么原因导致的？",
+        "expect_context_keywords": ["失眠"],
+        "expect_refers_to": "turn_0",
+        "annotation": "询问失眠的原因"
+      },
+      {
+        "role": "user",
+        "content": "有什么调理方法？",
+        "expect_context_keywords": ["失眠"],
+        "expect_refers_to": "turn_0",
+        "annotation": "继续追问失眠调理"
+      },
+      {
+        "role": "user",
+        "content": "需要吃安眠药吗？",
+        "expect_context_keywords": ["失眠", "睡不着"],
+        "expect_refers_to": "turn_0",
+        "annotation": "追问药物治疗"
+      }
+    ]
+  },
+  {
+    "id": "mt_006",
+    "description": "血压高 → 降压 → 低血压，测试状态反转",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我量了血压，高压180低压120",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "应该怎么降下来？",
+        "expect_context_keywords": ["血压", "180"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于高血压给出降压建议"
+      },
+      {
+        "role": "user",
+        "content": "吃了药之后现在血压太低了，只有90/60",
+        "expect_context_keywords": ["血压", "降压", "药"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "从高血压转为低血压，需结合前文理解用药后的状态变化"
+      }
+    ]
+  },
+  {
+    "id": "mt_007",
+    "description": "胃痛 → 饮食 → 用药时间，测试细节追问",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我胃痛，特别是饭后",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "饮食上有什么要注意的？",
+        "expect_context_keywords": ["胃痛", "饭后"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应针对胃痛给出饮食建议"
+      },
+      {
+        "role": "user",
+        "content": "那饭前还是饭后吃药好？",
+        "expect_context_keywords": ["胃痛", "饭后"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "追问服药时机，需关联胃痛和饭后特点"
+      }
+    ]
+  },
+  {
+    "id": "mt_008",
+    "description": "咳嗽 → 干咳/湿咳 → 区别对待，测试症状细分",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我咳嗽好几天了",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "是干咳，没有痰",
+        "expect_context_keywords": ["咳嗽"],
+        "expect_refers_to": "turn_0",
+        "annotation": "补充症状细节，应回应干咳特点"
+      },
+      {
+        "role": "user",
+        "content": "有什么止咳方法？",
+        "expect_context_keywords": ["咳嗽", "干咳"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "应针对干咳给出具体止咳建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_009",
+    "description": "糖尿病 → 血糖监测 → 药物调整，测试管理流程",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我爸有糖尿病，最近血糖控制不太好",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "应该怎么监测血糖？",
+        "expect_context_keywords": ["糖尿病", "血糖"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于糖尿病给出血糖监测建议"
+      },
+      {
+        "role": "user",
+        "content": "血糖一直偏高的话需要换药吗？",
+        "expect_context_keywords": ["糖尿病", "血糖"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "追问药物调整，需结合糖尿病和血糖偏高的背景"
+      },
+      {
+        "role": "user",
+        "content": "他还有高血压，会不会影响用药选择？",
+        "expect_context_keywords": ["糖尿病", "血糖", "血压"],
+        "expect_refers_to": "turn_0",
+        "annotation": "引入新疾病（高血压），需综合两种疾病考虑"
+      }
+    ]
+  },
+  {
+    "id": "mt_010",
+    "description": "体检异常 → 复查 → 解读，测试报告理解",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我体检发现转氨酶偏高",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "严重吗？需要复查什么？",
+        "expect_context_keywords": ["转氨酶", "偏高"],
+        "expect_refers_to": "turn_0",
+        "annotation": "基于转氨酶偏高给出复查建议"
+      },
+      {
+        "role": "user",
+        "content": "复查结果还是高，谷丙80谷草60",
+        "expect_context_keywords": ["转氨酶", "复查"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "提供具体数值，应结合前文进行解读"
+      }
+    ]
+  },
+  {
+    "id": "mt_011",
+    "description": "过敏 → 过敏原 → 预防，测试预防策略",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我一到春天就打喷嚏流鼻涕",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "这是过敏吗？怎么查过敏原？",
+        "expect_context_keywords": ["打喷嚏", "鼻涕", "春天"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应关联春季症状与过敏的关系"
+      },
+      {
+        "role": "user",
+        "content": "怎么预防呢？",
+        "expect_context_keywords": ["过敏", "春天"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "基于过敏诊断给出预防建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_012",
+    "description": "减肥 → 饮食计划 → 运动方案，测试综合方案",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我体重超标，BMI 28，想减肥",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "饮食应该怎么调整？",
+        "expect_context_keywords": ["减肥", "体重"],
+        "expect_refers_to": "turn_0",
+        "annotation": "基于超重给出饮食调整建议"
+      },
+      {
+        "role": "user",
+        "content": "运动方面呢？",
+        "expect_context_keywords": ["减肥", "体重"],
+        "expect_refers_to": "turn_0",
+        "annotation": "补充运动建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_013",
+    "description": "焦虑失眠 → 心理 → 药物 vs 非药物，测试选择建议",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我最近焦虑得厉害，晚上根本睡不着",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "这种情况是看心理科还是吃药？",
+        "expect_context_keywords": ["焦虑", "睡不着"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于焦虑+失眠给出就诊科室建议"
+      },
+      {
+        "role": "user",
+        "content": "不想吃药，有什么非药物的方法？",
+        "expect_context_keywords": ["焦虑", "失眠"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "结合前文拒绝药物，推荐非药物治疗"
+      }
+    ]
+  },
+  {
+    "id": "mt_014",
+    "description": "腰痛 → 原因 → 自我护理 → 就医时机，测试就医决策",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我腰痛，坐久了就疼",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "可能是什么原因？",
+        "expect_context_keywords": ["腰痛", "坐"],
+        "expect_refers_to": "turn_0",
+        "annotation": "分析腰痛+久坐的可能原因"
+      },
+      {
+        "role": "user",
+        "content": "在家可以做什么缓解？",
+        "expect_context_keywords": ["腰痛"],
+        "expect_refers_to": "turn_0",
+        "annotation": "给出自我护理建议"
+      },
+      {
+        "role": "user",
+        "content": "什么情况下需要去医院？",
+        "expect_context_keywords": ["腰痛"],
+        "expect_refers_to": "turn_0",
+        "annotation": "给出就医指征"
+      }
+    ]
+  },
+  {
+    "id": "mt_015",
+    "description": "孩子发烧 → 退烧方法 → 反复发热 → 就医，测试儿童场景",
+    "turns": [
+      {
+        "role": "user",
+        "content": "孩子发烧了，38度8",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "怎么退烧？可以用什么药？",
+        "expect_context_keywords": ["发烧", "孩子"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应针对儿童发热给出退烧建议"
+      },
+      {
+        "role": "user",
+        "content": "退了又烧起来，反复三天了",
+        "expect_context_keywords": ["发烧", "孩子", "退烧"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "发热反复，需结合前文评估严重性"
+      },
+      {
+        "role": "user",
+        "content": "需要去医院吗？",
+        "expect_context_keywords": ["发烧", "反复", "孩子"],
+        "expect_refers_to": "turn_0,turn_1,turn_2",
+        "annotation": "综合儿童发热反复三天给出就医建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_016",
+    "description": "皮肤瘙痒 → 部位 → 皮疹 → 处理，测试皮肤科场景",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我身上很痒",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "主要是手臂和腿上",
+        "expect_context_keywords": ["痒"],
+        "expect_refers_to": "turn_0",
+        "annotation": "补充瘙痒部位"
+      },
+      {
+        "role": "user",
+        "content": "起了红色小疹子",
+        "expect_context_keywords": ["痒", "手臂", "腿"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "补充皮疹表现"
+      },
+      {
+        "role": "user",
+        "content": "怎么处理？需要涂什么药膏？",
+        "expect_context_keywords": ["痒", "疹子", "手臂"],
+        "expect_refers_to": "turn_0,turn_1,turn_2",
+        "annotation": "综合瘙痒+部位+皮疹给出处理建议"
+      }
+    ]
+  },
+  {
+    "id": "mt_017",
+    "description": "用药 → 药物相互作用 → 注意事项，测试用药安全",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我在吃阿司匹林和二甲双胍",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "这两种药能一起吃吗？",
+        "expect_context_keywords": ["阿司匹林", "二甲双胍"],
+        "expect_refers_to": "turn_0",
+        "annotation": "询问药物相互作用"
+      },
+      {
+        "role": "user",
+        "content": "有什么注意事项？",
+        "expect_context_keywords": ["阿司匹林", "二甲双胍", "一起"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "追问用药注意事项"
+      }
+    ]
+  },
+  {
+    "id": "mt_018",
+    "description": "体检建议 → 检查项目 → 异常处理，测试健康管理",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我45岁了，应该做哪些体检？",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "如果发现血压偏高怎么办？",
+        "expect_context_keywords": ["体检"],
+        "expect_refers_to": "turn_0",
+        "annotation": "假设体检发现问题，追问处理"
+      },
+      {
+        "role": "user",
+        "content": "血脂也高呢？",
+        "expect_context_keywords": ["体检", "血压偏高"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "叠加更多异常指标"
+      }
+    ]
+  },
+  {
+    "id": "mt_019",
+    "description": "术后恢复 → 饮食 → 运动 → 复查，测试术后管理",
+    "turns": [
+      {
+        "role": "user",
+        "content": "我刚做完阑尾炎手术，出院了",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "饮食上有什么注意的？",
+        "expect_context_keywords": ["阑尾炎", "手术"],
+        "expect_refers_to": "turn_0",
+        "annotation": "术后饮食指导"
+      },
+      {
+        "role": "user",
+        "content": "什么时候可以开始运动？",
+        "expect_context_keywords": ["手术", "阑尾炎"],
+        "expect_refers_to": "turn_0",
+        "annotation": "术后运动恢复"
+      },
+      {
+        "role": "user",
+        "content": "伤口有点红肿，正常吗？",
+        "expect_context_keywords": ["手术", "伤口"],
+        "expect_refers_to": "turn_0",
+        "annotation": "术后并发症识别"
+      }
+    ]
+  },
+  {
+    "id": "mt_020",
+    "description": "情绪低落 → 抑郁自评 → 求助渠道，测试心理健康场景",
+    "turns": [
+      {
+        "role": "user",
+        "content": "最近心情很差，什么都不想做",
+        "expect_context_keywords": []
+      },
+      {
+        "role": "user",
+        "content": "这算抑郁症吗？",
+        "expect_context_keywords": ["心情差", "不想做"],
+        "expect_refers_to": "turn_0",
+        "annotation": "应基于症状描述给出初步评估建议"
+      },
+      {
+        "role": "user",
+        "content": "应该去哪里看？",
+        "expect_context_keywords": ["心情", "抑郁"],
+        "expect_refers_to": "turn_0,turn_1",
+        "annotation": "给出就诊科室和求助渠道"
+      }
+    ]
+  }
+]
