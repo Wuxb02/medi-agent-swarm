@@ -959,36 +959,118 @@ python mediZJ/knowledge/scripts/deduplicate.py
 #### 检索架构
 
 ```
-用户查询
-    │
-    ├─ Path 1: 稠密向量检索 (Dense)
-    │     BAAI/bge-small-zh-v1.5 → IP ANN (Milvus FLAT)
-    │
-    ├─ Path 2: BM25 稀疏检索 (Sparse)
-    │     Milvus 内置 BM25 Function → SPARSE_INVERTED_INDEX
-    │
-    └─ Path 3: 医学实体精确匹配 (Entity Boost)
-          jieba 分词 → 内存倒排索引 → 精确命中加权
+用户查询: "高血压怎么治疗"
+     │
+     ├─ Path 1: 稠密向量检索 (Dense)
+     │     BAAI/bge-small-zh-v1.5 (512d)
+     │     → query embedding (IP, L2 归一化)
+     │     → AnnSearchRequest, limit=top_k×3
+     │     → FLAT 索引，暴力精确搜索
+     │
+     ├─ Path 2: BM25 稀疏检索 (Sparse)
+     │     客户端 jieba 中文分词 → TF 编码
+     │     → BM25EmbeddingFunction(language="zh")
+     │     → Dict[int, float] 稀疏向量
+     │     → AnnSearchRequest, limit=top_k×3
+     │     → SPARSE_INVERTED_INDEX, metric=IP
+     │
+     └─ Path 3: 医学实体精确匹配 (Entity Boost)
+           jieba 分词 → 医学实体过滤
+           → 内存倒排索引 entity → Set[doc_id]
+           → 查询词命中计数 → 归一化 [0,1]
 ```
+
+#### 数据入库（写入侧）
+
+写入时客户端编码双路向量，显式传入 Milvus：
+
+```
+原始文档 (94 个 .txt)
+  │
+  ├─ 文本分块 (chunk_size=1024, overlap=100)
+  │
+  ├─ Dense 向量化
+  │    SentenceTransformer.encode()
+  │    → dense_vector (FLOAT_VECTOR, 512d)
+  │
+  ├─ BM25 稀疏向量化
+  │    ① build_default_analyzer(language="zh")
+  │    ② BM25EmbeddingFunction(analyzer)
+  │    ③ 首次导入: bm25_ef.fit(all_texts) → 训练 IDF 词表
+  │    ④ encode_documents(texts) → csr_array
+  │    ⑤ CSR → List[Dict[int, float]] 转换
+  │    ⑥ 显式写入 sparse_vector 字段
+  │    ⑦ 写入后 refit + pickle 持久化到 bm25_model.pkl
+  │
+  └─ Entity Index 增量同步
+       entity_index.add_document(doc_id, text)
+```
+
+**BM25 编码说明**：Milvus 内置 `FunctionType.BM25` 默认使用英文分词器，对中文文本无法正确分词导致 NaN/Inf 崩溃。现改为客户端 `BM25EmbeddingFunction(language="zh")`（内部集成 jieba）接管编码，Milvus 侧仅保留 `SPARSE_INVERTED_INDEX` 做稀疏内积检索。启动时优先加载 `bm25_model.pkl`，缺失则从 Collection 已有文档自动拟合。
 
 #### 融合策略
 
-| 阶段 | 方法 | 说明 |
+| 阶段 | 方法 | 公式 |
 |------|------|------|
-| **Path 1+2 融合** | Milvus RRF (RRFRanker, k=60) | Dense 与 BM25 结果在 Milvus 内部做倒数排名融合 |
-| **Path 3 加权** | App-level Entity Boost | 实体精确命中的 doc_id 获得 `+0.15` 得分加成 |
-| **最终归一化** | `final_score = min(RRF_norm + entity_bonus × 0.15, 1.0)` | 分数裁剪到 [0, 1] |
+| **Path 1+2 融合** | Milvus RRF (RRFRanker, k=60) | `RRF(d) = 1/(60+rank_dense) + 1/(60+rank_sparse)` |
+| **RRF 归一化** | 除以理论最大值 | `normalized = raw_rrf / (2.0/61)` |
+| **Path 3 加权** | App-level Entity Boost | `bonus = entity_hit_count(d) / max_hits × 0.15` |
+| **最终得分** | 上界截断 | `final_score = min(normalized + bonus, 1.0)` |
 | **去重** | 按 `doc_id` 保留最高分 | 每份文档只返回最匹配的一个 chunk |
 
-#### 实体倒排索引
+#### 完整计分公式
+
+```
+final_score(d) = min( ──────────────────────  +  ────────────────────── × 0.15 , 1.0 )
+                         2.0 / 61                         max_hits
+                         ↑                               ↑
+                    Path 1+2 RRF 贡献               Path 3 Entity 贡献
+
+其中:
+  rank_dense  = Path 1 IP 检索排序序号
+  rank_sparse = Path 2 IP 稀疏检索排序序号
+  entity_hit_count(d) = 查询中的医学实体在文档 d 中出现的去重种数
+  max_hits = 所有文档中最高的 entity_hit_count，用于归一化到 [0,1]
+```
+
+#### 双路差异与互补
+
+| 维度 | Path 1 (Dense) | Path 2 (BM25) | Path 3 (Entity) |
+|------|---------------|---------------|-----------------|
+| 编码方式 | SentenceTransformer | BM25EmbeddingFunction(language="zh") | jieba + 倒排索引 |
+| 索引结构 | FLAT 暴力搜索 | SPARSE_INVERTED_INDEX | 内存 dict[entity→Set[doc_id]] |
+| 度量 | IP (归一化后=余弦) | IP (稀疏内积) | 命中计数归一化 |
+| 优势 | 语义理解，同义词/近义词 | 精确关键词匹配，**IDF 自动区分高频/低频词** | 医学实体精确命中 |
+| 举例 | "血压高" → 召回"高血压"文档 | "高血压" → 精确命中含"高血压"的文档 | "ACEI" → 精确命中含该药物的文档 |
+| 权重贡献 | RRF 排名融合 | RRF 排名融合 | +0 ~ 0.15 边际增益 |
+
+#### 实体倒排索引（Path 3）
 
 `MedicalEntityIndex` 在启动时从 Milvus 全量文档中自抽取医学实体：
 
 - **分词**: jieba 中文分词
-- **过滤**: 保留中文字符 2-12 字、ICD 编码、药品后缀、英文缩写；排除停用词
+- **过滤**: 中文字符 2-12 字、ICD 编码 (`I10`、`E11.2`)、药品后缀 (`pril`、`lol`、`pine`)、英文缩写 (`ACEI`、`CCB`、`BMI`)、剂量单位 (`10mg`、`5ml`)
+- **停用词**: 过滤高频医学词（"治疗""检查""疾病""症状"等）和通用虚词，防止无区分度的词污染命中计数
 - **索引**: `entity → Set[doc_id]` 内存映射
-- **查询**: 用户 query 分词后取并集，按命中实体数归一化到 [0, 1]
+- **查询**: 用户 query 分词→实体过滤→按 doc_id 累加命中数→除以最大命中数归一化到 [0, 1]
 - **更新**: 文档增删时增量同步
+
+> **为何 Entity Index 需要额外过滤高频医学词，而 BM25 不需要？**
+>
+> BM25 的 IDF 机制内建高频词降权——"治疗"出现在 60+ 文档中，IDF ≈ 0.45，"高血压"出现在 4 文档中，IDF ≈ 2.97。数学公式自动区分。而 Entity Index 是简单命中计数，不过滤则"治疗"会匹配几乎所有文档，完全丧失区分度。
+
+#### NaN/Inf 防护
+
+`_hybrid_search()` 返回结果逐 hit 扫描，对 `distance` 字段做合法性检查：
+
+```python
+for hit in results[0]:
+    dist = hit.get("distance", 0.0)
+    if math.isnan(dist) or math.isinf(dist):
+        hit["distance"] = 0.0
+```
+
+异常兜底：`search()` 中 `try/except Exception` 捕获 hybrid_search 异常 → 记录日志 → 返回 `[]`。
 
 ### 知识库引用标注
 

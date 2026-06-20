@@ -31,11 +31,11 @@ from mediZJ.eval.config import REPORTS_DIR, THRESHOLDS
 
 # ===== 评估器注册表 =====
 EVAL_REGISTRY = {
-    "routing": ("eval.evaluators.routing_eval", "run_routing_eval", "智能路由准确率"),
-    "retrieval": ("eval.evaluators.retrieval_eval", "run_retrieval_eval", "知识库检索准确率"),
-    "latency": ("eval.evaluators.latency_eval", "run_latency_eval", "响应时间"),
-    "multiturn": ("eval.evaluators.multiturn_eval", "run_multiturn_eval", "多轮对话上下文理解"),
-    "abtest": ("eval.evaluators.abtest_eval", "run_abtest_eval", "AB 测试"),
+    "routing": ("mediZJ.eval.evaluators.routing_eval", "run_routing_eval", "智能路由准确率"),
+    "retrieval": ("mediZJ.eval.evaluators.retrieval_eval", "run_retrieval_eval", "知识库检索准确率"),
+    "latency": ("mediZJ.eval.evaluators.latency_eval", "run_latency_eval", "响应时间"),
+    "multiturn": ("mediZJ.eval.evaluators.multiturn_eval", "run_multiturn_eval", "多轮对话上下文理解"),
+    "abtest": ("mediZJ.eval.evaluators.abtest_eval", "run_abtest_eval", "AB 测试"),
 }
 
 

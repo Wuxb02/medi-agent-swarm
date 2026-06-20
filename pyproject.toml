@@ -27,7 +27,7 @@ dependencies = [
     "mem0ai==0.1.0",
     "redis==5.2.0",
     "qdrant-client==1.12.0",
-    "pymilvus>=2.3.0",
+    "pymilvus[model]>=2.3.0",
     "requests==2.32.0",
     "beautifulsoup4==4.12.3",
     "duckduckgo-search==6.3.5",
@@ -46,6 +46,7 @@ dependencies = [
     "sse-starlette>=2.1.0",
     "python-multipart>=0.0.9",
     "jinja2>=3.1.6",
+    "nltk>=3.9.1",
 ]
 
 [tool.setuptools.packages.find]

@@ -3,7 +3,7 @@
 
 检索路径：
   Path 1 — 稠密向量 : bge-small-zh-v1.5 → Milvus IP ANN
-  Path 2 — BM25 稀疏 : Milvus 内置 BM25 Function → SPARSE_FLOAT_VECTOR
+  Path 2 — BM25 稀疏 : jieba 客户端编码 → SPARSE_FLOAT_VECTOR
   Path 3 — 医学实体精确匹配 : jieba + 内存倒排索引
 
 融合策略：Milvus RRF (Path1+2) + App-level Entity Boost (Path3)
@@ -11,20 +11,28 @@
 兼容性：search() 签名与返回值结构保持不变，所有 Skill 无需改动
 """
 import json
+import math
+import pickle
 from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from pymilvus import (
-    MilvusClient, DataType, Function, FunctionType,
+    MilvusClient, DataType,
     AnnSearchRequest, RRFRanker,
 )
+from pymilvus.model.sparse import BM25EmbeddingFunction
+from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
 from sentence_transformers import SentenceTransformer
 
 from mediZJ.knowledge.entity_index import MedicalEntityIndex
 
 COLLECTION_NAME = "medical_knowledge_v2"
+BM25_PICKLE_PATH = (
+    Path(__file__).resolve().parent / "data" / "bm25_model.pkl"
+)
+
 
 # ---- Trace 集成（可选）----
 try:
@@ -99,6 +107,9 @@ class MedicalKnowledgeBase:
         self.entity_index = MedicalEntityIndex()
         self._build_entity_index()
 
+        # ---- BM25 稀疏编码器 ----
+        self._init_bm25()
+
         self._initialized = True
 
     # ------------------------------------------------------------------
@@ -106,7 +117,7 @@ class MedicalKnowledgeBase:
     # ------------------------------------------------------------------
 
     def _create_collection(self):
-        """创建显式 Schema + BM25 Function 的 collection"""
+        """创建显式 Schema 的 collection（稀疏向量由客户端 BM25EmbeddingFunction 编码）"""
         schema = MilvusClient.create_schema(
             auto_id=True, enable_dynamic_field=True,
         )
@@ -121,18 +132,10 @@ class MedicalKnowledgeBase:
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=self.embedding_dim)
         schema.add_field("sparse_vector", DataType.SPARSE_FLOAT_VECTOR)
 
-        bm25_fn = Function(
-            name="bm25",
-            function_type=FunctionType.BM25,
-            input_field_names=["text"],
-            output_field_names=["sparse_vector"],
-        )
-        schema.add_function(bm25_fn)
-
         index_params = self.milvus_client.prepare_index_params()
         index_params.add_index("dense_vector", index_type="FLAT", metric_type="IP")
         index_params.add_index(
-            "sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25",
+            "sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="IP",
         )
 
         self.milvus_client.create_collection(
@@ -140,7 +143,7 @@ class MedicalKnowledgeBase:
             schema=schema,
             index_params=index_params,
         )
-        logger.info("Collection created with BM25 Function")
+        logger.info("Collection created (sparse vector via client-side BM25)")
 
     def _build_entity_index(self):
         """从当前 collection 的文档文本构建实体倒排索引"""
@@ -170,8 +173,81 @@ class MedicalKnowledgeBase:
         self.entity_index.build_from_kb(docs)
 
     # ------------------------------------------------------------------
-    # 文本分块
+    # BM25 稀疏编码器
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sparse_row_to_dict(row: Any) -> Dict[int, float]:
+        """将单个稀疏矩阵行转换为 Milvus 所需的 Dict[int, float] 格式"""
+        coo = row.tocoo()
+        return {int(c): float(v) for c, v in zip(coo.col, coo.data)}
+
+    @classmethod
+    def _sparse_rows_to_dict_list(cls, matrix: Any) -> List[Dict[int, float]]:
+        """将稀疏矩阵转换为 List[Dict[int, float]] 格式"""
+        result = []
+        for i in range(matrix.shape[0]):
+            result.append(cls._sparse_row_to_dict(matrix[i]))
+        return result
+
+    def _init_bm25(self) -> None:
+        """初始化 BM25 稀疏编码器：优先加载 pickle，否则从 Collection 已有文档拟合"""
+        analyzer = build_default_analyzer(language="zh")
+        self.bm25_ef = BM25EmbeddingFunction(analyzer)
+        self._bm25_fitted = False
+
+        if BM25_PICKLE_PATH.exists():
+            try:
+                with open(BM25_PICKLE_PATH, "rb") as f:
+                    self.bm25_ef = pickle.load(f)
+                self._bm25_fitted = True
+                logger.info(
+                    f"BM25 model loaded from pickle "
+                    f"(dim={self.bm25_ef.dim})"
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load BM25 pickle, will rebuild: {e}")
+
+        # 从已有文档构建
+        try:
+            rows = self.milvus_client.query(
+                collection_name=self.collection_name,
+                filter="id >= 0",
+                output_fields=["text"],
+                limit=16384,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to query docs for BM25 fit: {e}")
+            return
+
+        if rows:
+            texts = [r.get("text", "") for r in rows if r.get("text", "")]
+            if texts:
+                self.bm25_ef.fit(texts)
+                self._bm25_fitted = True
+                self._save_bm25()
+                logger.info(
+                    f"BM25 model fitted on {len(texts)} chunks "
+                    f"(dim={self.bm25_ef.dim})"
+                )
+
+    def _bm25_encode_documents(self, texts: List[str]) -> List[Dict[int, float]]:
+        return self._sparse_rows_to_dict_list(
+            self.bm25_ef.encode_documents(texts)
+        )
+
+    def _bm25_encode_query(self, query: str) -> Dict[int, float]:
+        return self._sparse_row_to_dict(
+            self.bm25_ef.encode_queries([query])[0]
+        )
+
+    def _save_bm25(self) -> None:
+        """持久化 BM25 模型到 pickle"""
+        BM25_PICKLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(BM25_PICKLE_PATH, "wb") as f:
+            pickle.dump(self.bm25_ef, f)
+        logger.debug("BM25 model saved to pickle")
 
     @staticmethod
     def _chunk_text(text: str, chunk_size: int = 1024, overlap: int = 100) -> List[str]:
@@ -233,9 +309,17 @@ class MedicalKnowledgeBase:
 
         logger.info(f"Split into {len(all_chunks)} chunks")
 
-        # 向量化（仅 dense）
+        # 向量化（dense + sparse）
         texts = [c["text"] for c in all_chunks]
         vectors = self.embedding_model.encode(texts, show_progress_bar=True)
+
+        # BM25 稀疏向量：客户端 jieba 分词编码（覆盖 Milvus 内置英文分词器）
+        if not self._bm25_fitted:
+            self.bm25_ef.fit(texts)
+            self._bm25_fitted = True
+            self._save_bm25()
+            logger.info(f"BM25 model fitted on {len(texts)} chunks")
+        sparse_vectors = self._bm25_encode_documents(texts)
 
         # 组装插入数据
         data = []
@@ -247,7 +331,7 @@ class MedicalKnowledgeBase:
                 "total_chunks": chunk["total_chunks"],
                 "text": chunk["text"],
                 "dense_vector": vectors[i].tolist(),
-                # sparse_vector 由 BM25 Function 自动填充，无需显式传入
+                "sparse_vector": sparse_vectors[i],
                 # 动态字段
                 "disease": chunk["disease"],
                 "source": chunk["source"],
@@ -258,6 +342,17 @@ class MedicalKnowledgeBase:
 
         self.milvus_client.insert(self.collection_name, data)
         logger.info(f"Successfully added {len(data)} chunks")
+
+        # 更新 BM25 IDF 统计并持久化
+        all_texts = [r.get("text", "") for r in self.milvus_client.query(
+            collection_name=self.collection_name,
+            filter="id >= 0",
+            output_fields=["text"],
+            limit=16384,
+        )]
+        if all_texts:
+            self.bm25_ef.fit(all_texts)
+            self._save_bm25()
 
         # 增量更新实体索引
         seen_doc_ids: set = set()
@@ -292,10 +387,12 @@ class MedicalKnowledgeBase:
             expr=filter_expr,
         )
 
+        # BM25 稀疏向量：客户端 jieba 分词编码
+        sparse_vec = self._bm25_encode_query(query)
         sparse_req = AnnSearchRequest(
-            data=[query],
+            data=[sparse_vec],
             anns_field="sparse_vector",
-            param={"metric_type": "BM25"},
+            param={"metric_type": "IP"},
             limit=top_k * 3,
             expr=filter_expr,
         )
@@ -310,6 +407,11 @@ class MedicalKnowledgeBase:
                 "total_chunks", "text",
             ],
         )
+        # NaN/Inf 防护：扫描结果距离值并修复
+        for hit in results[0]:
+            dist = hit.get("distance", 0.0)
+            if math.isnan(dist) or math.isinf(dist):
+                hit["distance"] = 0.0
         return results[0]  # 单 query 取第一组
 
     def search(
