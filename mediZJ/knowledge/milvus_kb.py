@@ -62,10 +62,13 @@ class MedicalKnowledgeBase:
 
     def __init__(
         self,
-        db_path: str = "./knowledge/data/milvus_lite.db",
+        db_path: str = None,
         collection_name: str = COLLECTION_NAME,
         embedding_model: str = "BAAI/bge-small-zh-v1.5",
     ):
+        if db_path is None:
+            import os
+            db_path = os.path.join(os.path.dirname(__file__), "data", "milvus_lite.db")
         if hasattr(self, "_initialized"):
             return
 
@@ -98,10 +101,8 @@ class MedicalKnowledgeBase:
         logger.info(f"Connecting to Milvus Lite: {db_path}")
         self.milvus_client = MilvusClient(db_path)
 
-        # ---- 创建 Collection（显式 Schema + BM25 Function）----
-        if not self.milvus_client.has_collection(collection_name):
-            logger.info(f"Creating collection: {collection_name}")
-            self._create_collection()
+        # ---- 创建/校验 Collection Schema ----
+        self._ensure_collection_schema(collection_name)
 
         # ---- Entity Index ----
         self.entity_index = MedicalEntityIndex()
@@ -115,6 +116,43 @@ class MedicalKnowledgeBase:
     # ------------------------------------------------------------------
     # Schema 创建
     # ------------------------------------------------------------------
+
+    def _ensure_collection_schema(self, collection_name: str):
+        """如果 collection 已存在但 schema 不兼容，自动重建"""
+        if not self.milvus_client.has_collection(collection_name):
+            logger.info(f"Creating collection: {collection_name}")
+            self._create_collection()
+            return
+
+        try:
+            idx_info = self.milvus_client.describe_index(
+                collection_name, "sparse_vector",
+            )
+            metric_type = idx_info.get("metric_type", "")
+        except Exception:
+            metric_type = ""
+
+        if metric_type != "IP":
+            logger.warning(
+                f"检测到旧 schema（sparse_vector metric_type={metric_type}），"
+                f"自动重建 collection..."
+            )
+            self._delete_and_recreate()
+
+    def _delete_and_recreate(self):
+        """删除旧 collection 并用新 schema 重建"""
+        self.milvus_client.drop_collection(self.collection_name)
+        logger.info(f"已删除旧 collection: {self.collection_name}")
+        self._create_collection()
+        data_path = Path(self.db_path)
+        bm25_path = (
+            data_path.parent / "bm25_model.pkl"
+            if data_path.name == "milvus_lite.db"
+            else Path("bm25_model.pkl")
+        )
+        if bm25_path.exists():
+            bm25_path.unlink()
+            logger.debug("已删除旧 BM25 pickle（与旧 schema 不兼容）")
 
     def _create_collection(self):
         """创建显式 Schema 的 collection（稀疏向量由客户端 BM25EmbeddingFunction 编码）"""

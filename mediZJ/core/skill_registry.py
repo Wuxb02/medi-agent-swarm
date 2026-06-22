@@ -323,3 +323,22 @@ class SkillRegistry:
     def to_openai_format_all(self) -> List[Dict[str, Any]]:
         """返回所有注册工具（不论模式），用于调试"""
         return self._to_openai_format_compat()
+
+    # =====================================================
+    # LangGraph 迁移接口
+    # =====================================================
+
+    def export_for_langgraph(self) -> Dict[str, Any]:
+        """
+        导出 Skill 数据供 LangGraph ToolRegistry 使用
+
+        Returns:
+            {
+                "skill_definitions": {name: SkillDefinition},
+                "base_tools": {name: {function, description, parameters}},
+            }
+        """
+        return {
+            "skill_definitions": dict(self._skill_definitions),
+            "base_tools": dict(self.base_tools),
+        }

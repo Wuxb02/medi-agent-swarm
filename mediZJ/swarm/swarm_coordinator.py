@@ -7,9 +7,14 @@ SwarmCoordinator：Swarm 入口和智能路由
 - 不编排任务顺序
 
 类比：交通信号灯，决定车辆走哪条路，但不控制车辆如何行驶
+
+双轨运行：通过 MEDIZJ_USE_LANGGRAPH 环境变量控制
+- false（默认）：走原有 AgentLoop + asyncio.wait 路径
+- true：走 LangGraph SupervisorGraph + Send API 路径
 """
 import asyncio
 import json
+import os
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -32,6 +37,19 @@ try:
     _TRACE = True
 except ImportError:
     _TRACE = False
+
+# LangGraph 双轨开关
+_USE_LANGGRAPH = os.environ.get("MEDIZJ_USE_LANGGRAPH", "true").lower() in ("true", "1", "yes")
+_LANGGRAPH_AVAILABLE = False
+try:
+    from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
+    from mediZJ.lgraph.tool_registry import ToolRegistry
+    from mediZJ.core.skill_loader import discover_skills, invalidate_skill_cache
+    from mediZJ.core.skill_models import SkillDefinition
+    _LANGGRAPH_AVAILABLE = True
+except ImportError as e:
+    if _USE_LANGGRAPH:
+        logger.warning(f"MEDIZJ_USE_LANGGRAPH=true 但 langgraph 模块不可用: {e}")
 
 
 class SwarmCoordinator:
@@ -87,6 +105,11 @@ class SwarmCoordinator:
         from mediZJ.core.circuit_breaker import CircuitBreaker
         self.cb = CircuitBreaker(failure_threshold=5, cooldown_seconds=30.0)
 
+        # LangGraph ToolRegistry（双轨模式下使用）
+        self._tool_registry = None
+        if _USE_LANGGRAPH and _LANGGRAPH_AVAILABLE:
+            self._init_langgraph_registry()
+
         # 将短期记忆和用户档案注入到所有 Worker Agent 的 Loop
         # 注意：LeadAgent 不继承 BaseAgent，没有 loop 属性，不需要注入
         personal_text = self.personal_profile.to_text()
@@ -110,6 +133,183 @@ class SwarmCoordinator:
             "research_agent": self.research_agent
         }
         return mapping.get(agent_id)
+
+    # ===== LangGraph 双轨模式方法 =====
+
+    def _init_langgraph_registry(self):
+        """初始化 LangGraph ToolRegistry（从 .claude/skills/ 加载）"""
+        if not _LANGGRAPH_AVAILABLE:
+            return
+
+        from pathlib import Path
+        # __file__ = mediZJ/swarm/swarm_coordinator.py
+        # parent = mediZJ/swarm/, parent.parent = mediZJ/
+        # parent.parent.parent = 项目根目录
+        project_root = Path(__file__).parent.parent.parent
+        project_root = project_root.resolve()
+
+        discovered = discover_skills(project_root)
+        if not discovered:
+            logger.warning("未发现任何 Skill，LangGraph 模式将只有基础工具")
+            return
+
+        self._tool_registry = ToolRegistry()
+        self._tool_registry.register_from_skills(discovered)
+
+        # 注册基础工具：activate_skill
+        from mediZJ.core.tools.activate_skill import create_activate_skill_tool
+
+        # 使用 ToolRegistry 自己的 activate_skill 逻辑
+        async def _activate_skill(name: str) -> Dict[str, Any]:
+            """激活指定 Skill，使其工具对 LLM 可见"""
+            skill_names = self._tool_registry.get_skill_names()
+            if name not in skill_names:
+                return {
+                    "success": False,
+                    "error": f"未知 Skill: {name}。可用 Skills: {', '.join(skill_names)}",
+                }
+            instructions = self._tool_registry.get_skill_instructions(name)
+            tool_names = self._tool_registry.get_skill_tool_names(name)
+            return {
+                "success": True,
+                "active_skill": name,
+                "instructions": instructions or "",
+                "description": f"Skill '{name}' 已激活，{len(tool_names)} 个工具可用",
+                "available_tools": tool_names,
+            }
+
+        self._tool_registry.register_base_tool(
+            name="activate_skill",
+            func=_activate_skill,
+            description="激活指定 Skill。激活后可以使用该 Skill 的工具。同一时间只能有一个 Skill 处于激活状态。",
+        )
+
+        # 注册基础工具：question_for_user
+        from mediZJ.core.tools.questionnaire import create_question_for_user_tool
+
+        def _get_manager():
+            return self.questionnaire_manager
+
+        q_func = create_question_for_user_tool(_get_manager)
+        self._tool_registry.register_base_tool(
+            name="question_for_user",
+            func=q_func,
+            description="向用户发送结构化问卷，收集诊断所需信息。",
+        )
+
+        logger.info(
+            f"[LangGraph] ToolRegistry initialized: "
+            f"{len(self._tool_registry)} tools, "
+            f"{len(self._tool_registry.get_skill_names())} skills"
+        )
+
+    async def _process_with_langgraph(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        使用 LangGraph SupervisorGraph 处理请求（双轨模式）
+
+        Args:
+            question: 用户问题
+            context: 额外上下文
+            session_id: 会话ID
+
+        Returns:
+            与 process() 相同格式的结果
+        """
+        if not _LANGGRAPH_AVAILABLE or self._tool_registry is None:
+            logger.warning("LangGraph 不可用，回退到 legacy 路径")
+            return await self._process_legacy(question, context, session_id)
+
+        start_time = datetime.now()
+        if session_id is None:
+            session_id = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+
+        logger.info(f"[LangGraph] Processing (session={session_id}): {question[:50]}...")
+
+        # 构建并执行 SupervisorGraph
+        graph = build_supervisor_graph(
+            coordinator=self,
+            tool_registry=self._tool_registry,
+            event_callback=self.event_callback,
+        )
+
+        config = {"configurable": {"thread_id": session_id}}
+
+        initial_state = {
+            "question": question,
+            "session_id": session_id,
+            "context": context or {},
+            "start_time": start_time.isoformat(),
+            "clarify_complete": False,
+            "clarify_round": 0,
+            "subtasks": [],
+            "swarm_contributions": {},
+            "swarm_subtasks_status": {},
+            "all_references": {},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "_swarm_finalized": False,
+        }
+
+        try:
+            result_state = await graph.ainvoke(initial_state, config)
+        except Exception as e:
+            logger.error(f"[LangGraph] 图执行异常: {e}")
+            return {
+                "answer": f"系统处理异常: {e}",
+                "session_id": session_id,
+                "swarm_enabled": False,
+                "agents_involved": [],
+                "error": str(e),
+            }
+
+        end_time = datetime.now()
+
+        # 从图 state 构建返回结果（与 legacy 格式兼容）
+        result = {
+            "answer": result_state.get("final_answer", ""),
+            "suggestions": result_state.get("suggestions", []),
+            "disclaimer": result_state.get("disclaimer",
+                "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"),
+            "session_id": session_id,
+            "swarm_enabled": result_state.get("swarm_enabled", False),
+            "agents_involved": result_state.get("agents_involved", []),
+            "subtasks_completed": len(result_state.get("swarm_contributions", {})),
+            "total_time": result_state.get("total_time", (end_time - start_time).total_seconds()),
+            "swarm_metadata": result_state.get("swarm_metadata", {}),
+            "timeout_occurred": result_state.get("timeout_occurred", False),
+            "usage": result_state.get("usage", {}),
+            "citations": result_state.get("citations", []),
+            "mode": result_state.get("mode", "langgraph"),
+            "_swarm_finalized": True,
+        }
+
+        # LTM fire-and-forget
+        ltm_task = asyncio.ensure_future(self._save_long_term_memory(
+            session_id=session_id,
+            question=question,
+            answer=result["answer"],
+            metadata={
+                "mode": result_state.get("mode", "langgraph"),
+                "subtasks_count": len(result_state.get("subtasks", [])),
+                "total_time": result["total_time"],
+                "total_tokens": result["usage"].get("total_tokens", 0),
+            },
+        ))
+        result["_ltm_save_task"] = ltm_task
+
+        logger.info(
+            f"[LangGraph] 处理完成: mode={result['mode']}, "
+            f"agents={result['agents_involved']}, "
+            f"time={result['total_time']:.1f}s"
+        )
+        return result
+
+    # _process_impl 是原有的 process() 逻辑，已重命名为 _process_impl
+    # _process_with_langgraph 是新的 LangGraph 路径
 
     async def _retrieve_memories(self, session_id: str, question: str):
         """并行检索短期记忆和长期记忆
@@ -148,7 +348,25 @@ class SwarmCoordinator:
         """处理用户问题
 
         Pipeline: 检索 → 澄清 → 分解 → 路由 → 收尾
+
+        双轨运行：
+        - MEDIZJ_USE_LANGGRAPH=false（默认）：Legacy AgentLoop + asyncio.wait
+        - MEDIZJ_USE_LANGGRAPH=true：LangGraph SupervisorGraph + Send API
         """
+        # 双轨路由
+        if _USE_LANGGRAPH and _LANGGRAPH_AVAILABLE and self._tool_registry is not None:
+            return await self._process_with_langgraph(question, context, session_id)
+
+        # Legacy 路径（原有逻辑不变）
+        return await self._process_impl(question, context, session_id)
+
+    async def _process_impl(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Legacy 处理实现（原有 process() 逻辑完整保留）"""
         start_time = datetime.now()
         if session_id is None:
             session_id = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"

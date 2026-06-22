@@ -73,8 +73,13 @@ const workerBlocks = computed(() =>
   (props.message.thinkingBlocks || []).filter(b => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator')
 )
 
-// 只有 LeadAgent 真正执行了合成（iteration=2）才算完整 Swarm 周期
+// 完整 Swarm 周期：分解 + 合成（≥2 子任务时的多 Agent 协作）
 const hasFullSwarmCycle = computed(() => leadSynthesizeBlocks.value.length > 0)
+
+// 单 Agent 模式有分解但无合成，仍需嵌套展示（LeadAgent 分解 + Worker 执行）
+const hasLeadDecomposeWithWorker = computed(() =>
+  leadDecomposeBlocks.value.length > 0 && workerGroups.value.length > 0 && !hasFullSwarmCycle.value
+)
 
 // WorkerAgent 分组（按 agentId）
 const workerGroups = computed(() => {
@@ -154,8 +159,8 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
             </div>
 
             <!-- Thinking 内容块 -->
-            <!-- 完整 Swarm 周期（分解+合成）：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
-            <div v-if="hasFullSwarmCycle" class="space-y-2 mt-2">
+            <!-- Swarm/单Agent 嵌套布局：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
+            <div v-if="hasFullSwarmCycle || hasLeadDecomposeWithWorker" class="space-y-2 mt-2">
               <div class="border border-blue-200 rounded-lg overflow-hidden text-xs bg-blue-50/30">
                 <!-- LeadAgent 标题栏 -->
                 <button

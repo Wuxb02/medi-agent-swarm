@@ -69,63 +69,19 @@ class LLMClient:
         **kwargs
     ) -> str:
         """
-        异步聊天接口
+        异步聊天接口（纯文本场景，委托 chat_with_tools 并提取 .content）
 
-        Args:
-            messages: 消息列表，格式为 [{"role": "user", "content": "..."}]
-            temperature: 温度参数（可选）
-            max_tokens: 最大token数（可选）
-
-        Returns:
-            模型返回的文本
+        走 chat_with_tools(tools=None) 统一链路，自动获得 _sanitize_content()
+        XML 清洗，防止模型将 tool-call 格式输出为原始文本泄露到回答中。
         """
-        try:
-            from mediZJ.trace.context import traced_span
-            from mediZJ.trace.models import SpanType, LLMAttributes as LLMAttrs
-        except ImportError:
-            traced_span = None
-
-        try:
-            temperature = temperature or self.temperature
-            max_tokens = max_tokens or self.max_tokens
-
-            logger.debug(f"Calling LLM ({self.model_type}) with {len(messages)} messages")
-            logger.debug(f"LLM base_url: {self.client.base_url}, model: {self.model_name}")
-
-            if traced_span:
-                with traced_span(SpanType.LLM, name="chat") as span:
-                    span.llm_attrs = LLMAttrs(model=self.model_name)
-                    response = await self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        **kwargs
-                    )
-                    content = response.choices[0].message.content
-                    span.llm_attrs.finish_reason = response.choices[0].finish_reason or ""
-                    usage = getattr(response, "usage", None)
-                    if usage:
-                        span.llm_attrs.prompt_tokens = usage.prompt_tokens
-                        span.llm_attrs.completion_tokens = usage.completion_tokens
-                        span.llm_attrs.total_tokens = usage.total_tokens
-                    span.llm_attrs.output_content_summary = content or ""
-            else:
-                response = await self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    **kwargs
-                )
-                content = response.choices[0].message.content
-
-            logger.debug(f"LLM response length: {len(content)} chars")
-            return content
-
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            raise
+        response = await self.chat_with_tools(
+            messages=messages,
+            tools=None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs
+        )
+        return response.content or ""
 
     async def chat_with_retry(
         self,
