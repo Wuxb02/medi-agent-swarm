@@ -41,6 +41,8 @@ class MedicalEntityIndex:
     def __init__(self):
         # entity → {doc_id, ...}
         self.entity_to_docs: Dict[str, Set[str]] = defaultdict(set)
+        # entity → 文档频率（出现在多少个文档中）
+        self._entity_df: Dict[str, int] = {}
         self._doc_count = 0
 
     def build_from_kb(self, documents: List[Dict]):
@@ -64,6 +66,7 @@ class MedicalEntityIndex:
                 self.entity_to_docs[entity].add(doc_id)
 
         self._doc_count = len(documents)
+        self._entity_df = {entity: len(doc_ids) for entity, doc_ids in self.entity_to_docs.items()}
         logger.info(
             f"Entity index built: {len(self.entity_to_docs)} unique entities "
             f"from {self._doc_count} documents"
@@ -97,19 +100,28 @@ class MedicalEntityIndex:
 
     def search(self, query: str) -> Dict[str, float]:
         """
-        查询与 query 中医学实体匹配的 doc_id 及其加权分。
+        查询与 query 中医学实体匹配的 doc_id 及其加权分（IDF 加权）。
 
         Returns:
             {doc_id: boost_score}，boost_score 已归一化到 [0, 1]
         """
+        from math import log
+
         query_entities = self._extract_entities(query)
         if not query_entities:
             return {}
 
+        N = max(self._doc_count, 1)
         doc_scores: Dict[str, float] = defaultdict(float)
         for entity in query_entities:
-            for doc_id in self.entity_to_docs.get(entity, set()):
-                doc_scores[doc_id] += 1.0
+            doc_ids = self.entity_to_docs.get(entity, set())
+            if not doc_ids:
+                continue
+            # IDF 平滑加权：常见实体权重低，罕见实体权重高
+            df = self._entity_df.get(entity, len(doc_ids))
+            idf = log((N + 1) / (df + 1)) + 1.0
+            for doc_id in doc_ids:
+                doc_scores[doc_id] += idf
 
         max_score = max(doc_scores.values()) if doc_scores else 1.0
         return {k: v / max_score for k, v in doc_scores.items()}
@@ -119,13 +131,18 @@ class MedicalEntityIndex:
         entities = self._extract_entities(text)
         for entity in entities:
             self.entity_to_docs[entity].add(doc_id)
+        # 更新文档频率
+        self._entity_df = {e: len(docs) for e, docs in self.entity_to_docs.items()}
         self._doc_count += 1
 
     def remove_document(self, doc_id: str):
         """移除单个文档的实体索引"""
         for entity, doc_ids in self.entity_to_docs.items():
             doc_ids.discard(doc_id)
+        # 清理空集合
         self.entity_to_docs = defaultdict(
             set, {k: v for k, v in self.entity_to_docs.items() if v}
         )
+        # 同步清理文档频率（空实体已不存在于 entity_to_docs）
+        self._entity_df = {e: len(docs) for e, docs in self.entity_to_docs.items()}
         self._doc_count = max(0, self._doc_count - 1)

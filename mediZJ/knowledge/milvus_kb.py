@@ -173,14 +173,18 @@ class MedicalKnowledgeBase:
         if not rows:
             return
 
-        # 按 doc_id 去重（每个 doc 只取第一条 chunk 文本即可）
-        seen: set = set()
-        docs: List[Dict] = []
+        # 按 doc_id 聚合所有 chunk 文本（避免仅取 chunk_0 遗漏关键实体）
+        docs_by_id: dict = {}
         for row in rows:
             doc_id = row.get("doc_id", "")
-            if doc_id and doc_id not in seen:
-                seen.add(doc_id)
-                docs.append({"doc_id": doc_id, "text": row.get("text", "")})
+            text = row.get("text", "")
+            if doc_id and text:
+                if doc_id not in docs_by_id:
+                    docs_by_id[doc_id] = text
+                else:
+                    docs_by_id[doc_id] += "\n" + text
+
+        docs = [{"doc_id": k, "text": v} for k, v in docs_by_id.items()]
 
         self.entity_index.build_from_kb(docs)
 
