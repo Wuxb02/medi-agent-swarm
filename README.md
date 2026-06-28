@@ -967,12 +967,11 @@ python mediZJ/knowledge/scripts/deduplicate.py
      │     → AnnSearchRequest, limit=top_k×3
      │     → FLAT 索引，暴力精确搜索
      │
-     ├─ Path 2: BM25 稀疏检索 (Sparse)
-     │     客户端 jieba 中文分词 → TF 编码
-     │     → BM25EmbeddingFunction(language="zh")
-     │     → Dict[int, float] 稀疏向量
+     ├─ Path 2: 内置 BM25 稀疏检索 (Sparse)
+     │     原始文本字符串 → Milvus 服务端 chinese analyzer 分词
+     │     → 内置 BM25 Function 自动评分
      │     → AnnSearchRequest, limit=top_k×3
-     │     → SPARSE_INVERTED_INDEX, metric=IP
+     │     → SPARSE_INVERTED_INDEX, metric=BM25
      │
      └─ Path 3: 医学实体精确匹配 (Entity Boost)
            jieba 分词 → 医学实体过滤
@@ -982,7 +981,7 @@ python mediZJ/knowledge/scripts/deduplicate.py
 
 #### 数据入库（写入侧）
 
-写入时客户端编码双路向量，显式传入 Milvus：
+写入时仅编码稠密向量，稀疏向量由 Milvus 服务端 BM25 Function 自动生成：
 
 ```
 原始文档 (94 个 .txt)
@@ -993,27 +992,22 @@ python mediZJ/knowledge/scripts/deduplicate.py
   │    SentenceTransformer.encode()
   │    → dense_vector (FLOAT_VECTOR, 512d)
   │
-  ├─ BM25 稀疏向量化
-  │    ① build_default_analyzer(language="zh")
-  │    ② BM25EmbeddingFunction(analyzer)
-  │    ③ 首次导入: bm25_ef.fit(all_texts) → 训练 IDF 词表
-  │    ④ encode_documents(texts) → csr_array
-  │    ⑤ CSR → List[Dict[int, float]] 转换
-  │    ⑥ 显式写入 sparse_vector 字段
-  │    ⑦ 写入后 refit + pickle 持久化到 bm25_model.pkl
+  ├─ BM25 稀疏向量（服务端自动生成）
+  │    text 字段声明 analyzer_params={"type": "chinese"}
+  │    → Milvus 内置 BM25 Function 自动分词 + 评分
   │
   └─ Entity Index 增量同步
        entity_index.add_document(doc_id, text)
 ```
 
-**BM25 编码说明**：Milvus 内置 `FunctionType.BM25` 默认使用英文分词器，对中文文本无法正确分词导致 NaN/Inf 崩溃。现改为客户端 `BM25EmbeddingFunction(language="zh")`（内部集成 jieba）接管编码，Milvus 侧仅保留 `SPARSE_INVERTED_INDEX` 做稀疏内积检索。启动时优先加载 `bm25_model.pkl`，缺失则从 Collection 已有文档自动拟合。
+**BM25 编码说明**：使用 Milvus 2.5+ 内置 BM25 Function，text 字段声明 `analyzer_params={"type": "chinese"}` 使 Milvus 服务端以 jieba 中文分词自动构建 BM25 稀疏向量。
 
 #### 融合策略
 
 | 阶段 | 方法 | 公式 |
 |------|------|------|
 | **Path 1+2 融合** | Milvus RRF (RRFRanker, k=60) | `RRF(d) = 1/(60+rank_dense) + 1/(60+rank_sparse)` |
-| **RRF 归一化** | 除以理论最大值 | `normalized = raw_rrf / (2.0/61)` |
+| **RRF 归一化** | 动态最大距离归一化 | `normalized = raw_rrf / max_raw_score` |
 | **Path 3 加权** | App-level Entity Boost | `bonus = entity_hit_count(d) / max_hits × 0.15` |
 | **最终得分** | 上界截断 | `final_score = min(normalized + bonus, 1.0)` |
 | **去重** | 按 `doc_id` 保留最高分 | 每份文档只返回最匹配的一个 chunk |
@@ -1022,13 +1016,15 @@ python mediZJ/knowledge/scripts/deduplicate.py
 
 ```
 final_score(d) = min( ──────────────────────  +  ────────────────────── × 0.15 , 1.0 )
-                         2.0 / 61                         max_hits
-                         ↑                               ↑
+                         max_raw_score                     max_hits
+                         ↑                                 ↑
                     Path 1+2 RRF 贡献               Path 3 Entity 贡献
 
 其中:
   rank_dense  = Path 1 IP 检索排序序号
-  rank_sparse = Path 2 IP 稀疏检索排序序号
+  rank_sparse = Path 2 BM25 检索排序序号
+  raw_rrf = 1/(60+rank_dense) + 1/(60+rank_sparse)
+  max_raw_score = 所有候选 hit 中的最大 raw_rrf 值，用于动态归一化
   entity_hit_count(d) = 查询中的医学实体在文档 d 中出现的去重种数
   max_hits = 所有文档中最高的 entity_hit_count，用于归一化到 [0,1]
 ```
@@ -1037,9 +1033,9 @@ final_score(d) = min( ───────────────────�
 
 | 维度 | Path 1 (Dense) | Path 2 (BM25) | Path 3 (Entity) |
 |------|---------------|---------------|-----------------|
-| 编码方式 | SentenceTransformer | BM25EmbeddingFunction(language="zh") | jieba + 倒排索引 |
+| 编码方式 | SentenceTransformer | Milvus 内置 BM25 Function (chinese analyzer) | jieba + 倒排索引 |
 | 索引结构 | FLAT 暴力搜索 | SPARSE_INVERTED_INDEX | 内存 dict[entity→Set[doc_id]] |
-| 度量 | IP (归一化后=余弦) | IP (稀疏内积) | 命中计数归一化 |
+| 度量 | IP (归一化后=余弦) | BM25 (标准评分) | 命中计数归一化 |
 | 优势 | 语义理解，同义词/近义词 | 精确关键词匹配，**IDF 自动区分高频/低频词** | 医学实体精确命中 |
 | 举例 | "血压高" → 召回"高血压"文档 | "高血压" → 精确命中含"高血压"的文档 | "ACEI" → 精确命中含该药物的文档 |
 | 权重贡献 | RRF 排名融合 | RRF 排名融合 | +0 ~ 0.15 边际增益 |
@@ -1066,7 +1062,7 @@ final_score(d) = min( ───────────────────�
 ```python
 for hit in results[0]:
     dist = hit.get("distance", 0.0)
-    if math.isnan(dist) or math.isinf(dist):
+    if math.isnan(dist) or math.isinf(dist) or dist < 0:
         hit["distance"] = 0.0
 ```
 
