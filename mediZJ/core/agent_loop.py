@@ -225,12 +225,62 @@ class AgentLoop:
                         non_activate_calls = [tc for tc in llm_response.tool_calls if tc.name != "activate_skill"]
                         if non_activate_calls and self.tool_call_count >= self.max_tool_calls:
                             logger.warning(f"⚠️ 已达到最大 Skill 调用次数限制 ({self.max_tool_calls})，强制生成最终答案")
-                            # 强制要求 LLM 提供最终答案
                             messages.append({
                                 'role': 'user',
                                 'content': PromptLoader.render("agent_loop/tool_limit.j2", max_tool_calls=self.max_tool_calls)
                             })
                             _iter_ctx.__exit__(None, None, None)
+
+                            # 直接以 tools=None 调用 LLM，防止其无视提示继续生成 tool_calls 白白消耗迭代
+                            try:
+                                final_response = await agent.llm_client.chat_with_tools_retry(
+                                    messages=messages,
+                                    tools=None,
+                                    temperature=0.7
+                                )
+                                if final_response.usage:
+                                    total_prompt_tokens += final_response.usage.get("prompt_tokens", 0)
+                                    total_completion_tokens += final_response.usage.get("completion_tokens", 0)
+                                    total_tokens += final_response.usage.get("total_tokens", 0)
+
+                                final_answer = final_response.content
+
+                                if self.validator and final_answer:
+                                    validation_result = self.validator.validate_output(agent.agent_id, final_answer)
+                                    if not validation_result.get("valid") and self.auto_fixer and validation_result.get("auto_fixable"):
+                                        fixed_answer = self.auto_fixer.fix_output(final_answer, validation_result.get("auto_fixable", []))
+                                        if fixed_answer != final_answer:
+                                            final_answer = fixed_answer
+
+                                if self.short_term_memory and session_id:
+                                    await self.short_term_memory.add_message(
+                                        session_id=session_id, role="assistant", content=final_answer or "(empty response)"
+                                    )
+                                    message_count += 1
+
+                                reference_list = list(collected_references.values())
+                                reference_list.sort(key=lambda r: r.get("index", 0))
+                                for new_idx, ref in enumerate(reference_list, 1):
+                                    ref["index"] = new_idx
+
+                                result = {
+                                    'answer': final_answer,
+                                    'iterations': state.iteration,
+                                    'agent_id': agent.agent_id,
+                                    'usage': {
+                                        'prompt_tokens': total_prompt_tokens,
+                                        'completion_tokens': total_completion_tokens,
+                                        'total_tokens': total_tokens,
+                                    },
+                                    'message_count': message_count,
+                                    'references': reference_list,
+                                }
+                                if hasattr(agent, 'post_process_result'):
+                                    result = await agent.post_process_result(result, final_answer)
+                                state.mark_completed(result)
+                                break
+                            except Exception:
+                                logger.warning("强制生成最终答案失败，降级到正常循环")
                             continue
 
                         # 推理开始：计时 + 回调 thinking 内容
