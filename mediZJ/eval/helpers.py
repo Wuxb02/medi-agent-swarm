@@ -1,17 +1,12 @@
 """
 评估辅助工具
 
-测试隔离：session_id 生成、PersonalProfile mock
+测试隔离：session_id 生成、PersonalProfile 隔离
 """
 import uuid
-from pathlib import Path
 from contextlib import contextmanager
 
-from mediZJ.memory.personal_profile import PROFILE_PATH, PENDING_PATH
-
-# 复用 PersonalProfile 的路径定义（基于 __file__，不依赖工作目录）
-_PERSONAL_PROFILE_PATH = PROFILE_PATH
-_PENDING_PATH = PENDING_PATH
+from mediZJ.memory.personal_profile import PersonalProfile
 
 
 def make_session_id(prefix: str) -> str:
@@ -30,21 +25,17 @@ def isolated_coordinator():
     """
     from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
 
-    # 备份原始文件内容
-    original_personal = None
-    original_pending = None
-    if _PERSONAL_PROFILE_PATH.exists():
-        original_personal = _PERSONAL_PROFILE_PATH.read_text(encoding="utf-8")
-    if _PENDING_PATH.exists():
-        original_pending = _PENDING_PATH.read_text(encoding="utf-8")
+    # 备份 default 用户的档案（与 coordinator 同源，走同一个 SessionDB 单例）
+    profile = PersonalProfile("default")
+    backup_info = profile.load()
+    backup_records = profile.load_records()
+    backup_pending = profile.load_pending()
 
     try:
         # 重置为空，避免评估间信息泄漏
-        _PERSONAL_PROFILE_PATH.write_text(
-            "# 患者档案\n\n## 个人信息\n- 暂无\n\n## 病史记录\n- 暂无\n\n",
-            encoding="utf-8",
-        )
-        _PENDING_PATH.write_text("# 待确认信息\n\n", encoding="utf-8")
+        profile.save({})
+        profile.save_records([])
+        profile.save_pending([])
 
         coordinator = SwarmCoordinator()
         # 同步到所有 Worker 的 user_context
@@ -54,11 +45,6 @@ def isolated_coordinator():
         yield coordinator
     finally:
         # 恢复原始内容
-        if original_personal is not None:
-            _PERSONAL_PROFILE_PATH.write_text(original_personal, encoding="utf-8")
-        else:
-            _PERSONAL_PROFILE_PATH.unlink(missing_ok=True)
-        if original_pending is not None:
-            _PENDING_PATH.write_text(original_pending, encoding="utf-8")
-        else:
-            _PENDING_PATH.unlink(missing_ok=True)
+        profile.save(backup_info)
+        profile.save_records(backup_records)
+        profile.save_pending(backup_pending)

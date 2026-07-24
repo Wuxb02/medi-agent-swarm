@@ -1,28 +1,32 @@
 """
-PersonalProfile：患者档案管理（两文件架构）
+PersonalProfile：患者档案管理（SQLite 存储）
 
-第一层：已确认信息 + 病史记录 → memory/profile/{user_id}/PERSONAL.md
-第二层：待确认暂存区 → memory/profile/{user_id}/PENDING.md
+档案以 Markdown 文本整体存入 sessions.db 的 profiles 表：
+- content 列：已确认信息 + 病史记录（原 PERSONAL.md 全文）
+- pending 列：待确认暂存区（原 PENDING.md 全文）
+
+旧版 memory/profile/{user_id}/*.md 文件在首次实例化时自动迁移入库，
+原文件重命名为 .bak 保留。
 """
 import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
 from loguru import logger
 
+from .session_db import SessionDB
 
-# 文件路径（基于模块位置，不依赖工作目录）
+
+# 旧版文件目录（仅用于一次性迁移，迁移后不再读写）
 _MODULE_DIR = Path(__file__).parent
 _PROFILE_DIR = _MODULE_DIR / "profile"
-# 旧版全局单文件路径（仅用于迁移到 default 用户目录）
-PROFILE_PATH = _PROFILE_DIR / "PERSONAL.md"   # 已确认信息 + 病史记录
-PENDING_PATH = _PROFILE_DIR / "PENDING.md"    # 待确认暂存区
 
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-# 同一 user_id 跨实例共享的读写锁（多实例操作同一文件时串行化）
+# 同一 user_id 跨实例共享的读写锁（read-modify-write 串行化）
 _user_locks: Dict[str, threading.RLock] = {}
 _user_locks_guard = threading.Lock()
 
@@ -110,38 +114,82 @@ class PendingItem:
 
 
 class PersonalProfile:
-    """患者档案管理器（PERSONAL.md + PENDING.md，按 user_id 隔离）"""
+    """患者档案管理器（profiles 表，按 user_id 隔离）"""
 
-    def __init__(self, user_id: str = "default"):
+    def __init__(self, user_id: str = "default", db: Optional[SessionDB] = None):
         if not _USER_ID_PATTERN.match(user_id):
             raise ValueError(f"非法 user_id: {user_id!r}（仅允许字母/数字/_/-，最长 64 字符）")
         self.user_id = user_id
-        user_dir = _PROFILE_DIR / user_id
-        self._profile_path = user_dir / "PERSONAL.md"
-        self._pending_path = user_dir / "PENDING.md"
+        self._db = db if db is not None else SessionDB()
         self._lock = _get_user_lock(user_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
-        self._migrate_legacy_files()
+        self._migrate_files_to_db()
+
+    # ========== 旧版文件 → DB 一次性迁移 ==========
+
+    def _migrate_files_to_db(self):
+        """将旧版 md 文件迁移入库（幂等：DB 已有行则跳过）"""
+        with self._lock:
+            if self._db.get_profile(self.user_id) is not None:
+                return
+            self._migrate_legacy_files()
+            user_dir = _PROFILE_DIR / self.user_id
+            personal = user_dir / "PERSONAL.md"
+            pending = user_dir / "PENDING.md"
+            if not personal.exists() and not pending.exists():
+                return
+            self._db.upsert_profile(
+                self.user_id,
+                content=personal.read_text(encoding="utf-8")
+                if personal.exists() else "",
+                pending=pending.read_text(encoding="utf-8")
+                if pending.exists() else "",
+            )
+            for path in (personal, pending):
+                if path.exists():
+                    path.rename(path.parent / (path.name + ".bak"))
+            logger.info(f"已迁移档案文件入库: user_id={self.user_id}")
 
     def _migrate_legacy_files(self):
-        """将旧版全局单文件迁移到 default 用户目录（仅 default 用户执行一次）"""
+        """将最旧的全局单文件归入 default 用户目录（仅 default 用户执行一次）"""
         if self.user_id != "default":
             return
-        with self._lock:
-            # 从运行时 _PROFILE_DIR 推导旧路径（而非冻结的模块常量），
-            # 保证测试重定向目录时迁移逻辑作用于同一棵目录树
-            for legacy, target in (
-                (_PROFILE_DIR / "PERSONAL.md", self._profile_path),
-                (_PROFILE_DIR / "PENDING.md", self._pending_path),
-            ):
-                if legacy.exists() and not target.exists():
-                    legacy.rename(target)
-                    logger.info(f"已迁移旧版档案文件: {legacy} → {target}")
+        user_dir = _PROFILE_DIR / self.user_id
+        # 从运行时 _PROFILE_DIR 推导旧路径，
+        # 保证测试重定向目录时迁移逻辑作用于同一棵目录树
+        for legacy, target in (
+            (_PROFILE_DIR / "PERSONAL.md", user_dir / "PERSONAL.md"),
+            (_PROFILE_DIR / "PENDING.md", user_dir / "PENDING.md"),
+        ):
+            if legacy.exists() and not target.exists():
+                user_dir.mkdir(parents=True, exist_ok=True)
+                legacy.rename(target)
+                logger.info(f"已迁移旧版档案文件: {legacy} → {target}")
+
+    # ========== DB 读写 ==========
+
+    def _read_row(self) -> Dict[str, str]:
+        """读取档案行，无行时返回空内容（等价于文件不存在）"""
+        row = self._db.get_profile(self.user_id)
+        if row is None:
+            return {"content": "", "pending": ""}
+        return row
+
+    def _write_content(self, text: str):
+        try:
+            self._db.upsert_profile(self.user_id, content=text)
+        except Exception as e:
+            logger.error(f"Failed to save profile: {e}")
+
+    def _write_pending(self, text: str):
+        try:
+            self._db.upsert_profile(self.user_id, pending=text)
+        except Exception as e:
+            logger.error(f"Failed to save pending items: {e}")
 
     # ========== PERSONAL.md 解析（包含确认信息 + 病史） ==========
 
-    def _parse_profile(self) -> Dict[str, any]:
-        """解析 PERSONAL.md，返回 {confirmed: Dict, records: List[MedicalRecord]}。
+    def _parse_profile(self, content: str = None) -> Dict[str, any]:
+        """解析档案正文，返回 {confirmed: Dict, records: List[MedicalRecord]}。
 
         新格式（有 ## 段落头）：
         ## 个人信息
@@ -153,11 +201,10 @@ class PersonalProfile:
         - 年龄：28岁
         - 症状：发烧
         """
-        if not self._profile_path.exists():
+        if content is None:
+            content = self._read_row()["content"]
+        if not content:
             return {"confirmed": {}, "records": []}
-
-        with self._lock:
-            content = self._profile_path.read_text(encoding="utf-8")
 
         # 检测是否有新格式的段落头
         has_sections = bool(re.search(r"^## ", content, re.MULTILINE))
@@ -200,7 +247,7 @@ class PersonalProfile:
         return {"confirmed": confirmed, "records": records}
 
     def _parse_old_format(self, content: str) -> Dict[str, any]:
-        """解析旧格式 PERSONAL.md（纯 key-value）。"""
+        """解析旧格式档案正文（纯 key-value）。"""
         confirmed = {}
         for line in content.splitlines():
             line = line.strip()
@@ -213,36 +260,38 @@ class PersonalProfile:
                     confirmed[key] = value
         return {"confirmed": confirmed, "records": []}
 
+    def _serialize_profile(
+        self, confirmed: Dict[str, str], records: List[MedicalRecord]
+    ) -> str:
+        """序列化档案正文（Markdown 文本）。"""
+        lines = ["# 患者档案", ""]
+
+        # 个人信息段落
+        lines.append("## 个人信息")
+        if confirmed:
+            for key, value in confirmed.items():
+                lines.append(f"- {key}：{value}")
+        else:
+            lines.append("- 暂无")
+        lines.append("")
+
+        # 病史记录段落
+        lines.append("## 病史记录")
+        if records:
+            for record in records:
+                lines.append(record.to_line())
+        else:
+            lines.append("- 暂无")
+        lines.append("")
+
+        return "\n".join(lines)
+
     def _save_profile(self, confirmed: Dict[str, str], records: List[MedicalRecord]):
-        """序列化并保存 PERSONAL.md。"""
-        try:
-            lines = ["# 患者档案", ""]
-
-            # 个人信息段落
-            lines.append("## 个人信息")
-            if confirmed:
-                for key, value in confirmed.items():
-                    lines.append(f"- {key}：{value}")
-            else:
-                lines.append("- 暂无")
-            lines.append("")
-
-            # 病史记录段落
-            lines.append("## 病史记录")
-            if records:
-                for record in records:
-                    lines.append(record.to_line())
-            else:
-                lines.append("- 暂无")
-            lines.append("")
-
-            with self._lock:
-                self._profile_path.write_text("\n".join(lines), encoding="utf-8")
-            logger.debug(
-                f"Saved profile: {len(confirmed)} confirmed + {len(records)} records"
-            )
-        except Exception as e:
-            logger.error(f"Failed to save profile: {e}")
+        """序列化并保存档案正文。"""
+        self._write_content(self._serialize_profile(confirmed, records))
+        logger.debug(
+            f"Saved profile: {len(confirmed)} confirmed + {len(records)} records"
+        )
 
     # ========== 已确认信息 ==========
 
@@ -351,15 +400,14 @@ class PersonalProfile:
             self._save_profile(data["confirmed"], records)
             return records
 
-    # ========== 待确认暂存区（PENDING.md） ==========
+    # ========== 待确认暂存区（pending 列） ==========
 
     def load_pending(self) -> List[PendingItem]:
         """加载待确认条目（支持 [信息] 和 [病史] 两种类型）。"""
-        if not self._pending_path.exists():
+        content = self._read_row()["pending"]
+        if not content:
             return []
         try:
-            with self._lock:
-                content = self._pending_path.read_text(encoding="utf-8")
             items = []
 
             # 病史格式：- [病史][2025-05] 感冒，发烧，持续一周，用药：布洛芬（2025-05-16 提取）
@@ -423,16 +471,12 @@ class PersonalProfile:
 
     def save_pending(self, items: List[PendingItem]):
         """保存待确认条目。"""
-        try:
-            lines = ["# 待确认信息", ""]
-            for item in items:
-                lines.append(item.to_line())
-            lines.append("")
-            with self._lock:
-                self._pending_path.write_text("\n".join(lines), encoding="utf-8")
-            logger.debug(f"Saved {len(items)} pending items")
-        except Exception as e:
-            logger.error(f"Failed to save pending items: {e}")
+        lines = ["# 待确认信息", ""]
+        for item in items:
+            lines.append(item.to_line())
+        lines.append("")
+        self._write_pending("\n".join(lines))
+        logger.debug(f"Saved {len(items)} pending items")
 
     def add_pending(self, new_items: List[Dict]):
         """追加待确认条目（信息类型），按 (key, value) 去重。"""
@@ -503,7 +547,7 @@ class PersonalProfile:
             self.save_pending(remaining)
 
             if item.is_record:
-                # 病史类型 → 写入 PERSONAL.md 病史记录
+                # 病史类型 → 写入病史记录
                 self.add_records([{
                     "date": item.record_date,
                     "description": item.value,

@@ -100,7 +100,7 @@ cd frontend && npm run build
 | `mediZJ/memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
 | `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages 表） |
 | `mediZJ/memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
-| `mediZJ/memory/personal_profile.py` | 个人健康档案（`mediZJ/memory/profile/PERSONAL.md`） |
+| `mediZJ/memory/personal_profile.py` | 个人健康档案（SQLite `profiles` 表，md 文本整体入库） |
 | `mediZJ/memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
 | `mediZJ/knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
 | `mediZJ/knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
@@ -179,7 +179,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 | 层级 | 存储 | 用途 |
 | --- | --- | --- |
 | 短期记忆 | 内存（默认）/Redis | 会话级对话历史，写时增量压缩，仅供 LeadAgent 参考 |
-| 个人档案 | `mediZJ/memory/profile/PERSONAL.md`（本地文件） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
+| 个人档案 | `sessions.db` 的 `profiles` 表（content/pending 两列存 md 文本） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
 | 长期记忆 | Mem0 云服务 | 跨会话可复用医学事实，经 LLM 质量门控（score < 5 跳过） |
 
 未设置 `MEM0_API_KEY` 时优雅降级，仅使用短期记忆和个人档案。

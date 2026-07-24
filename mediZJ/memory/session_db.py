@@ -3,6 +3,7 @@ SQLite 会话数据库管理器
 
 功能：
 - 持久化存储多轮会话数据（sessions + messages 表）
+- 持久化存储个人健康档案（profiles 表，md 文本整体入库）
 - 支持按 session_id 查询完整对话历史
 - 支持会话列表、删除等 CRUD 操作
 - 使用 WAL 模式提升并发读性能
@@ -56,6 +57,11 @@ class SessionDB:
 
         self._initialized = True
         logger.info(f"SessionDB initialized: {db_path}")
+
+    @classmethod
+    def reset(cls):
+        """重置单例（仅测试使用，生产代码禁止调用）"""
+        cls._instance = None
 
     def _get_conn(self) -> sqlite3.Connection:
         """获取当前线程的数据库连接"""
@@ -121,6 +127,15 @@ class SessionDB:
                     REFERENCES sessions(session_id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS profiles (
+                user_id    TEXT PRIMARY KEY,
+                content    TEXT NOT NULL DEFAULT '',
+                    -- 档案正文（原 PERSONAL.md 全文）
+                pending    TEXT NOT NULL DEFAULT '',
+                    -- 待确认暂存（原 PENDING.md 全文）
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, turn_index);
         """)
@@ -139,6 +154,55 @@ class SessionDB:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+
+    # ========== 个人健康档案（profiles 表） ==========
+
+    def get_profile(self, user_id: str) -> Optional[Dict[str, str]]:
+        """读取用户档案行，不存在时返回 None"""
+
+        def _do_get(conn: sqlite3.Connection):
+            row = conn.execute(
+                "SELECT content, pending FROM profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {"content": row["content"], "pending": row["pending"]}
+
+        return self._execute(_do_get)
+
+    def upsert_profile(
+        self,
+        user_id: str,
+        content: Optional[str] = None,
+        pending: Optional[str] = None,
+    ):
+        """写入用户档案，仅更新传入的非 None 列；行不存在则插入"""
+
+        def _do_upsert(conn: sqlite3.Connection):
+            now = datetime.now().isoformat()
+            conn.execute(
+                """
+                INSERT INTO profiles (user_id, content, pending, updated_at)
+                VALUES (?, '', '', ?)
+                ON CONFLICT(user_id) DO NOTHING
+                """,
+                (user_id, now),
+            )
+            if content is not None:
+                conn.execute(
+                    "UPDATE profiles SET content = ?, updated_at = ?"
+                    " WHERE user_id = ?",
+                    (content, now, user_id),
+                )
+            if pending is not None:
+                conn.execute(
+                    "UPDATE profiles SET pending = ?, updated_at = ?"
+                    " WHERE user_id = ?",
+                    (pending, now, user_id),
+                )
+
+        self._execute(_do_upsert)
 
     def save_turn(
         self,

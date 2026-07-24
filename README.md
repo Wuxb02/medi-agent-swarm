@@ -15,7 +15,7 @@
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
-- **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（本地 PERSONAL.md）+ **LLM 质量门控 + 信息分类存储** ✅
+- **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（SQLite profiles 表）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -69,7 +69,7 @@
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（10条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
-   - 个人档案：`mediZJ/memory/profile/PERSONAL.md`，通过 AgentLoop 注入为 system message，所有 Agent 共享
+   - 个人档案：SQLite `profiles` 表（Markdown 文本整体入库），通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
@@ -377,7 +377,7 @@ medix-agent-swarm/
 │   ├── memory/                          # 记忆管理（集成熵管理）
 │   │   ├── long_term.py                 # 长期记忆（Mem0）
 │   │   ├── short_term.py                # 短期记忆（单例，写时增量压缩 + 子会话隔离）
-│   │   ├── personal_profile.py          # 个人健康档案（mediZJ/memory/profile/）
+│   │   ├── personal_profile.py          # 个人健康档案（SQLite profiles 表）
 │   │   ├── session_summary.py           # 会话总结
 │   │   ├── entropy_manager.py           # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
 │   │   └── embedding.py                 # 共享 embedding 工具（模型加载 + 余弦相似度）
@@ -583,7 +583,7 @@ MEM0_API_KEY=m0-your-api-key-here
 
 ### 记忆系统配置
 
-本系统支持三层记忆机制：**短期记忆（会话级）**、**个人档案（本地持久化）** 和 **长期记忆（Mem0 跨会话）**，通过 LLM 质量门控实现信息分类存储。
+本系统支持三层记忆机制：**短期记忆（会话级）**、**个人档案（SQLite 持久化）** 和 **长期记忆（Mem0 跨会话）**，通过 LLM 质量门控实现信息分类存储。
 
 #### 短期记忆（ShortTermMemory）
 
@@ -618,17 +618,17 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 
 **作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），**按 user_id 隔离存储**。
 
-**存储路径**：`mediZJ/memory/profile/{user_id}/PERSONAL.md`（未传 user_id 时默认 `default/`，旧版全局单文件自动迁移至此）
+**存储方式**：`mediZJ/memory/data/sessions.db` 的 `profiles` 表，Markdown 文本整体入库（`content` 列 = 已确认信息 + 病史，`pending` 列 = 待确认暂存区），按 `user_id` 主键隔离（未传 user_id 时默认 `default`）。旧版 `memory/profile/{user_id}/*.md` 文件在首次访问时自动迁移入库，原文件重命名为 `.bak` 保留。
 
 **工作方式**：
 
 - 问答请求可携带 `user_id` 字段（`/api/chat`、`/api/chat/stream`），不同用户的档案互不可见
 - `/api/personal` 系列端点支持 `?user_id=` 查询参数，缺省操作 default 用户
 - LLM 每轮对话自动提取个人信息，增量合并写入（读写经共享锁串行化，并发不丢更新）
-- 对话开始时自动注入到 Agent 上下文（仅已确认信息，来自 `PERSONAL.md`）
+- 对话开始时自动注入到 Agent 上下文（仅已确认信息，来自 `profiles` 表 `content` 列）
 - 前端「个人中心」支持手动查看和编辑
 
-**文件格式**：
+**存储格式**（Markdown 文本，存于 `content` 列）：
 ```markdown
 # 患者个人信息
 
@@ -660,7 +660,7 @@ MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
   ↓
 LLM 评估（mediZJ/prompt/memory/quality_eval.j2）
   ├─ 质量评分（1-10）
-  ├─ 提取个人信息 → mediZJ/memory/profile/PERSONAL.md
+  ├─ 提取个人信息 → profiles 表（sessions.db）
   └─ 提取可复用事实 → Mem0
 ```
 
@@ -701,7 +701,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    - 执行完毕后：最终回答合并回主会话，子会话清除
    ↓
 6. 对话结束 → LLM 质量评估 + 信息分类
-   ├─ 个人信息 → PERSONAL.md
+   ├─ 个人信息 → profiles 表
    ├─ 可复用事实 → Mem0
    └─ 短期记忆 → Agent Loop 中自动保存
 ```
@@ -710,7 +710,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 
 - 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆和个人档案
 - 短期记忆默认使用内存存储，无需配置 Redis
-- 个人档案始终可用（本地文件，无外部依赖）
+- 个人档案始终可用（本地 SQLite，无外部依赖）
 
 ## 🚦 并发与压测
 
@@ -722,7 +722,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 | ------ | ------ | ------ |
 | **会话互斥** | per-session asyncio.Lock，同会话请求排队执行，防止短期记忆 / turn_index 写竞争 | `mediZJ/api/services/chat_service.py` |
 | **记忆写锁** | 短期记忆 per-session 写锁，覆盖写入 + 增量压缩全过程 | `mediZJ/memory/short_term.py` |
-| **档案隔离** | 个人档案按 user_id 分目录存储，共享 RLock 串行化读写，旧版单文件自动迁移 | `mediZJ/memory/personal_profile.py` |
+| **档案隔离** | 个人档案按 user_id 行级隔离（profiles 表），共享 RLock 串行化读写，旧版 md 文件自动迁移入库 | `mediZJ/memory/personal_profile.py` |
 | **任务认领** | SharedContext 子任务认领加锁，防止并行 Worker 重复执行 | `mediZJ/swarm/shared_context.py` |
 | **阻塞下线程** | embedding 推理 / SQLite / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
 | **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
@@ -1251,8 +1251,8 @@ SwarmCoordinator
        ▼             ▼
 ┌─────────────┐ ┌────────────────────┐
 │ 个人档案    │ │ 长期记忆（Mem0）   │
-│ PERSONAL.md │ │ 可复用医学事实     │
-│ （本地文件）│ │ （向量数据库）     │
+│ profiles 表 │ │ 可复用医学事实     │
+│ （SQLite）  │ │ （向量数据库）     │
 │ 年龄/性别/  │ │ 症状关联/治疗方案/ │
 │ 病史/过敏史 │ │ 风险评估/生活建议  │
 └──────┬──────┘ └─────────┬──────────┘
@@ -1286,7 +1286,7 @@ SwarmCoordinator
 │ 统一检索三层记忆，构建增强上下文：                                       │
 │   - 短期记忆：当前会话最近 10 条消息                                     │
 │   - 长期记忆：Mem0 相似历史案例（最多 3 条）                             │
-│   - 个人档案：PERSONAL.md（仅已确认信息）                                │
+│   - 个人档案：profiles 表（仅已确认信息）                                │
 └─────────────────────────────────────────────────────────────────────────┘
                             │
                             ▼
