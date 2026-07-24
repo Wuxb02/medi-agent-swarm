@@ -206,10 +206,11 @@ class LongTermMemory:
                     "timestamp": result.get("metadata", {}).get("timestamp")
                 })
 
-            # Harness Engineering: 熵管理 - 去重相似会话
+            # Harness Engineering: 熵管理 - 去重相似会话（encode 下线程）
             if self.entropy_manager and len(formatted_results) > 0:
-                formatted_results = self.entropy_manager.deduplicate_sessions(formatted_results)
-                
+                formatted_results = await asyncio.to_thread(
+                    self.entropy_manager.deduplicate_sessions, formatted_results
+                )
 
             # 限制返回数量
             formatted_results = formatted_results[:limit]

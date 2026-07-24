@@ -8,6 +8,7 @@ SharedContext：Agent 群体智能的共享环境（信息素系统）
 这是去中心化协作的核心：没有中心控制节点，只有共享环境
 """
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -124,6 +125,9 @@ class SharedContext:
         # 事件驱动：所有子任务完成时触发，替代轮询等待
         self.all_completed_event = asyncio.Event()
 
+        # 子任务认领锁：保护 start_subtask 的 check-then-act，防止并行 Worker 重复认领
+        self._claim_lock = threading.Lock()
+
     def publish_event(self, event: Event):
         """
         发布事件
@@ -199,23 +203,24 @@ class SharedContext:
 
         返回是否成功开始
         """
-        subtask = self.get_subtask(subtask_id)
-        if not subtask or not subtask.can_be_executed():
-            return False
+        with self._claim_lock:
+            subtask = self.get_subtask(subtask_id)
+            if not subtask or not subtask.can_be_executed():
+                return False
 
-        try:
-            subtask.start()
+            try:
+                subtask.start()
+            except ValueError:
+                return False
 
-            # 发布事件
-            self.publish_event(Event(
-                type=EventType.SUBTASK_STARTED,
-                source_agent=subtask.assigned_agent,
-                data={"subtask_id": subtask_id}
-            ))
+        # 发布事件（认领成功后再发，避免重复事件）
+        self.publish_event(Event(
+            type=EventType.SUBTASK_STARTED,
+            source_agent=subtask.assigned_agent,
+            data={"subtask_id": subtask_id}
+        ))
 
-            return True
-        except ValueError:
-            return False
+        return True
 
     def complete_subtask(
         self,

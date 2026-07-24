@@ -35,11 +35,32 @@ except ImportError:
     _TRACE_AVAIL = False
 
 # 问卷管理器注册表（session_id → QuestionnaireManager）
+# 注：_managers/_manager_last_activity 的读写均发生在单一事件循环的同步代码段内
+# （无 await 间隙），get_manager 的 check-then-act 在当前部署模型下是安全的；
+# 若未来引入多 worker/多线程，需要改为加锁或迁移到外部存储。
 _managers: Dict[str, QuestionnaireManager] = {}
 _manager_last_activity: Dict[str, float] = {}
 
 _TTL_SECONDS = 600  # 10 分钟未活动自动清理
 _MAX_MANAGERS = 1000  # 最大条目数，超出 LRU 淘汰
+
+# 单次问答请求总超时（秒），覆盖 process() 全流程。
+# 默认 300s：高并发时请求会在 LLM 信号量上排队，
+# 50 并发 × 16 路 LLM 上限的场景下 p99 延迟可达 200s 量级
+_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "300"))
+
+# per-session 请求互斥锁：同会话并发请求排队执行，
+# 防止短期记忆/turn_index/问卷管理器的写竞争
+_session_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    """获取（或创建）指定会话的请求互斥锁"""
+    lock = _session_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_locks[session_id] = lock
+    return lock
 
 
 def _cleanup_one(session_id: str):
@@ -48,6 +69,10 @@ def _cleanup_one(session_id: str):
     mgr = _managers.pop(session_id, None)
     if mgr:
         mgr.cancel_all()
+    # 锁未被持有时一并回收，避免 _session_locks 无限增长
+    lock = _session_locks.get(session_id)
+    if lock is not None and not lock.locked():
+        _session_locks.pop(session_id, None)
 
 
 def _cleanup_expired(now: float):
@@ -102,18 +127,36 @@ class EventBridge:
 
 
 async def chat_non_stream(request: ChatRequest) -> ChatResponse:
-    """非流式问答"""
+    """非流式问答（同会话请求排队执行）"""
+    from fastapi import HTTPException
+
     session_id = request.session_id or (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     )
+    try:
+        async with _get_session_lock(session_id):
+            return await _chat_non_stream_locked(request, session_id)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"请求处理超时（{_REQUEST_TIMEOUT:.0f}s），请稍后重试或简化问题",
+        ) from None
+
+
+async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> ChatResponse:
+    """非流式问答（持锁后的实际处理）"""
     manager = get_manager(session_id)
     coordinator = SwarmCoordinator(
-        questionnaire_manager=manager
+        questionnaire_manager=manager,
+        user_id=request.user_id
     )
-    result = await coordinator.process(
-        question=request.question,
-        context=request.context,
-        session_id=session_id
+    result = await asyncio.wait_for(
+        coordinator.process(
+            question=request.question,
+            context=request.context,
+            session_id=session_id
+        ),
+        timeout=_REQUEST_TIMEOUT,
     )
 
     # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
@@ -126,11 +169,13 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         except Exception as e:
             logger.error(f"LTM save error in non-stream: {e}")
 
-    # 持久化到 SQLite + Milvus
+    # 持久化到 SQLite + Milvus（同步驱动，下线程避免阻塞事件循环）
     persist_session_id = result.get("session_id", session_id)
     if persist_session_id:
         try:
-            _persist_session_turn(persist_session_id, request, result, [])
+            await asyncio.to_thread(
+                _persist_session_turn, persist_session_id, request, result, []
+            )
         except Exception as e:
             logger.warning(f"Failed to persist non-stream session turn: {e}")
 
@@ -159,15 +204,25 @@ async def chat_stream(
     chat_req: ChatRequest,
     http_request: StarletteRequest,
 ) -> AsyncGenerator[str, None]:
-    """流式问答（换行分隔 JSON）
+    """流式问答（换行分隔 JSON），同会话请求排队执行
 
     支持客户端断开时自动取消后台处理任务，避免浪费 LLM token。
     """
-    bridge = EventBridge()
-
     session_id = chat_req.session_id or (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     )
+    async with _get_session_lock(session_id):
+        async for chunk in _chat_stream_impl(chat_req, http_request, session_id):
+            yield chunk
+
+
+async def _chat_stream_impl(
+    chat_req: ChatRequest,
+    http_request: StarletteRequest,
+    session_id: str,
+) -> AsyncGenerator[str, None]:
+    """流式问答（持锁后的实际处理）"""
+    bridge = EventBridge()
 
     # 1. 发送 start
     start_event = {"session_id": session_id}
@@ -199,14 +254,18 @@ async def chat_stream(
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
         event_callback=lambda event: bridge.queue.put_nowait(event),
-        questionnaire_manager=manager
+        questionnaire_manager=manager,
+        user_id=chat_req.user_id
     )
 
     process_task = asyncio.create_task(
-        coordinator.process(
-            question=chat_req.question,
-            context=chat_req.context,
-            session_id=session_id
+        asyncio.wait_for(
+            coordinator.process(
+                question=chat_req.question,
+                context=chat_req.context,
+                session_id=session_id
+            ),
+            timeout=_REQUEST_TIMEOUT,
         )
     )
 
@@ -361,6 +420,14 @@ async def chat_stream(
     disconnect_task.cancel()
     try:
         result = process_task.result()
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Chat processing timeout ({_REQUEST_TIMEOUT:.0f}s), session={session_id}"
+        )
+        yield _json_line("error", {
+            "error": f"请求处理超时（{_REQUEST_TIMEOUT:.0f}s），请稍后重试或简化问题"
+        })
+        return
     except Exception as e:
         logger.error(f"Chat processing error: {e}")
         yield _json_line("error", {"error": str(e)})
@@ -374,8 +441,11 @@ async def chat_stream(
         collected_events.append({"event": "suggestions", "data": suggestions_payload})
 
     # 6.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
+    # 同步驱动，下线程避免阻塞事件循环
     try:
-        _persist_session_turn(session_id, chat_req, result, collected_events)
+        await asyncio.to_thread(
+            _persist_session_turn, session_id, chat_req, result, collected_events
+        )
     except Exception as e:
         logger.warning(f"Failed to persist session turn: {e}")
 

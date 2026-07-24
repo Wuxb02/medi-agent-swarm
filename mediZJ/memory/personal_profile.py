@@ -1,10 +1,11 @@
 """
 PersonalProfile：患者档案管理（两文件架构）
 
-第一层：已确认信息 + 病史记录 → memory/profile/PERSONAL.md
-第二层：待确认暂存区 → memory/profile/PENDING.md
+第一层：已确认信息 + 病史记录 → memory/profile/{user_id}/PERSONAL.md
+第二层：待确认暂存区 → memory/profile/{user_id}/PENDING.md
 """
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,8 +15,25 @@ from loguru import logger
 
 # 文件路径（基于模块位置，不依赖工作目录）
 _MODULE_DIR = Path(__file__).parent
-PROFILE_PATH = _MODULE_DIR / "profile" / "PERSONAL.md"   # 已确认信息 + 病史记录
-PENDING_PATH = _MODULE_DIR / "profile" / "PENDING.md"    # 待确认暂存区
+_PROFILE_DIR = _MODULE_DIR / "profile"
+# 旧版全局单文件路径（仅用于迁移到 default 用户目录）
+PROFILE_PATH = _PROFILE_DIR / "PERSONAL.md"   # 已确认信息 + 病史记录
+PENDING_PATH = _PROFILE_DIR / "PENDING.md"    # 待确认暂存区
+
+_USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# 同一 user_id 跨实例共享的读写锁（多实例操作同一文件时串行化）
+_user_locks: Dict[str, threading.RLock] = {}
+_user_locks_guard = threading.Lock()
+
+
+def _get_user_lock(user_id: str) -> threading.RLock:
+    with _user_locks_guard:
+        lock = _user_locks.get(user_id)
+        if lock is None:
+            lock = threading.RLock()
+            _user_locks[user_id] = lock
+        return lock
 
 
 @dataclass
@@ -92,10 +110,33 @@ class PendingItem:
 
 
 class PersonalProfile:
-    """患者档案管理器（PERSONAL.md + PENDING.md）"""
+    """患者档案管理器（PERSONAL.md + PENDING.md，按 user_id 隔离）"""
 
-    def __init__(self):
-        PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, user_id: str = "default"):
+        if not _USER_ID_PATTERN.match(user_id):
+            raise ValueError(f"非法 user_id: {user_id!r}（仅允许字母/数字/_/-，最长 64 字符）")
+        self.user_id = user_id
+        user_dir = _PROFILE_DIR / user_id
+        self._profile_path = user_dir / "PERSONAL.md"
+        self._pending_path = user_dir / "PENDING.md"
+        self._lock = _get_user_lock(user_id)
+        user_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_files()
+
+    def _migrate_legacy_files(self):
+        """将旧版全局单文件迁移到 default 用户目录（仅 default 用户执行一次）"""
+        if self.user_id != "default":
+            return
+        with self._lock:
+            # 从运行时 _PROFILE_DIR 推导旧路径（而非冻结的模块常量），
+            # 保证测试重定向目录时迁移逻辑作用于同一棵目录树
+            for legacy, target in (
+                (_PROFILE_DIR / "PERSONAL.md", self._profile_path),
+                (_PROFILE_DIR / "PENDING.md", self._pending_path),
+            ):
+                if legacy.exists() and not target.exists():
+                    legacy.rename(target)
+                    logger.info(f"已迁移旧版档案文件: {legacy} → {target}")
 
     # ========== PERSONAL.md 解析（包含确认信息 + 病史） ==========
 
@@ -112,10 +153,11 @@ class PersonalProfile:
         - 年龄：28岁
         - 症状：发烧
         """
-        if not PROFILE_PATH.exists():
+        if not self._profile_path.exists():
             return {"confirmed": {}, "records": []}
 
-        content = PROFILE_PATH.read_text(encoding="utf-8")
+        with self._lock:
+            content = self._profile_path.read_text(encoding="utf-8")
 
         # 检测是否有新格式的段落头
         has_sections = bool(re.search(r"^## ", content, re.MULTILINE))
@@ -194,7 +236,8 @@ class PersonalProfile:
                 lines.append("- 暂无")
             lines.append("")
 
-            PROFILE_PATH.write_text("\n".join(lines), encoding="utf-8")
+            with self._lock:
+                self._profile_path.write_text("\n".join(lines), encoding="utf-8")
             logger.debug(
                 f"Saved profile: {len(confirmed)} confirmed + {len(records)} records"
             )
@@ -209,20 +252,22 @@ class PersonalProfile:
 
     def save(self, info: Dict[str, str]):
         """全量替换已确认的个人信息（保留病史记录）。"""
-        data = self._parse_profile()
-        self._save_profile(info, data["records"])
+        with self._lock:
+            data = self._parse_profile()
+            self._save_profile(info, data["records"])
 
     def update(self, new_items: List[Dict[str, str]]) -> Dict[str, str]:
         """增量更新已确认信息（合并新旧数据）。"""
-        data = self._parse_profile()
-        confirmed = data["confirmed"]
-        for item in new_items:
-            key = item.get("key", "").strip()
-            value = item.get("value", "").strip()
-            if key and value:
-                confirmed[key] = value
-        self._save_profile(confirmed, data["records"])
-        return confirmed
+        with self._lock:
+            data = self._parse_profile()
+            confirmed = data["confirmed"]
+            for item in new_items:
+                key = item.get("key", "").strip()
+                value = item.get("value", "").strip()
+                if key and value:
+                    confirmed[key] = value
+            self._save_profile(confirmed, data["records"])
+            return confirmed
 
     # ========== 病史记录 ==========
 
@@ -274,44 +319,47 @@ class PersonalProfile:
 
     def save_records(self, records: List[MedicalRecord]):
         """保存病史记录（保留已确认信息）。"""
-        data = self._parse_profile()
-        self._save_profile(data["confirmed"], records)
+        with self._lock:
+            data = self._parse_profile()
+            self._save_profile(data["confirmed"], records)
 
     def add_records(self, new_records: List[Dict]) -> List[MedicalRecord]:
         """追加病史记录，按 (date, description) 去重。"""
-        data = self._parse_profile()
-        records = data["records"]
-        existing_keys = {(r.date, r.description) for r in records}
+        with self._lock:
+            data = self._parse_profile()
+            records = data["records"]
+            existing_keys = {(r.date, r.description) for r in records}
 
-        for item in new_records:
-            record = MedicalRecord(
-                date=item.get("date", ""),
-                description=item.get("description", ""),
-                symptoms=item.get("symptoms", ""),
-                duration=item.get("duration", ""),
-                medication=item.get("medication", ""),
-                outcome=item.get("outcome", ""),
-            )
-            if not record.date or not record.description:
-                continue
-            key = (record.date, record.description)
-            if key not in existing_keys:
-                records.append(record)
-                existing_keys.add(key)
-                logger.info(f"  [MedicalRecord] [{record.date}] {record.description}")
+            for item in new_records:
+                record = MedicalRecord(
+                    date=item.get("date", ""),
+                    description=item.get("description", ""),
+                    symptoms=item.get("symptoms", ""),
+                    duration=item.get("duration", ""),
+                    medication=item.get("medication", ""),
+                    outcome=item.get("outcome", ""),
+                )
+                if not record.date or not record.description:
+                    continue
+                key = (record.date, record.description)
+                if key not in existing_keys:
+                    records.append(record)
+                    existing_keys.add(key)
+                    logger.info(f"  [MedicalRecord] [{record.date}] {record.description}")
 
-        records.sort(key=lambda r: r.date, reverse=True)
-        self._save_profile(data["confirmed"], records)
-        return records
+            records.sort(key=lambda r: r.date, reverse=True)
+            self._save_profile(data["confirmed"], records)
+            return records
 
     # ========== 待确认暂存区（PENDING.md） ==========
 
     def load_pending(self) -> List[PendingItem]:
         """加载待确认条目（支持 [信息] 和 [病史] 两种类型）。"""
-        if not PENDING_PATH.exists():
+        if not self._pending_path.exists():
             return []
         try:
-            content = PENDING_PATH.read_text(encoding="utf-8")
+            with self._lock:
+                content = self._pending_path.read_text(encoding="utf-8")
             items = []
 
             # 病史格式：- [病史][2025-05] 感冒，发烧，持续一周，用药：布洛芬（2025-05-16 提取）
@@ -380,107 +428,112 @@ class PersonalProfile:
             for item in items:
                 lines.append(item.to_line())
             lines.append("")
-            PENDING_PATH.write_text("\n".join(lines), encoding="utf-8")
+            with self._lock:
+                self._pending_path.write_text("\n".join(lines), encoding="utf-8")
             logger.debug(f"Saved {len(items)} pending items")
         except Exception as e:
             logger.error(f"Failed to save pending items: {e}")
 
     def add_pending(self, new_items: List[Dict]):
         """追加待确认条目（信息类型），按 (key, value) 去重。"""
-        existing = self.load_pending()
-        existing_keys = {(item.key, item.value) for item in existing}
-        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            existing = self.load_pending()
+            existing_keys = {(item.key, item.value) for item in existing}
+            today = datetime.now().strftime("%Y-%m-%d")
 
-        for item in new_items:
-            key = item.get("key", "").strip()
-            value = item.get("value", "").strip()
-            confidence = item.get("confidence", "medium")
-            if not key or not value:
-                continue
-            if (key, value) in existing_keys:
-                continue
-            existing.append(PendingItem(
-                key=key,
-                value=value,
-                source_date=today,
-                confidence=confidence,
-            ))
-            existing_keys.add((key, value))
-            logger.info(f"  [Pending] {key}：{value}（置信度：{confidence}）")
+            for item in new_items:
+                key = item.get("key", "").strip()
+                value = item.get("value", "").strip()
+                confidence = item.get("confidence", "medium")
+                if not key or not value:
+                    continue
+                if (key, value) in existing_keys:
+                    continue
+                existing.append(PendingItem(
+                    key=key,
+                    value=value,
+                    source_date=today,
+                    confidence=confidence,
+                ))
+                existing_keys.add((key, value))
+                logger.info(f"  [Pending] {key}：{value}（置信度：{confidence}）")
 
-        self.save_pending(existing)
+            self.save_pending(existing)
 
     def add_pending_records(self, new_records: List[Dict]):
         """追加待确认病史条目，按 (record_date, value) 去重。"""
-        existing = self.load_pending()
-        existing_keys = {(item.key, item.value) for item in existing}
-        today = datetime.now().strftime("%Y-%m-%d")
+        with self._lock:
+            existing = self.load_pending()
+            existing_keys = {(item.key, item.value) for item in existing}
+            today = datetime.now().strftime("%Y-%m-%d")
 
-        for item in new_records:
-            desc = item.get("description", "").strip()
-            rec_date = item.get("date", "").strip()
-            if not desc or not rec_date:
-                continue
-            if ("病史", desc) in existing_keys:
-                continue
-            existing.append(PendingItem(
-                key="病史",
-                value=desc,
-                source_date=today,
-                confidence="confirmed",
-                record_date=rec_date,
-                symptoms=item.get("symptoms", ""),
-                duration=item.get("duration", ""),
-                medication=item.get("medication", ""),
-                outcome=item.get("outcome", ""),
-            ))
-            existing_keys.add(("病史", desc))
-            logger.info(f"  [Pending-Record] [{rec_date}] {desc}")
+            for item in new_records:
+                desc = item.get("description", "").strip()
+                rec_date = item.get("date", "").strip()
+                if not desc or not rec_date:
+                    continue
+                if ("病史", desc) in existing_keys:
+                    continue
+                existing.append(PendingItem(
+                    key="病史",
+                    value=desc,
+                    source_date=today,
+                    confidence="confirmed",
+                    record_date=rec_date,
+                    symptoms=item.get("symptoms", ""),
+                    duration=item.get("duration", ""),
+                    medication=item.get("medication", ""),
+                    outcome=item.get("outcome", ""),
+                ))
+                existing_keys.add(("病史", desc))
+                logger.info(f"  [Pending-Record] [{rec_date}] {desc}")
 
-        self.save_pending(existing)
+            self.save_pending(existing)
 
     def confirm_pending(self, key: str, value: str) -> bool:
         """确认待确认条目：从暂存区移入已确认信息或病史。"""
-        items = self.load_pending()
-        matched = [i for i in items if i.key == key and i.value == value]
-        if not matched:
-            return False
+        with self._lock:
+            items = self.load_pending()
+            matched = [i for i in items if i.key == key and i.value == value]
+            if not matched:
+                return False
 
-        item = matched[0]
-        remaining = [i for i in items if not (i.key == key and i.value == value)]
-        self.save_pending(remaining)
+            item = matched[0]
+            remaining = [i for i in items if not (i.key == key and i.value == value)]
+            self.save_pending(remaining)
 
-        if item.is_record:
-            # 病史类型 → 写入 PERSONAL.md 病史记录
-            self.add_records([{
-                "date": item.record_date,
-                "description": item.value,
-                "symptoms": item.symptoms,
-                "duration": item.duration,
-                "medication": item.medication,
-                "outcome": item.outcome,
-            }])
-            logger.info(f"Confirmed pending → records: [{item.record_date}] {item.value}")
-        else:
-            # 信息类型 → 写入已确认信息
-            confirmed = self.load()
-            confirmed[key] = value
-            data = self._parse_profile()
-            self._save_profile(confirmed, data["records"])
-            logger.info(f"Confirmed pending → profile: {key}={value}")
+            if item.is_record:
+                # 病史类型 → 写入 PERSONAL.md 病史记录
+                self.add_records([{
+                    "date": item.record_date,
+                    "description": item.value,
+                    "symptoms": item.symptoms,
+                    "duration": item.duration,
+                    "medication": item.medication,
+                    "outcome": item.outcome,
+                }])
+                logger.info(f"Confirmed pending → records: [{item.record_date}] {item.value}")
+            else:
+                # 信息类型 → 写入已确认信息
+                confirmed = self.load()
+                confirmed[key] = value
+                data = self._parse_profile()
+                self._save_profile(confirmed, data["records"])
+                logger.info(f"Confirmed pending → profile: {key}={value}")
 
-        return True
+            return True
 
     def dismiss_pending(self, key: str, value: str) -> bool:
         """丢弃待确认条目（不转入已确认）。"""
-        items = self.load_pending()
-        original_len = len(items)
-        items = [i for i in items if not (i.key == key and i.value == value)]
-        if len(items) < original_len:
-            self.save_pending(items)
-            logger.info(f"Dismissed pending: {key}={value}")
-            return True
-        return False
+        with self._lock:
+            items = self.load_pending()
+            original_len = len(items)
+            items = [i for i in items if not (i.key == key and i.value == value)]
+            if len(items) < original_len:
+                self.save_pending(items)
+                logger.info(f"Dismissed pending: {key}={value}")
+                return True
+            return False
 
     def get_pending(self) -> List[PendingItem]:
         """获取所有待确认条目。"""

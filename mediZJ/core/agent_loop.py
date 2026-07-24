@@ -84,9 +84,15 @@ class AgentLoop:
         self.on_questionnaire = on_questionnaire
         self.session_id: Optional[str] = None
 
-        # Harness Engineering: 约束验证器和自动修复器
-        self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
-        self.auto_fixer = AutoFixer() if CONSTRAINTS_ENABLED else None
+        # Harness Engineering: 约束验证器和自动修复器（进程级共享，只读/无状态）
+        if CONSTRAINTS_ENABLED:
+            from mediZJ.constraints.validator import get_shared_validator
+            from mediZJ.validation.auto_fixer import get_shared_auto_fixer
+            self.validator = get_shared_validator()
+            self.auto_fixer = get_shared_auto_fixer()
+        else:
+            self.validator = None
+            self.auto_fixer = None
         if CONSTRAINTS_ENABLED:
             logger.debug("✅ Constraint validation enabled")
 

@@ -21,6 +21,7 @@
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 - **🔍 Trace 追踪**: 全链路请求追踪，六种 Span 类型（TRACE/STAGE/AGENT/ITERATION/LLM/TOOL），瀑布图可视化，per-agent/tool/llm 聚合统计 ✅
+- **🚦 并发安全**: per-session 请求互斥与记忆写锁、个人档案按 user_id 隔离、LLM 全局并发限流 + 共享连接池、阻塞调用全部下线程，支持多用户同时提问 ✅
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -261,7 +262,7 @@ python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床�
 集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
 
 ```bash
-# 单元测试（231 个，无需外部服务，秒级完成）
+# 单元测试（289 个，无需外部服务，秒级完成）
 pytest tests/ -m "not integration"
 
 # 集成测试（20 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
@@ -419,15 +420,18 @@ medix-agent-swarm/
 │   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager
 │   ├── test_agents/                     # Agent：能力标签、工具注册
 │   ├── test_swarm/                      # Swarm：events, shared_context
-│   ├── test_memory/                     # 记忆：short_term, entropy_manager
+│   ├── test_memory/                     # 记忆：short_term（含并发安全）, entropy_manager, personal_profile（用户隔离）
+│   ├── test_api/                        # API 层：chat_service 并发互斥
 │   ├── test_constraints/                # 约束验证
 │   ├── test_validation/                 # 自动修复
 │   ├── test_trace/                      # Trace：models, context, collector, storage
 │   ├── test_research/                   # 深度研究：evidence_synthesizer
 │   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
 │
-├── .claude/skills/                      # Claude Code Skills (10个)
-│   ├── search-knowledge/                # 搜索医学知识库
+├── scripts/                             # 运维脚本
+│   └── stress_chat.py                   # 并发压测脚本（asyncio + httpx，支持干跑模式）
+│
+├── .claude/skills/                      # Claude Code Skills (10个)│   ├── search-knowledge/                # 搜索医学知识库
 │   ├── assess-risk/                     # 风险评估
 │   ├── analyze-symptoms/                # 症状分析
 │   ├── recommend-lifestyle/             # 生活方式建议
@@ -568,6 +572,11 @@ LLM_MODEL_NAME=your-model
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
+# 并发与超时配置
+LLM_MAX_CONCURRENCY=16   # LLM 全局并发上限（信号量，保护上游 API 配额）
+LLM_TIMEOUT=60           # 单次 LLM 请求超时（秒）
+REQUEST_TIMEOUT=300      # 单次问答请求总超时（秒），超时返回 504
+
 # Mem0 长期记忆配置（可选，获取地址：https://app.mem0.ai）
 MEM0_API_KEY=m0-your-api-key-here
 ```
@@ -607,12 +616,15 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 
 #### 个人档案（PersonalProfile）
 
-**作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），全局单文件。
+**作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），**按 user_id 隔离存储**。
 
-**存储路径**：`mediZJ/memory/profile/PERSONAL.md`
+**存储路径**：`mediZJ/memory/profile/{user_id}/PERSONAL.md`（未传 user_id 时默认 `default/`，旧版全局单文件自动迁移至此）
 
 **工作方式**：
-- LLM 每轮对话自动提取个人信息，增量合并写入
+
+- 问答请求可携带 `user_id` 字段（`/api/chat`、`/api/chat/stream`），不同用户的档案互不可见
+- `/api/personal` 系列端点支持 `?user_id=` 查询参数，缺省操作 default 用户
+- LLM 每轮对话自动提取个人信息，增量合并写入（读写经共享锁串行化，并发不丢更新）
 - 对话开始时自动注入到 Agent 上下文（仅已确认信息，来自 `PERSONAL.md`）
 - 前端「个人中心」支持手动查看和编辑
 
@@ -699,6 +711,56 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 - 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆和个人档案
 - 短期记忆默认使用内存存储，无需配置 Redis
 - 个人档案始终可用（本地文件，无外部依赖）
+
+## 🚦 并发与压测
+
+系统面向多用户并发提问场景做了分层优化（单机单进程、<50 并发设计目标）。
+
+### 并发安全设计
+
+| 层面 | 机制 | 位置 |
+| ------ | ------ | ------ |
+| **会话互斥** | per-session asyncio.Lock，同会话请求排队执行，防止短期记忆 / turn_index 写竞争 | `mediZJ/api/services/chat_service.py` |
+| **记忆写锁** | 短期记忆 per-session 写锁，覆盖写入 + 增量压缩全过程 | `mediZJ/memory/short_term.py` |
+| **档案隔离** | 个人档案按 user_id 分目录存储，共享 RLock 串行化读写，旧版单文件自动迁移 | `mediZJ/memory/personal_profile.py` |
+| **任务认领** | SharedContext 子任务认领加锁，防止并行 Worker 重复执行 | `mediZJ/swarm/shared_context.py` |
+| **阻塞下线程** | embedding 推理 / SQLite / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
+| **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
+| **LLM 限流** | 全局信号量（`LLM_MAX_CONCURRENCY`，默认 16），高并发排队而非触发 429 | `mediZJ/core/llm_client.py` |
+| **熔断器** | 进程级共享，跨请求累计 LLM 失败（连续 5 次断开 30s） | `mediZJ/swarm/swarm_coordinator.py` |
+| **存储串行化** | Milvus Lite 客户端调用加锁（知识库 `@_serialized` 装饰器、会话向量 RLock + 原子 delete/insert） | `milvus_kb.py`、`session_vector_store.py` |
+| **总超时** | 单次问答 `REQUEST_TIMEOUT`（默认 300s），超时友好返回 504 | `mediZJ/api/services/chat_service.py` |
+
+### 压测脚本
+
+`scripts/stress_chat.py`（asyncio + httpx，分档位并发）：
+
+```bash
+# 终端 1：启动后端
+uv run python mediZJ/api_main.py
+
+# 终端 2：干跑（打 history 端点，不消耗 LLM token）
+uv run python scripts/stress_chat.py --dry-run --tiers 10,30,50
+
+# 终端 2：正式压测（打 /api/chat，真实消耗 LLM token）
+uv run python scripts/stress_chat.py --tiers 10,30,50 --timeout 400
+```
+
+每个请求使用独立 session_id（压测目标是系统吞吐，非同会话排队）。输出各档位的成功率、状态码分布、p50/p95/p99 延迟与吞吐。
+
+> **注意**：脚本已设置 `trust_env=False` 禁用系统代理。macOS 系统代理（如 Clash）会被 httpx 读取但不识别系统 bypass 列表，localhost 请求会被代理截获返回 502。
+
+### 压测基线（50 并发，真实 LLM）
+
+| 指标 | 结果 |
+| ------ | ------ |
+| 成功率 | 50/50 = 100%（无 429/5xx） |
+| 延迟 | p50 ≈ 187s，p95 ≈ 212s |
+| 服务端 | 进程稳定，无 Traceback / database is locked |
+
+高并发下延迟上升是 `LLM_MAX_CONCURRENCY` 信号量排队的预期表现（请求排队等待上游配额而非失败）。若上游配额充裕，可调高该值提升吞吐。
+
+---
 
 ## 🏗️ Harness Engineering 融合
 

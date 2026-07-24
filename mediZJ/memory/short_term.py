@@ -4,13 +4,15 @@
 功能：
 - 管理会话级的对话历史（messages）
 - 支持两种存储后端：内存（默认）和 Redis（可选）
-- 自动过期机制（Redis 1小时）
+- 自动过期机制（默认 1 小时，可配置）
 - 熵管理：自动去重和压缩（Harness Engineering）
 """
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+import asyncio
 import json
+import time
 from loguru import logger
 
 # Harness Engineering: 熵管理
@@ -85,7 +87,6 @@ class ShortTermMemory:
     """
 
     _instance = None  # 单例实例
-    _lock = None  # 用于线程安全（如果需要）
 
     def __new__(cls, *args, **kwargs):
         """单例模式：确保只有一个 ShortTermMemory 实例"""
@@ -97,7 +98,8 @@ class ShortTermMemory:
         self,
         storage_type: str = "memory",
         redis_config: Optional[Dict[str, Any]] = None,
-        llm_client=None
+        llm_client=None,
+        ttl_seconds: int = 3600
     ):
         """
         初始化短期记忆管理器
@@ -106,13 +108,19 @@ class ShortTermMemory:
             storage_type: 存储类型，"memory" 或 "redis"
             redis_config: Redis 配置（storage_type="redis" 时需要）
             llm_client: LLM 客户端（可选），用于熵管理器的语义摘要生成
+            ttl_seconds: 会话过期时间（秒），默认 3600（1 小时）。memory 和 redis 模式均生效
         """
         # 防止重复初始化
         if hasattr(self, '_initialized'):
             return
 
         self.storage_type = storage_type
+        self.ttl_seconds = ttl_seconds
         self.sessions: Dict[str, ConversationHistory] = {}
+        # per-session 写锁：防止同会话并发 add_message 与增量压缩交错导致消息丢失
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+        # 全量过期清理的节流时间戳（monotonic），避免每次写入都 O(n) 全扫
+        self._last_evict_at: float = 0.0
         self.redis_client = None
         self._initialized = True
 
@@ -173,6 +181,14 @@ class ShortTermMemory:
         logger.debug(f"Created session: {session_id}")
         return history
 
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """获取（或创建）指定会话的写锁"""
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
+
     async def add_message(
         self,
         session_id: str,
@@ -187,20 +203,27 @@ class ShortTermMemory:
             role: 消息角色（user/assistant/tool）
             content: 消息内容
         """
-        history = self.get_session(session_id)
+        # 周期性触发全量过期清理（60s 节流，memory 模式生效）
+        now = time.monotonic()
+        if now - self._last_evict_at > 60:
+            self._evict_expired_sessions()
+            self._last_evict_at = now
 
-        if history is None:
-            history = self.create_session(session_id)
+        async with self._get_session_lock(session_id):
+            history = self.get_session(session_id)
 
-        history.add_message(role, content)
+            if history is None:
+                history = self.create_session(session_id)
 
-        # 写入时增量压缩：仅当未压缩消息满足高熵条件时触发
-        if self.entropy_manager:
-            await self._maybe_compress_incremental(history)
+            history.add_message(role, content)
 
-        # 保存到存储
-        if self.storage_type == "redis" and self.redis_client:
-            self._save_to_redis(history)
+            # 写入时增量压缩：仅当未压缩消息满足高熵条件时触发
+            if self.entropy_manager:
+                await self._maybe_compress_incremental(history)
+
+            # 保存到存储
+            if self.storage_type == "redis" and self.redis_client:
+                self._save_to_redis(history)
 
         logger.debug(f"Added {role} message to session {session_id}")
 
@@ -225,8 +248,10 @@ class ShortTermMemory:
 
         compressible = messages[start:compressible_end]
 
-        # 熵检查：仅当高熵时才触发压缩
-        entropy = self.entropy_manager.estimate_entropy(compressible)
+        # 熵检查：仅当高熵时才触发压缩（encode 为 CPU 密集，下线程避免阻塞事件循环）
+        entropy = await asyncio.to_thread(
+            self.entropy_manager.estimate_entropy, compressible
+        )
         if entropy["entropy_level"] != "high":
             return  # 不满足压缩条件，跳过
 
@@ -240,7 +265,9 @@ class ShortTermMemory:
         # 1. 去重（重复率 > 0.1 才执行）
         cleaned = compressible
         if entropy.get("duplicate_rate", 0) > 0.1:
-            cleaned = self.entropy_manager.deduplicate_messages(cleaned)
+            cleaned = await asyncio.to_thread(
+                self.entropy_manager.deduplicate_messages, cleaned
+            )
 
         # 2. LLM 摘要（或截断降级）
         compressed = await self.entropy_manager._compress_older_messages(
@@ -261,18 +288,43 @@ class ShortTermMemory:
             f"(session={history.session_id}, 未压缩边界={history._uncompressed_start})"
         )
 
+    def _is_expired(self, session: ConversationHistory) -> bool:
+        """检查会话是否过期（基于 last_updated）"""
+        return datetime.now() - session.last_updated > timedelta(seconds=self.ttl_seconds)
+
+    def _evict_expired_sessions(self):
+        """惰性清理所有过期会话（memory 模式）"""
+        if self.storage_type != "memory":
+            return
+        expired_ids = [
+            sid for sid, s in self.sessions.items()
+            if self._is_expired(s)
+        ]
+        for sid in expired_ids:
+            logger.debug(f"会话 {sid} 已过期，自动清除（TTL={self.ttl_seconds}s）")
+            self.sessions.pop(sid, None)
+            self._session_locks.pop(sid, None)
+
     def get_session(self, session_id: str) -> Optional[ConversationHistory]:
         """
-        获取会话历史
+        获取会话历史（惰性过期检查）
 
         Args:
             session_id: 会话ID
 
         Returns:
-            ConversationHistory 对象，如果不存在返回 None
+            ConversationHistory 对象，如果不存在或已过期返回 None
         """
         if self.storage_type == "memory":
-            return self.sessions.get(session_id)
+            session = self.sessions.get(session_id)
+            if session is None:
+                return None
+            if self._is_expired(session):
+                logger.info(f"会话 {session_id} 已过期，惰性清除（TTL={self.ttl_seconds}s）")
+                self.sessions.pop(session_id, None)
+                self._session_locks.pop(session_id, None)
+                return None
+            return session
         elif self.storage_type == "redis" and self.redis_client:
             return self._load_from_redis(session_id)
         return None
@@ -333,6 +385,7 @@ class ShortTermMemory:
         """
         if self.storage_type == "memory":
             self.sessions.pop(session_id, None)
+            self._session_locks.pop(session_id, None)
         elif self.storage_type == "redis" and self.redis_client:
             key = f"session:{session_id}"
             self.redis_client.delete(key)
@@ -347,8 +400,8 @@ class ShortTermMemory:
         try:
             key = f"session:{history.session_id}"
             value = json.dumps(history.to_dict())
-            # 设置过期时间：1小时（3600秒）
-            self.redis_client.setex(key, 3600, value)
+            # 设置过期时间
+            self.redis_client.setex(key, self.ttl_seconds, value)
         except Exception as e:
             logger.error(f"Failed to save to Redis: {e}")
 

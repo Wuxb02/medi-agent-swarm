@@ -245,3 +245,14 @@ class ConstraintValidator:
                 )
 
         return list(set(required_agents))  # 去重
+
+
+_shared_validator: Optional["ConstraintValidator"] = None
+
+
+def get_shared_validator() -> "ConstraintValidator":
+    """获取进程级共享验证器（YAML 加载后只读，可安全共享）"""
+    global _shared_validator
+    if _shared_validator is None:
+        _shared_validator = ConstraintValidator()
+    return _shared_validator

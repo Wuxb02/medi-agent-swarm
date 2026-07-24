@@ -47,11 +47,12 @@ async def get_chat_history(session_id: str):
     memory = ShortTermMemory()
     raw_messages = await memory.get_recent_messages(session_id=session_id, limit=50)
 
-    # 内存无数据时从 SQLite 加载
+    # 内存无数据时从 SQLite 加载（同步驱动，下线程执行）
     if not raw_messages:
+        import asyncio
         from mediZJ.memory.session_db import SessionDB
         db = SessionDB()
-        session_data = db.get_session(session_id)
+        session_data = await asyncio.to_thread(db.get_session, session_id)
         if session_data:
             raw_messages = [
                 {"role": m["role"], "content": m["content"], "timestamp": m.get("timestamp")}

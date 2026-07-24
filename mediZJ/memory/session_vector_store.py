@@ -11,13 +11,15 @@ Collection：session_summaries
 """
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
 from pymilvus import MilvusClient
-from sentence_transformers import SentenceTransformer
+
+from .embedding import load_embedding_model
 
 
 # 默认路径
@@ -52,8 +54,11 @@ class SessionVectorStore:
         # 确保目录存在
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # 加载 embedding 模型（优先本地缓存）
+        # 加载 embedding 模型（进程内共享缓存实例）
         self._load_embedding_model(embedding_model_name)
+
+        # Milvus Lite 客户端调用串行化（pymilvus 对本地文件型客户端无线程安全保证）
+        self._client_lock = threading.RLock()
 
         # 初始化 Milvus Lite
         logger.info(f"Connecting to session vector store: {db_path}")
@@ -76,36 +81,8 @@ class SessionVectorStore:
         )
 
     def _load_embedding_model(self, model_name: str):
-        """加载 embedding 模型，优先使用本地 HuggingFace 缓存"""
-        local_path = (
-            Path.home()
-            / ".cache"
-            / "huggingface"
-            / "hub"
-            / "models--BAAI--bge-small-zh-v1.5"
-            / "snapshots"
-        )
-        if local_path.exists():
-            snapshots = sorted(
-                local_path.iterdir(),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if snapshots:
-                model_path = str(snapshots[0])
-                logger.info(
-                    f"Loading embedding model from local cache: {model_path}"
-                )
-                self.embedding_model = SentenceTransformer(
-                    model_path, device="cpu"
-                )
-                self.embedding_dim = (
-                    self.embedding_model.get_sentence_embedding_dimension()
-                )
-                return
-
-        logger.info(f"Loading embedding model: {model_name}")
-        self.embedding_model = SentenceTransformer(model_name, device="cpu")
+        """加载 embedding 模型（经共享缓存，全进程同一实例）"""
+        self.embedding_model = load_embedding_model(model_name)
         self.embedding_dim = (
             self.embedding_model.get_sentence_embedding_dimension()
         )
@@ -127,10 +104,7 @@ class SessionVectorStore:
             logger.warning(f"Empty summary for session {session_id}, skip indexing")
             return
 
-        # 删除已有记录（更新场景）
-        self.delete_session(session_id)
-
-        # 向量化
+        # 向量化（CPU 推理，无需持锁）
         vector = self.embedding_model.encode([summary_text])[0]
 
         data = [
@@ -144,13 +118,16 @@ class SessionVectorStore:
             }
         ]
 
-        try:
-            self.milvus_client.insert(
-                collection_name=self.collection_name, data=data
-            )
-            logger.debug(f"Indexed session: {session_id}")
-        except Exception as e:
-            logger.error(f"Failed to index session {session_id}: {e}")
+        # delete + insert 在同一临界区内，保证更新原子性
+        with self._client_lock:
+            self.delete_session(session_id)
+            try:
+                self.milvus_client.insert(
+                    collection_name=self.collection_name, data=data
+                )
+                logger.debug(f"Indexed session: {session_id}")
+            except Exception as e:
+                logger.error(f"Failed to index session {session_id}: {e}")
 
     def search_similar(
         self, query: str, top_k: int = 3
@@ -171,15 +148,16 @@ class SessionVectorStore:
         try:
             query_vector = self.embedding_model.encode([query])[0]
 
-            results = self.milvus_client.search(
-                collection_name=self.collection_name,
-                data=[query_vector.tolist()],
-                limit=top_k,
-                output_fields=[
-                    "session_id", "summary", "mode",
-                    "created_at", "total_tokens",
-                ],
-            )
+            with self._client_lock:
+                results = self.milvus_client.search(
+                    collection_name=self.collection_name,
+                    data=[query_vector.tolist()],
+                    limit=top_k,
+                    output_fields=[
+                        "session_id", "summary", "mode",
+                        "created_at", "total_tokens",
+                    ],
+                )
 
             hits = []
             for result_set in results:
@@ -206,10 +184,11 @@ class SessionVectorStore:
     def delete_session(self, session_id: str):
         """删除会话的向量记录"""
         try:
-            self.milvus_client.delete(
-                collection_name=self.collection_name,
-                filter=f'session_id == "{session_id}"',
-            )
+            with self._client_lock:
+                self.milvus_client.delete(
+                    collection_name=self.collection_name,
+                    filter=f'session_id == "{session_id}"',
+                )
             logger.debug(f"Deleted vector for session: {session_id}")
         except Exception as e:
             logger.warning(
@@ -219,9 +198,10 @@ class SessionVectorStore:
     def count_sessions(self) -> int:
         """统计已索引的会话数量"""
         try:
-            stats = self.milvus_client.describe_collection(
-                self.collection_name
-            )
+            with self._client_lock:
+                stats = self.milvus_client.describe_collection(
+                    self.collection_name
+                )
             return stats.get("num_entities", 0)
         except Exception as e:
             logger.warning(f"Failed to count sessions: {e}")

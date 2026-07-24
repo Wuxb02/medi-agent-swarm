@@ -66,8 +66,14 @@ def build_agent_subgraph(
     Returns:
         编译后的 CompiledStateGraph
     """
-    validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
-    auto_fixer = AutoFixer() if CONSTRAINTS_ENABLED else None
+    if CONSTRAINTS_ENABLED:
+        from mediZJ.constraints.validator import get_shared_validator
+        from mediZJ.validation.auto_fixer import get_shared_auto_fixer
+        validator = get_shared_validator()
+        auto_fixer = get_shared_auto_fixer()
+    else:
+        validator = None
+        auto_fixer = None
 
     # 工具执行节点
     _tool_execution_node = make_tool_execution_node(

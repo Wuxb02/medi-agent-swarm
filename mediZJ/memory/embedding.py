@@ -5,6 +5,7 @@
 供 entropy_manager、session_vector_store 等模块复用。
 """
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -37,12 +38,16 @@ def _get_local_cache_path(model_name: str) -> Path | None:
     return None
 
 
+@lru_cache(maxsize=4)
 def load_embedding_model(model_name: str | None = None) -> SentenceTransformer:
     """
     加载 embedding 模型，优先使用本地 HuggingFace 缓存。
 
     模型名称优先级：参数 > 环境变量 EMBEDDING_MODEL_NAME > 默认值。
     加载失败时抛出 RuntimeError。
+
+    进程内缓存：同名模型全局共享一个实例（推理只读，可安全并发），
+    避免 ShortTermMemory/SessionVectorStore 等各自重复加载占用双倍内存。
 
     Args:
         model_name: 模型名称或路径（可选）

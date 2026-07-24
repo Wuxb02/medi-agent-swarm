@@ -12,7 +12,9 @@
 """
 import json
 import math
+import threading
 from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
@@ -22,11 +24,19 @@ from pymilvus import (
     AnnSearchRequest, RRFRanker,
     Function, FunctionType,
 )
-from sentence_transformers import SentenceTransformer
-
 from mediZJ.knowledge.entity_index import MedicalEntityIndex
+from mediZJ.memory.embedding import load_embedding_model
 
 COLLECTION_NAME = "medical_knowledge_v2"
+
+
+def _serialized(func):
+    """串行化 Milvus 客户端调用（pymilvus 对本地文件型客户端无线程安全保证）"""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with self._client_lock:
+            return func(self, *args, **kwargs)
+    return wrapper
 
 
 # ---- Trace 集成（可选）----
@@ -72,27 +82,14 @@ class MedicalKnowledgeBase:
 
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        # ---- Embedding 模型 ----
-        local_model_path = (
-            Path.home() / ".cache" / "huggingface" / "hub"
-            / "models--BAAI--bge-small-zh-v1.5" / "snapshots"
-        )
-        if local_model_path.exists():
-            snapshots = sorted(
-                local_model_path.iterdir(),
-                key=lambda p: p.stat().st_mtime, reverse=True,
-            )
-            model_path = str(snapshots[0]) if snapshots else embedding_model
-            logger.info(f"Loading embedding model from local cache: {model_path}")
-        else:
-            model_path = embedding_model
-            logger.info(f"Loading embedding model: {embedding_model}")
-
-        self.embedding_model = SentenceTransformer(model_path, device="cpu")
+        # ---- Embedding 模型（进程内共享缓存实例） ----
+        self.embedding_model = load_embedding_model(embedding_model)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         logger.info(f"Embedding model loaded (dimension={self.embedding_dim})")
 
         # ---- Milvus Client ----
+        # pymilvus 客户端调用串行化锁（需在 _create_collection 前初始化）
+        self._client_lock = threading.RLock()
         logger.info(f"Connecting to Milvus Lite: {db_path}")
         self.milvus_client = MilvusClient(db_path)
 
@@ -205,6 +202,7 @@ class MedicalKnowledgeBase:
     # 文档 CRUD
     # ------------------------------------------------------------------
 
+    @_serialized
     def add_documents(
         self, documents: List[Dict[str, Any]], chunk_size: int = 1024,
     ) -> int:
@@ -331,6 +329,7 @@ class MedicalKnowledgeBase:
                 hit["distance"] = 0.0
         return results[0]
 
+    @_serialized
     def search(
         self,
         query: str,
@@ -466,6 +465,7 @@ class MedicalKnowledgeBase:
     # Collection 管理
     # ------------------------------------------------------------------
 
+    @_serialized
     def delete_collection(self):
         """删除并重建 collection（用于重建）"""
         if self.milvus_client.has_collection(self.collection_name):
@@ -473,6 +473,7 @@ class MedicalKnowledgeBase:
             logger.info(f"Deleted collection: {self.collection_name}")
         self._create_collection()
 
+    @_serialized
     def count_documents(self) -> int:
         """统计去重后的文档数量"""
         try:
@@ -481,6 +482,7 @@ class MedicalKnowledgeBase:
             logger.warning(f"Failed to count documents: {e}")
             return 0
 
+    @_serialized
     def list_documents(self) -> List[Dict[str, Any]]:
         """列出知识库中所有去重后的文档摘要"""
         try:
@@ -519,6 +521,7 @@ class MedicalKnowledgeBase:
 
         return result
 
+    @_serialized
     def document_exists_by_hash(self, content_hash: str) -> bool:
         """根据内容 hash 检查文档是否已存在"""
         filter_expr = f'content_hash == "{content_hash}"'
@@ -533,6 +536,7 @@ class MedicalKnowledgeBase:
         except Exception:
             return False
 
+    @_serialized
     def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
         """获取指定文档的所有 chunk，按 chunk_id 排序"""
         filter_expr = f'doc_id == "{doc_id}"'
@@ -578,6 +582,7 @@ class MedicalKnowledgeBase:
         chunks.sort(key=lambda c: c["chunk_id"])
         return chunks
 
+    @_serialized
     def delete_document(self, doc_id: str) -> int:
         """删除指定文档的所有 chunk，返回删除数量"""
         chunks = self.get_document_chunks(doc_id)
@@ -599,6 +604,7 @@ class MedicalKnowledgeBase:
         self.entity_index.remove_document(doc_id)
         return len(chunks)
 
+    @_serialized
     def update_document(
         self,
         doc_id: str,

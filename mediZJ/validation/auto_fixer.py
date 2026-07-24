@@ -115,3 +115,14 @@ class AutoFixer:
         output = output.replace("肯定是", "很可能是")
 
         return output
+
+
+_shared_auto_fixer = None
+
+
+def get_shared_auto_fixer() -> "AutoFixer":
+    """获取进程级共享修复器（无状态，可安全共享）"""
+    global _shared_auto_fixer
+    if _shared_auto_fixer is None:
+        _shared_auto_fixer = AutoFixer()
+    return _shared_auto_fixer

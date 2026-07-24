@@ -21,6 +21,39 @@ class ToolCall:
     arguments: Dict[str, Any]
 
 
+# 进程级共享的 AsyncOpenAI 客户端：httpx 连接池全进程复用，
+# 避免每请求新建连接池导致高并发下连接数膨胀
+_shared_openai_clients: Dict[Any, AsyncOpenAI] = {}
+
+# LLM 全局并发上限（保护上游 API 配额），惰性初始化以读取环境变量
+_llm_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _get_shared_openai_client(api_key: str, base_url: str) -> AsyncOpenAI:
+    """获取（或创建）共享的 AsyncOpenAI 客户端"""
+    key = (base_url, api_key)
+    client = _shared_openai_clients.get(key)
+    if client is None:
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=float(os.getenv("LLM_TIMEOUT", "60")),
+            max_retries=2,
+        )
+        _shared_openai_clients[key] = client
+    return client
+
+
+def _get_llm_semaphore() -> asyncio.Semaphore:
+    """获取 LLM 并发限制信号量"""
+    global _llm_semaphore
+    if _llm_semaphore is None:
+        _llm_semaphore = asyncio.Semaphore(
+            int(os.getenv("LLM_MAX_CONCURRENCY", "16"))
+        )
+    return _llm_semaphore
+
+
 @dataclass
 class LLMResponse:
     """LLM 响应数据结构（支持 function calling）"""
@@ -54,7 +87,7 @@ class LLMClient:
             if not api_key or not base_url:
                 raise ValueError("LLM_API_KEY 或 LLM_BASE_URL 未设置，请在 .env 文件中配置")
 
-            self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            self.client = _get_shared_openai_client(api_key, base_url)
             self.model_name = os.getenv("LLM_MODEL_NAME", "gpt-4o")
             self.temperature = float(os.getenv("LLM_TEMPERATURE", "0.7"))
             self.max_tokens = int(os.getenv("LLM_MAX_TOKENS", "8192"))
@@ -230,7 +263,8 @@ class LLMClient:
             if traced_span:
                 with traced_span(SpanType.LLM, name="chat_with_tools") as span:
                     span.llm_attrs = LLMAttrs(model=self.model_name)
-                    response = await self.client.chat.completions.create(**request_params)
+                    async with _get_llm_semaphore():
+                        response = await self.client.chat.completions.create(**request_params)
                     llm_response = self._parse_response(response)
                     if llm_response.usage:
                         span.llm_attrs.prompt_tokens = llm_response.usage.get("prompt_tokens", 0)
@@ -240,7 +274,8 @@ class LLMClient:
                     span.llm_attrs.output_content_summary = llm_response.content or ""
                     return llm_response
             else:
-                response = await self.client.chat.completions.create(**request_params)
+                async with _get_llm_semaphore():
+                    response = await self.client.chat.completions.create(**request_params)
                 return self._parse_response(response)
 
         except Exception as e:
@@ -350,9 +385,11 @@ class LLMClient:
             if traced_span:
                 async with traced_span(SpanType.LLM, name="chat_with_tools_stream") as span:
                     span.llm_attrs = LLMAttrs(model=self.model_name)
-                    result = await self._stream_chunks(
-                        request_params, on_content_token, on_reasoning_token, on_tools_detected
-                    )
+                    # 流式期间持续持有信号量（一条流占用一个上游连接）
+                    async with _get_llm_semaphore():
+                        result = await self._stream_chunks(
+                            request_params, on_content_token, on_reasoning_token, on_tools_detected
+                        )
                     if result.usage:
                         span.llm_attrs.prompt_tokens = result.usage.get("prompt_tokens", 0)
                         span.llm_attrs.completion_tokens = result.usage.get("completion_tokens", 0)
@@ -361,9 +398,10 @@ class LLMClient:
                     span.llm_attrs.output_content_summary = result.content or ""
                     return result
             else:
-                return await self._stream_chunks(
-                    request_params, on_content_token, on_reasoning_token, on_tools_detected
-                )
+                async with _get_llm_semaphore():
+                    return await self._stream_chunks(
+                        request_params, on_content_token, on_reasoning_token, on_tools_detected
+                    )
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")

@@ -52,6 +52,21 @@ except ImportError as e:
         logger.warning(f"MEDIZJ_USE_LANGGRAPH=true 但 langgraph 模块不可用: {e}")
 
 
+# 进程级共享熔断器（跨请求累计 LLM 失败次数）
+_shared_circuit_breaker = None
+
+
+def _get_shared_circuit_breaker():
+    """获取进程级共享熔断器实例"""
+    global _shared_circuit_breaker
+    if _shared_circuit_breaker is None:
+        from mediZJ.core.circuit_breaker import CircuitBreaker
+        _shared_circuit_breaker = CircuitBreaker(
+            failure_threshold=5, cooldown_seconds=30.0
+        )
+    return _shared_circuit_breaker
+
+
 class SwarmCoordinator:
     """
     Swarm 协调器
@@ -72,7 +87,8 @@ class SwarmCoordinator:
         self,
         llm_client: Optional[LLMClient] = None,
         event_callback: Optional[Any] = None,
-        questionnaire_manager: Optional[Any] = None
+        questionnaire_manager: Optional[Any] = None,
+        user_id: Optional[str] = None
     ):
         self.llm_client = llm_client or LLMClient()
         self.event_callback = event_callback
@@ -98,12 +114,11 @@ class SwarmCoordinator:
         self.session_manager = SessionSummaryManager()
         self.short_term_memory = ShortTermMemory(storage_type="memory", llm_client=self.llm_client)  # 或 "redis"
         self.long_term_memory = LongTermMemory()
-        self.personal_profile = PersonalProfile()
+        self.personal_profile = PersonalProfile(user_id=user_id or "default")
         self.ltm_save_task = None
 
-        # 熔断器：连续 5 次 LLM 错误后拒绝新请求 30s
-        from mediZJ.core.circuit_breaker import CircuitBreaker
-        self.cb = CircuitBreaker(failure_threshold=5, cooldown_seconds=30.0)
+        # 熔断器：进程级共享实例，跨请求累计失败（连续 5 次 LLM 错误后拒绝新请求 30s）
+        self.cb = _get_shared_circuit_breaker()
 
         # LangGraph ToolRegistry（双轨模式下使用）
         self._tool_registry = None

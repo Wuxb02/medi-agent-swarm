@@ -119,7 +119,8 @@ def make_tool_execution_node(
     """
     _validator = validator
     if _validator is None and CONSTRAINTS_ENABLED:
-        _validator = ConstraintValidator()
+        from mediZJ.constraints.validator import get_shared_validator
+        _validator = get_shared_validator()
 
     async def tool_execution_node(state: AgentState) -> dict:
         """执行工具调用，返回状态更新"""

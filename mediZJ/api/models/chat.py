@@ -1,6 +1,6 @@
 """问答接口的请求/响应模型"""
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Citation(BaseModel):
@@ -21,6 +21,8 @@ class ChatRequest(BaseModel):
     question: str
     session_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None
+    # 用户标识：用于隔离个人健康档案，缺省为 default（单用户兼容行为）
+    user_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class ChatResponse(BaseModel):
