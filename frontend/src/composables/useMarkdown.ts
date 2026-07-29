@@ -8,7 +8,10 @@ const md = new MarkdownIt({
 })
 
 // 正则匹配引用标注: [1], [1,2], [1-3], [1,2-4] 等
+// eslint-disable-next-line no-useless-escape
 const CITATION_RE = /\[(\d+(?:[,\-]\d+)*)\]/g
+
+const SENTINEL = '\0'
 
 /**
  * 在 HTML 文本中将引用标注 [N] 转为可点击的上标元素。
@@ -20,15 +23,15 @@ function injectCitationRefs(html: string): string {
   let protectedHtml = html
     .replace(/<pre[^>]*>[\s\S]*?<\/pre>/gi, (m) => {
       protectedBlocks.push(m)
-      return `\x00CODEBLOCK${protectedBlocks.length - 1}\x00`
+      return `${SENTINEL}CODEBLOCK${protectedBlocks.length - 1}${SENTINEL}`
     })
     .replace(/<code[^>]*>[\s\S]*?<\/code>/gi, (m) => {
       protectedBlocks.push(m)
-      return `\x00CODE${protectedBlocks.length - 1}\x00`
+      return `${SENTINEL}CODE${protectedBlocks.length - 1}${SENTINEL}`
     })
 
   protectedHtml = protectedHtml.replace(CITATION_RE, (_match, nums: string) => {
-    const refs = nums.split(',').flatMap(part => {
+    const refs = nums.split(',').flatMap((part) => {
       if (part.includes('-')) {
         const [start, end] = part.split('-').map(Number)
         if (isNaN(start) || isNaN(end) || start > end) return [part]
@@ -41,7 +44,8 @@ function injectCitationRefs(html: string): string {
   })
 
   // 恢复保护块
-  return protectedHtml.replace(/\x00(CODE|CODEBLOCK)(\d+)\x00/g, (_m, _type, idx) => {
+  const restoreRe = new RegExp(`${SENTINEL}(CODE|CODEBLOCK)(\\d+)${SENTINEL}`, 'g')
+  return protectedHtml.replace(restoreRe, (_m, _type, idx) => {
     return protectedBlocks[parseInt(idx)] || ''
   })
 }

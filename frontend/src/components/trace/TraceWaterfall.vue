@@ -17,18 +17,36 @@
         >
           折叠全部
         </button>
-        <span class="text-xs text-slate-400">总耗时 {{ totalDurationMs.toFixed(0) }}ms · {{ spans.length }} spans</span>
+        <span class="text-xs text-slate-400"
+          >总耗时 {{ totalDurationMs.toFixed(0) }}ms · {{ spans.length }} spans</span
+        >
       </div>
     </div>
-    <div class="px-4 py-2 bg-slate-50 border-b border-slate-100 flex items-center gap-4 text-[11px] text-slate-500">
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-slate-300" /> Trace</span>
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-blue-300" /> Stage</span>
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-green-300" /> Agent</span>
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-300" /> Iteration</span>
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-orange-300" /> LLM</span>
-      <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-cyan-300" /> Tool</span>
+    <div
+      class="px-4 py-2 bg-slate-50 border-b border-slate-100 flex items-center gap-4 text-[11px] text-slate-500"
+    >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-slate-300" /> Trace</span
+      >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-blue-300" /> Stage</span
+      >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-green-300" /> Agent</span
+      >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-purple-300" /> Iteration</span
+      >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-orange-300" /> LLM</span
+      >
+      <span class="flex items-center gap-1"
+        ><span class="w-2.5 h-2.5 rounded-sm bg-cyan-300" /> Tool</span
+      >
       <span class="text-slate-300">|</span>
-      <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-400" /> 错误</span>
+      <span class="flex items-center gap-1"
+        ><span class="w-2 h-2 rounded-full bg-red-400" /> 错误</span
+      >
     </div>
     <div class="overflow-x-auto">
       <div class="min-w-[700px]">
@@ -44,7 +62,7 @@
             />
             <div
               v-for="tick in timeTicks"
-              :key="'l'+tick.offset"
+              :key="'l' + tick.offset"
               class="absolute text-[10px] text-slate-400 -translate-x-1/2 whitespace-nowrap"
               :style="{ left: tick.pct + '%', top: '3px' }"
             >
@@ -60,7 +78,7 @@
           :key="row.span.id"
           class="flex items-center border-b border-slate-50 hover:bg-slate-50 cursor-pointer transition px-4 py-1.5"
           :class="{ 'bg-blue-50/30': selectedSpan?.id === row.span.id }"
-          :style="{ paddingLeft: (row.depth * 16 + 16) + 'px' }"
+          :style="{ paddingLeft: row.depth * 16 + 16 + 'px' }"
           @click="selectSpan(row.span)"
         >
           <!-- expand/collapse toggle -->
@@ -68,10 +86,11 @@
             v-if="row.hasChildren"
             @click.stop="toggleCollapse(row.span.id)"
             class="w-4 h-4 flex items-center justify-center text-[10px] text-slate-400 hover:text-slate-600 cursor-pointer select-none shrink-0 mr-1"
-          >{{ isCollapsed(row.span.id) ? '▶' : '▼' }}</span>
+            >{{ isCollapsed(row.span.id) ? '▶' : '▼' }}</span
+          >
           <span v-else class="w-4 shrink-0 mr-1" />
           <!-- Name -->
-          <div class="flex items-center gap-2 min-w-0" style="width: 200px;">
+          <div class="flex items-center gap-2 min-w-0" style="width: 200px">
             <span
               class="w-2 h-2 rounded-full shrink-0"
               :class="dotColor(row.span)"
@@ -146,14 +165,17 @@ function buildTree(spans: WaterfallSpan[]): TreeNode[] {
 const collapsedIds = ref<Set<string>>(new Set())
 const selectedSpan = ref<WaterfallSpan | null>(null)
 
-watch(() => props.selectedSpanId, (newId) => {
-  if (newId) {
-    const found = props.spans.find((s: WaterfallSpan) => s.id === newId)
-    if (found) selectedSpan.value = found
-  } else if (newId === null) {
-    selectedSpan.value = null
-  }
-})
+watch(
+  () => props.selectedSpanId,
+  (newId) => {
+    if (newId) {
+      const found = props.spans.find((s: WaterfallSpan) => s.id === newId)
+      if (found) selectedSpan.value = found
+    } else if (newId === null) {
+      selectedSpan.value = null
+    }
+  },
+)
 
 function isCollapsed(id: string): boolean {
   return collapsedIds.value.has(id)

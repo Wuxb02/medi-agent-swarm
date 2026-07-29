@@ -19,7 +19,7 @@ const popVisible = ref(false)
 
 const matchedCitations = computed(() => {
   return props.refNumbers
-    .map(n => props.citations.find(c => c.index === n))
+    .map((n) => props.citations.find((c) => c.index === n))
     .filter(Boolean) as Citation[]
 })
 
@@ -61,16 +61,20 @@ function handleClickOutside(e: MouseEvent) {
   }
 }
 
-watch(() => props.anchorEl, (el) => {
-  if (el) {
-    nextTick(() => {
-      recalcPosition()
-      popVisible.value = true
-    })
-  } else {
-    popVisible.value = false
-  }
-}, { immediate: true })
+watch(
+  () => props.anchorEl,
+  (el) => {
+    if (el) {
+      nextTick(() => {
+        recalcPosition()
+        popVisible.value = true
+      })
+    } else {
+      popVisible.value = false
+    }
+  },
+  { immediate: true },
+)
 
 onMounted(() => {
   document.addEventListener('mousedown', handleClickOutside, true)
@@ -105,16 +109,22 @@ defineExpose({ popoverRef })
     >
       <div class="flex items-center justify-between mb-2">
         <span class="text-xs font-semibold text-slate-500 uppercase tracking-wide">引用来源</span>
-        <span class="text-xs text-blue-500 font-medium">
-          [{{ refNumbers.join(', ') }}]
-        </span>
+        <span class="text-xs text-blue-500 font-medium"> [{{ refNumbers.join(', ') }}] </span>
       </div>
-      <div v-for="cite in matchedCitations" :key="cite.index" class="py-2 first:pt-0 border-b border-slate-100 last:border-0">
+      <div
+        v-for="cite in matchedCitations"
+        :key="cite.index"
+        class="py-2 first:pt-0 border-b border-slate-100 last:border-0"
+      >
         <div class="flex items-center gap-2 mb-1">
-          <span class="text-xs font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">[{{ cite.index }}]</span>
+          <span class="text-xs font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded"
+            >[{{ cite.index }}]</span
+          >
           <span class="text-xs text-slate-400">{{ formatScore(cite.score) }} 相关</span>
         </div>
-        <div class="text-sm text-slate-700 leading-relaxed mb-1.5 max-h-48 overflow-y-auto bg-slate-50 rounded-md p-2 whitespace-pre-wrap break-words">
+        <div
+          class="text-sm text-slate-700 leading-relaxed mb-1.5 max-h-48 overflow-y-auto bg-slate-50 rounded-md p-2 whitespace-pre-wrap break-words"
+        >
           {{ cite.content || cite.snippet || '(无内容预览)' }}
         </div>
         <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-slate-400">

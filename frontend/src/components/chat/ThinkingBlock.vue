@@ -20,9 +20,12 @@ const displayLabel = computed(() => {
 
 const isExpanded = ref(!props.isCollapsed)
 
-watch(() => props.isCollapsed, (val) => {
-  isExpanded.value = !val
-})
+watch(
+  () => props.isCollapsed,
+  (val) => {
+    isExpanded.value = !val
+  },
+)
 
 function toggle() {
   isExpanded.value = !isExpanded.value
@@ -55,13 +58,17 @@ function stopTimer() {
 }
 
 // 迭代未完成时启动计时，完成后停止
-watch(() => props.isCollapsed, (val) => {
-  if (val) {
-    stopTimer()
-  } else {
-    startTimer()
-  }
-}, { immediate: true })
+watch(
+  () => props.isCollapsed,
+  (val) => {
+    if (val) {
+      stopTimer()
+    } else {
+      startTimer()
+    }
+  },
+  { immediate: true },
+)
 
 onUnmounted(() => stopTimer())
 
@@ -85,16 +92,28 @@ const displayElapsed = computed(() => {
         fill="currentColor"
         viewBox="0 0 20 20"
       >
-        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+        <path
+          fill-rule="evenodd"
+          d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+        />
       </svg>
 
       <span class="text-slate-500">{{ displayLabel }}</span>
 
       <!-- 推理中：跳动点动画 -->
       <span v-if="!isCollapsed" class="ml-auto flex gap-0.5">
-        <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:0ms" />
-        <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:150ms" />
-        <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+        <span
+          class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+          style="animation-delay: 0ms"
+        />
+        <span
+          class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+          style="animation-delay: 150ms"
+        />
+        <span
+          class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+          style="animation-delay: 300ms"
+        />
       </span>
     </button>
 
@@ -122,26 +141,30 @@ const displayElapsed = computed(() => {
               fill="currentColor"
               viewBox="0 0 20 20"
             >
-              <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+              <path
+                fill-rule="evenodd"
+                d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+              />
             </svg>
             <span class="font-medium text-slate-600">{{ step.toolName }}</span>
-            <span
-              v-if="step.success"
-              class="text-green-500 ml-auto"
-            >&#x2713;</span>
-            <span
-              v-else
-              class="text-red-500 ml-auto"
-            >&#x2717;</span>
+            <span v-if="step.success" class="text-green-500 ml-auto">&#x2713;</span>
+            <span v-else class="text-red-500 ml-auto">&#x2717;</span>
           </button>
-          <div v-if="expandedSteps[idx]" class="px-2.5 py-1.5 text-slate-500 border-t border-slate-100 space-y-1">
+          <div
+            v-if="expandedSteps[idx]"
+            class="px-2.5 py-1.5 text-slate-500 border-t border-slate-100 space-y-1"
+          >
             <div v-if="step.arguments && Object.keys(step.arguments).length > 0">
               <span class="text-slate-400">参数：</span>
-              <code class="text-[10px] bg-slate-100 px-1 py-0.5 rounded">{{ JSON.stringify(step.arguments) }}</code>
+              <code class="text-[10px] bg-slate-100 px-1 py-0.5 rounded">{{
+                JSON.stringify(step.arguments)
+              }}</code>
             </div>
             <div>
               <span class="text-slate-400">结果：</span>
-              <div class="mt-0.5 bg-slate-50 rounded px-2 py-1 text-[11px] leading-relaxed max-h-32 overflow-auto whitespace-pre-wrap">
+              <div
+                class="mt-0.5 bg-slate-50 rounded px-2 py-1 text-[11px] leading-relaxed max-h-32 overflow-auto whitespace-pre-wrap"
+              >
                 {{ step.result }}
               </div>
             </div>

@@ -19,11 +19,18 @@
             class="inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700 transition"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M15 19l-7-7 7-7"
+              />
             </svg>
             返回列表
           </button>
-          <span class="text-xs text-slate-400 font-mono">{{ selectedTraceId.slice(0, 20) }}...</span>
+          <span class="text-xs text-slate-400 font-mono"
+            >{{ selectedTraceId.slice(0, 20) }}...</span
+          >
         </div>
 
         <TraceWaterfall
@@ -42,7 +49,10 @@
             @back="goBack"
             @select-span="navigateToChild"
           />
-          <div v-else class="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-center">
+          <div
+            v-else
+            class="bg-white border border-slate-200 rounded-xl p-5 flex items-center justify-center"
+          >
             <p class="text-sm text-slate-400">点击 waterfall 节点查看详情</p>
           </div>
         </div>
@@ -62,7 +72,9 @@
 
         <!-- Trace 列表 -->
         <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+          <div
+            class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between"
+          >
             <span class="text-sm font-semibold text-slate-700">最近 Trace</span>
             <span class="text-xs text-slate-400">{{ totalTraces }} 条</span>
           </div>
@@ -85,10 +97,18 @@
                 class="border-b border-slate-50 hover:bg-slate-50 cursor-pointer transition"
                 @click="selectedTraceId = t.trace_id"
               >
-                <td class="px-4 py-2 font-mono text-xs text-slate-500">{{ t.trace_id.slice(0, 16) }}...</td>
-                <td class="px-4 py-2 text-xs text-slate-500 whitespace-nowrap">{{ formatTime(t.start_time) }}</td>
+                <td class="px-4 py-2 font-mono text-xs text-slate-500">
+                  {{ t.trace_id.slice(0, 16) }}...
+                </td>
+                <td class="px-4 py-2 text-xs text-slate-500 whitespace-nowrap">
+                  {{ formatTime(t.start_time) }}
+                </td>
                 <td class="px-4 py-2 text-right">
-                  <span :class="(t.duration_ms || 0) > 30000 ? 'text-amber-500 font-medium' : 'text-slate-600'">
+                  <span
+                    :class="
+                      (t.duration_ms || 0) > 30000 ? 'text-amber-500 font-medium' : 'text-slate-600'
+                    "
+                  >
                     {{ t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + 's' : '-' }}
                   </span>
                 </td>
@@ -98,8 +118,12 @@
                   </span>
                 </td>
                 <td class="px-4 py-2 text-center text-slate-600">{{ t.span_count }}</td>
-                <td class="px-4 py-2 text-right text-slate-600">{{ t.total_tokens.toLocaleString() }}</td>
-                <td class="px-4 py-2 text-slate-500 truncate max-w-[240px]">{{ t.question_summary }}</td>
+                <td class="px-4 py-2 text-right text-slate-600">
+                  {{ t.total_tokens.toLocaleString() }}
+                </td>
+                <td class="px-4 py-2 text-slate-500 truncate max-w-[240px]">
+                  {{ t.question_summary }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -116,10 +140,18 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  getTraces, getTraceWaterfall,
-  getAgentStats, getToolStats, getLLMStats, getSlowTraces,
-  type TraceSummary, type WaterfallSpan,
-  type AgentStats, type ToolStats, type LLMStats, type SlowTraceItem,
+  getTraces,
+  getTraceWaterfall,
+  getAgentStats,
+  getToolStats,
+  getLLMStats,
+  getSlowTraces,
+  type TraceSummary,
+  type WaterfallSpan,
+  type AgentStats,
+  type ToolStats,
+  type LLMStats,
+  type SlowTraceItem,
 } from '../api/trace'
 import TraceWaterfall from '../components/trace/TraceWaterfall.vue'
 import SpanDetail from '../components/trace/SpanDetail.vue'
@@ -133,9 +165,14 @@ const totalTraces = ref(0)
 const agentStats = ref<AgentStats>({})
 const toolStats = ref<ToolStats>({})
 const llmStats = ref<LLMStats>({
-  call_count: 0, avg_latency_ms: 0, p50_ms: 0, p90_ms: 0,
-  avg_prompt_tokens: 0, avg_completion_tokens: 0,
-  total_prompt_tokens: 0, total_completion_tokens: 0,
+  call_count: 0,
+  avg_latency_ms: 0,
+  p50_ms: 0,
+  p90_ms: 0,
+  avg_prompt_tokens: 0,
+  avg_completion_tokens: 0,
+  total_prompt_tokens: 0,
+  total_completion_tokens: 0,
 })
 const slowTraces = ref<SlowTraceItem[]>([])
 
@@ -145,7 +182,7 @@ const waterfallTotalMs = ref(0)
 const spanNavStack = ref<WaterfallSpan[]>([])
 
 const selectedSpan = computed(() =>
-  spanNavStack.value.length > 0 ? spanNavStack.value[spanNavStack.value.length - 1] : null
+  spanNavStack.value.length > 0 ? spanNavStack.value[spanNavStack.value.length - 1] : null,
 )
 
 function navigateToChild(span: WaterfallSpan) {
@@ -220,7 +257,9 @@ watch(selectedTraceId, (newId) => {
 
 function modeLabel(mode: string): string {
   const map: Record<string, string> = {
-    single_agent: '单Agent', swarm: 'Swarm', fallback: '降级',
+    single_agent: '单Agent',
+    swarm: 'Swarm',
+    fallback: '降级',
   }
   return map[mode] || mode
 }

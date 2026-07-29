@@ -9,14 +9,24 @@
           title="返回上级"
         >
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M15 19l-7-7 7-7"
+            />
           </svg>
         </button>
         <h3 class="text-sm font-semibold text-slate-700">Span 详情</h3>
       </div>
       <button @click="$emit('close')" class="text-slate-400 hover:text-slate-600">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M6 18L18 6M6 6l12 12"
+          />
         </svg>
       </button>
     </div>
@@ -54,7 +64,9 @@
         >
           <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="childDotColor(child)" />
           <span class="text-slate-600 truncate">{{ child.name }}</span>
-          <span class="text-slate-400 ml-auto shrink-0">{{ (child.duration_ms || 0).toFixed(0) }}ms</span>
+          <span class="text-slate-400 ml-auto shrink-0"
+            >{{ (child.duration_ms || 0).toFixed(0) }}ms</span
+          >
         </div>
       </div>
 
@@ -85,7 +97,9 @@
         </div>
         <div v-if="span.attributes.llm.output_content_summary" class="mt-2">
           <span class="text-xs text-slate-400">输出内容</span>
-          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-all">{{ formatContent(span.attributes.llm.output_content_summary) }}</pre>
+          <pre
+            class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-80 overflow-y-auto whitespace-pre-wrap break-all"
+            >{{ formatContent(span.attributes.llm.output_content_summary) }}</pre>
         </div>
       </template>
 
@@ -106,7 +120,9 @@
         </div>
         <div v-if="span.attributes.tool.result_summary" class="mt-1">
           <span class="text-xs text-slate-400">结果摘要</span>
-          <pre class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-60 overflow-y-auto whitespace-pre-wrap break-all">{{ formatContent(span.attributes.tool.result_summary) }}</pre>
+          <pre
+            class="text-xs text-slate-600 mt-0.5 bg-slate-50 rounded p-2 max-h-60 overflow-y-auto whitespace-pre-wrap break-all"
+            >{{ formatContent(span.attributes.tool.result_summary) }}</pre>
         </div>
       </template>
 
@@ -155,23 +171,29 @@ const typeLabels: Record<string, string> = {
 
 const spanTypeLabel = computed(() => typeLabels[props.span.span_type] || props.span.span_type)
 
-const children = computed(() =>
-  props.allSpans?.filter((s: WaterfallSpan) => s.parent_id === props.span.id) || []
+const children = computed(
+  () => props.allSpans?.filter((s: WaterfallSpan) => s.parent_id === props.span.id) || [],
 )
 
 function childDotColor(s: WaterfallSpan): string {
   if (s.status === 'error') return 'bg-red-400'
   const map: Record<string, string> = {
-    stage: 'bg-blue-400', agent: 'bg-green-400', iteration: 'bg-purple-400',
-    llm: 'bg-orange-400', tool: 'bg-cyan-400', trace: 'bg-slate-400',
+    stage: 'bg-blue-400',
+    agent: 'bg-green-400',
+    iteration: 'bg-purple-400',
+    llm: 'bg-orange-400',
+    tool: 'bg-cyan-400',
+    trace: 'bg-slate-400',
   }
   return map[s.span_type] || 'bg-slate-400'
 }
 
 const statusClass = computed(() =>
-  props.span.status === 'error' ? 'text-red-500 font-medium' :
-  props.span.status === 'timeout' ? 'text-amber-500 font-medium' :
-  'text-green-500'
+  props.span.status === 'error'
+    ? 'text-red-500 font-medium'
+    : props.span.status === 'timeout'
+      ? 'text-amber-500 font-medium'
+      : 'text-green-500',
 )
 
 function formatContent(str: string | undefined | null): string {

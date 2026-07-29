@@ -1,5 +1,157 @@
 /** 前端类型定义 */
 
+// ============================================================
+// SSE 事件类型系统
+// ============================================================
+
+/** 所有 SSE 事件类型 */
+export type SSEEventType =
+  | 'start'
+  | 'task_decomposed'
+  | 'agent_start'
+  | 'agent_tool_call'
+  | 'agent_tool_result'
+  | 'agent_complete'
+  | 'agent_thinking'
+  | 'agent_tool_step'
+  | 'agent_thinking_done'
+  | 'agent_content_delta'
+  | 'agent_questionnaire'
+  | 'agent_questionnaire_cancelled'
+  | 'trace_span'
+  | 'suggestions'
+  | 'done'
+  | 'error'
+
+/** SSE 原始消息结构 */
+export interface SSEMessage {
+  event: string
+  data: Record<string, unknown>
+}
+
+// ---- 各事件的 data 类型 ----
+
+export interface StartData {
+  session_id: string
+}
+
+export interface TaskDecomposedData {
+  id?: string
+  timestamp?: string
+  data?: {
+    subtask_id?: string
+    type?: string
+    description?: string
+    assigned_agent?: string
+  }
+}
+
+export interface AgentStartData {
+  source_agent?: string
+  agent_id?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    subtask_id?: string
+    subtask_type?: string
+    tool_calls?: number
+    mode?: string
+    [key: string]: unknown
+  }
+}
+
+export interface AgentCompleteData {
+  source_agent?: string
+  agent_id?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    execution_time?: number
+    subtasks_completed?: number
+    [key: string]: unknown
+  }
+}
+
+export interface AgentThinkingData {
+  source_agent?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    content: string
+    iteration: number
+    [key: string]: unknown
+  }
+}
+
+export interface AgentToolStepData {
+  source_agent?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    tool_name: string
+    arguments: Record<string, unknown>
+    result: unknown
+    success?: boolean
+    iteration: number
+  }
+}
+
+export interface AgentThinkingDoneData {
+  source_agent?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    iteration: number
+    elapsed_seconds?: number
+  }
+}
+
+export interface AgentContentDeltaData {
+  data?: {
+    token: string
+  }
+}
+
+export interface AgentQuestionnaireData {
+  questionnaire_id: string
+  questionnaire_data?: {
+    questions: QuestionnaireQuestion[]
+  }
+  data?: {
+    questionnaire_id: string
+    questionnaire_data?: {
+      questions: QuestionnaireQuestion[]
+    }
+  }
+}
+
+export interface DoneData {
+  answer: string
+  disclaimer?: string
+  citations?: Citation[]
+  swarm_enabled?: boolean
+  agents_involved?: string[]
+  total_time?: number
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    total_tokens?: number
+  }
+  performance_metrics?: {
+    parallel_efficiency?: number
+    information_coverage?: number
+    redundancy?: number
+  }
+}
+
+export interface ErrorData {
+  error: string
+}
+
+// ============================================================
+// UI 模型
+// ============================================================
+
 export interface QuestionOption {
   label: string
   description?: string
@@ -38,9 +190,9 @@ export interface ChatMessage {
     subtasksCompleted?: number
     timeoutOccurred?: boolean
     usage?: {
-      prompt_tokens: number
-      completion_tokens: number
-      total_tokens: number
+      prompt_tokens?: number
+      completion_tokens?: number
+      total_tokens?: number
     }
     performanceMetrics?: {
       parallelEfficiency: number
@@ -58,7 +210,7 @@ export interface AgentEvent {
   subtaskType?: string
   toolName?: string
   timestamp: string
-  data?: Record<string, any>
+  data?: Record<string, unknown>
 }
 
 export interface TaskDelegation {
@@ -70,7 +222,7 @@ export interface TaskDelegation {
 
 export interface ToolStep {
   toolName: string
-  arguments: Record<string, any>
+  arguments: Record<string, unknown>
   result: string
   success: boolean
 }
@@ -85,15 +237,10 @@ export interface ThinkingBlock {
   isCollapsed: boolean
 }
 
-export interface SSEEvent {
-  type: string
-  data: Record<string, any>
-}
-
 export interface KnowledgeItem {
   id: string
   content: string
-  metadata: Record<string, any>
+  metadata: Record<string, string>
   score: number
 }
 
@@ -149,7 +296,7 @@ export interface SessionTurn {
     role: string
     content: string
     timestamp?: string
-    agent_events?: any[]
+    agent_events?: unknown[]
     suggestions?: string[]
     disclaimer?: string
     mode?: string

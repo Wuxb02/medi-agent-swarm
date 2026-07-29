@@ -27,7 +27,7 @@ async function handleDelete(sessionId: string, e: Event) {
   if (!confirm('确定删除该会话？')) return
   try {
     await deleteSession(sessionId)
-    sessions.value = sessions.value.filter(s => s.session_id !== sessionId)
+    sessions.value = sessions.value.filter((s) => s.session_id !== sessionId)
   } catch (e) {
     console.error('Delete failed:', e)
   }
@@ -66,8 +66,13 @@ function formatDate(dateStr: string) {
               </p>
               <div class="flex items-center gap-3 mt-2 text-xs text-slate-400">
                 <span>{{ formatDate(s.created_at) }}</span>
-                <span class="px-1.5 py-0.5 rounded text-xs"
-                  :class="s.mode === 'swarm' ? 'bg-green-50 text-green-600' : 'bg-slate-100 text-slate-500'"
+                <span
+                  class="px-1.5 py-0.5 rounded text-xs"
+                  :class="
+                    s.mode === 'swarm'
+                      ? 'bg-green-50 text-green-600'
+                      : 'bg-slate-100 text-slate-500'
+                  "
                 >
                   {{ s.mode === 'swarm' ? 'Swarm' : '单 Agent' }}
                 </span>
@@ -82,7 +87,12 @@ function formatDate(dateStr: string) {
               class="p-1.5 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition"
             >
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
               </svg>
             </button>
           </div>

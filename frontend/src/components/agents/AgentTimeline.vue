@@ -72,6 +72,8 @@ const statusColor: Record<string, string> = {
       <span v-if="agent.subtaskType" class="text-slate-400">({{ agent.subtaskType }})</span>
       <span v-if="agent.status === 'completed'" class="text-green-500">✓</span>
     </div>
-    <span v-if="metadata?.totalTime" class="flex items-center text-slate-400">{{ metadata.totalTime.toFixed(1) }}s</span>
+    <span v-if="metadata?.totalTime" class="flex items-center text-slate-400"
+      >{{ metadata.totalTime.toFixed(1) }}s</span
+    >
   </div>
 </template>

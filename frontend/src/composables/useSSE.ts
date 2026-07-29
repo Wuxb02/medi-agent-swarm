@@ -1,21 +1,37 @@
-/** 流式响应 composable（fetch + ReadableStream，换行分隔 JSON） */
+/**
+ * 流式响应 composable（fetch + ReadableStream，换行分隔 JSON）
+ */
+import type {
+  StartData,
+  TaskDecomposedData,
+  AgentStartData,
+  AgentCompleteData,
+  AgentThinkingData,
+  AgentToolStepData,
+  AgentThinkingDoneData,
+  AgentContentDeltaData,
+  AgentQuestionnaireData,
+  DoneData,
+  ErrorData,
+} from '../types'
+
 export interface StreamCallbacks {
-  onStart?: (data: any) => void
-  onTaskDecomposed?: (data: any) => void
-  onAgentStart?: (data: any) => void
-  onAgentToolCall?: (data: any) => void
-  onAgentToolResult?: (data: any) => void
-  onAgentComplete?: (data: any) => void
-  onAgentThinking?: (data: any) => void
-  onAgentToolStep?: (data: any) => void
-  onAgentThinkingDone?: (data: any) => void
-  onAgentContentDelta?: (data: any) => void
-  onAgentQuestionnaire?: (data: any) => void
-  onAgentQuestionnaireCancelled?: (data: any) => void
-  onTraceSpan?: (data: any) => void
-  onSuggestions?: (data: any) => void
-  onDone?: (data: any) => void
-  onError?: (data: any) => void
+  onStart?: (data: StartData) => void
+  onTaskDecomposed?: (data: TaskDecomposedData) => void
+  onAgentStart?: (data: AgentStartData) => void
+  onAgentToolCall?: (data: Record<string, unknown>) => void
+  onAgentToolResult?: (data: Record<string, unknown>) => void
+  onAgentComplete?: (data: AgentCompleteData) => void
+  onAgentThinking?: (data: AgentThinkingData) => void
+  onAgentToolStep?: (data: AgentToolStepData) => void
+  onAgentThinkingDone?: (data: AgentThinkingDoneData) => void
+  onAgentContentDelta?: (data: AgentContentDeltaData) => void
+  onAgentQuestionnaire?: (data: AgentQuestionnaireData) => void
+  onAgentQuestionnaireCancelled?: (data: Record<string, unknown>) => void
+  onTraceSpan?: (data: Record<string, unknown>) => void
+  onSuggestions?: (data: { suggestions: string[] }) => void
+  onDone?: (data: DoneData) => void
+  onError?: (data: ErrorData) => void
   onStreamEnd?: () => void
 }
 
@@ -59,25 +75,55 @@ export function useSSE() {
             const { event, data } = msg
 
             switch (event) {
-              case 'start': callbacks.onStart?.(data); break
-              case 'task_decomposed': callbacks.onTaskDecomposed?.(data); break
-              case 'agent_start': callbacks.onAgentStart?.(data); break
-              case 'agent_tool_call': callbacks.onAgentToolCall?.(data); break
-              case 'agent_tool_result': callbacks.onAgentToolResult?.(data); break
-              case 'agent_complete': callbacks.onAgentComplete?.(data); break
-              case 'agent_thinking': callbacks.onAgentThinking?.(data); break
-              case 'agent_tool_step': callbacks.onAgentToolStep?.(data); break
-              case 'agent_thinking_done': callbacks.onAgentThinkingDone?.(data); break
-              case 'agent_content_delta': callbacks.onAgentContentDelta?.(data); break
-              case 'agent_questionnaire': callbacks.onAgentQuestionnaire?.(data); break
-              case 'agent_questionnaire_cancelled': callbacks.onAgentQuestionnaireCancelled?.(data); break
-              case 'trace_span': callbacks.onTraceSpan?.(data); break
-              case 'suggestions': callbacks.onSuggestions?.(data); break
+              case 'start':
+                callbacks.onStart?.(data)
+                break
+              case 'task_decomposed':
+                callbacks.onTaskDecomposed?.(data)
+                break
+              case 'agent_start':
+                callbacks.onAgentStart?.(data)
+                break
+              case 'agent_tool_call':
+                callbacks.onAgentToolCall?.(data)
+                break
+              case 'agent_tool_result':
+                callbacks.onAgentToolResult?.(data)
+                break
+              case 'agent_complete':
+                callbacks.onAgentComplete?.(data)
+                break
+              case 'agent_thinking':
+                callbacks.onAgentThinking?.(data)
+                break
+              case 'agent_tool_step':
+                callbacks.onAgentToolStep?.(data)
+                break
+              case 'agent_thinking_done':
+                callbacks.onAgentThinkingDone?.(data)
+                break
+              case 'agent_content_delta':
+                callbacks.onAgentContentDelta?.(data)
+                break
+              case 'agent_questionnaire':
+                callbacks.onAgentQuestionnaire?.(data)
+                break
+              case 'agent_questionnaire_cancelled':
+                callbacks.onAgentQuestionnaireCancelled?.(data)
+                break
+              case 'trace_span':
+                callbacks.onTraceSpan?.(data)
+                break
+              case 'suggestions':
+                callbacks.onSuggestions?.(data)
+                break
               case 'done':
                 doneReceived = true
                 callbacks.onDone?.(data)
                 break
-              case 'error': callbacks.onError?.(data); break
+              case 'error':
+                callbacks.onError?.(data)
+                break
             }
           } catch {
             // 跳过解析失败的行
@@ -95,7 +141,9 @@ export function useSSE() {
           } else if (msg.event === 'error') {
             callbacks.onError?.(msg.data)
           }
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
 
       // 如果没收到 done 事件，触发 fallback

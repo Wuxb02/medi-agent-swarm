@@ -5,7 +5,6 @@ import {
   updatePersonalInfo,
   confirmPending,
   dismissPending,
-  getMedicalRecords,
   updateMedicalRecords,
 } from '../api/personal'
 import type { PersonalInfoItem, PendingItem, MedicalRecord } from '../api/personal'
@@ -168,9 +167,7 @@ function confidenceLabel(c: string): string {
 }
 
 function confidenceClass(c: string): string {
-  return c === 'high'
-    ? 'bg-green-100 text-green-700'
-    : 'bg-yellow-100 text-yellow-700'
+  return c === 'high' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
 }
 
 onMounted(loadInfo)
@@ -179,12 +176,8 @@ onMounted(loadInfo)
 <template>
   <div class="h-full overflow-y-auto p-6">
     <div class="max-w-2xl mx-auto space-y-8">
-
       <!-- 错误提示 -->
-      <div
-        v-if="error"
-        class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
-      >
+      <div v-if="error" class="p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">
         {{ error }}
       </div>
       <!-- 保存成功 -->
@@ -196,9 +189,7 @@ onMounted(loadInfo)
       </div>
 
       <!-- 加载中 -->
-      <div v-if="loading" class="text-center py-16 text-slate-400 text-sm">
-        加载中...
-      </div>
+      <div v-if="loading" class="text-center py-16 text-slate-400 text-sm">加载中...</div>
 
       <template v-else>
         <!-- ========== 区域 1：个人信息 ========== -->
@@ -206,9 +197,7 @@ onMounted(loadInfo)
           <div class="flex items-center justify-between mb-4">
             <div>
               <h2 class="text-lg font-semibold text-slate-800">个人信息</h2>
-              <p class="text-sm text-slate-500 mt-1">
-                已确认的健康档案（年龄、过敏史、慢性病等）
-              </p>
+              <p class="text-sm text-slate-500 mt-1">已确认的健康档案（年龄、过敏史、慢性病等）</p>
             </div>
             <div class="flex gap-2">
               <button
@@ -242,12 +231,11 @@ onMounted(loadInfo)
               <p class="text-sm">暂无个人信息</p>
               <p class="text-xs mt-1">点击"编辑"手动添加，或在对话中自动提取后到待确认区确认</p>
             </div>
-            <div v-else class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
-              <div
-                v-for="item in items"
-                :key="item.key"
-                class="flex items-center px-5 py-3.5"
-              >
+            <div
+              v-else
+              class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100"
+            >
+              <div v-for="item in items" :key="item.key" class="flex items-center px-5 py-3.5">
                 <span class="w-24 text-sm font-medium text-slate-600 shrink-0">{{ item.key }}</span>
                 <span class="text-sm text-slate-800">{{ item.value }}</span>
               </div>
@@ -277,11 +265,18 @@ onMounted(loadInfo)
                 title="删除"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
                 </svg>
               </button>
             </div>
-            <div class="flex items-center gap-3 bg-slate-50 border border-dashed border-slate-300 rounded-lg px-4 py-3">
+            <div
+              class="flex items-center gap-3 bg-slate-50 border border-dashed border-slate-300 rounded-lg px-4 py-3"
+            >
               <input
                 v-model="newKey"
                 placeholder="字段名（如：过敏史）"
@@ -301,7 +296,12 @@ onMounted(loadInfo)
                 title="添加"
               >
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M12 4v16m8-8H4"
+                  />
                 </svg>
               </button>
             </div>
@@ -312,13 +312,13 @@ onMounted(loadInfo)
         <section v-if="pendingCount > 0">
           <div class="flex items-center gap-2 mb-4">
             <h2 class="text-lg font-semibold text-slate-800">待确认信息</h2>
-            <span class="px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700 rounded-full">
+            <span
+              class="px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700 rounded-full"
+            >
               {{ pendingCount }} 条
             </span>
           </div>
-          <p class="text-sm text-slate-500 mb-3">
-            以下信息从对话中自动提取，请确认后保存
-          </p>
+          <p class="text-sm text-slate-500 mb-3">以下信息从对话中自动提取，请确认后保存</p>
           <div class="space-y-2">
             <div
               v-for="item in pendingItems"
@@ -331,12 +331,20 @@ onMounted(loadInfo)
                   <div class="flex items-center gap-2">
                     <span class="px-1.5 py-0.5 text-xs rounded bg-blue-50 text-blue-700">病史</span>
                     <span class="text-sm font-medium text-slate-800">{{ item.value }}</span>
-                    <span v-if="item.record_date" class="text-xs text-slate-500">{{ item.record_date }}</span>
+                    <span v-if="item.record_date" class="text-xs text-slate-500">{{
+                      item.record_date
+                    }}</span>
                   </div>
                   <div class="mt-1 space-y-0.5">
-                    <p v-if="item.symptoms" class="text-xs text-slate-600">症状：{{ item.symptoms }}</p>
-                    <p v-if="item.duration" class="text-xs text-slate-600">持续：{{ item.duration }}</p>
-                    <p v-if="item.medication" class="text-xs text-slate-600">用药：{{ item.medication }}</p>
+                    <p v-if="item.symptoms" class="text-xs text-slate-600">
+                      症状：{{ item.symptoms }}
+                    </p>
+                    <p v-if="item.duration" class="text-xs text-slate-600">
+                      持续：{{ item.duration }}
+                    </p>
+                    <p v-if="item.medication" class="text-xs text-slate-600">
+                      用药：{{ item.medication }}
+                    </p>
                   </div>
                   <span class="text-xs text-slate-400">{{ item.source_date }} 提取</span>
                 </div>
@@ -393,9 +401,7 @@ onMounted(loadInfo)
           <div class="flex items-center justify-between mb-4">
             <div>
               <h2 class="text-lg font-semibold text-slate-800">病史记录</h2>
-              <p class="text-sm text-slate-500 mt-1">
-                患病经历时间线（对话中自动记录）
-              </p>
+              <p class="text-sm text-slate-500 mt-1">患病经历时间线（对话中自动记录）</p>
             </div>
             <div class="flex gap-2">
               <button
@@ -436,7 +442,9 @@ onMounted(loadInfo)
                 class="bg-white border border-slate-200 rounded-xl p-4"
               >
                 <div class="flex items-start gap-3">
-                  <span class="shrink-0 px-2 py-1 text-xs font-medium bg-blue-50 text-blue-700 rounded">
+                  <span
+                    class="shrink-0 px-2 py-1 text-xs font-medium bg-blue-50 text-blue-700 rounded"
+                  >
                     {{ formatDate(record.date) }}
                   </span>
                   <div class="flex-1 min-w-0">
@@ -485,7 +493,12 @@ onMounted(loadInfo)
                   title="删除"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M6 18L18 6M6 6l12 12"
+                    />
                   </svg>
                 </button>
               </div>
@@ -541,7 +554,12 @@ onMounted(loadInfo)
                   title="添加"
                 >
                   <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      stroke-width="2"
+                      d="M12 4v16m8-8H4"
+                    />
                   </svg>
                 </button>
               </div>

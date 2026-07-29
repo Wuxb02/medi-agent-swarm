@@ -39,9 +39,7 @@ export async function getPersonalInfo(): Promise<PersonalInfoResponse> {
   return data
 }
 
-export async function updatePersonalInfo(
-  items: PersonalInfoItem[]
-): Promise<PersonalInfoResponse> {
+export async function updatePersonalInfo(items: PersonalInfoItem[]): Promise<PersonalInfoResponse> {
   const { data } = await api.put('/personal', { items })
   return data
 }

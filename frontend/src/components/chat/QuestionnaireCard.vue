@@ -89,8 +89,12 @@ function handleSubmit() {
     <!-- 头部 -->
     <div class="qc-header">
       <svg class="qc-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        <path
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2"
+          d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+        />
       </svg>
       <span>请填写以下信息</span>
       <span class="qc-counter">{{ activeTab + 1 }} / {{ total }}</span>
@@ -130,9 +134,14 @@ function handleSubmit() {
             class="qc-opt"
             :class="{ selected: answers[currentKey] === opt.label }"
           >
-            <input type="radio" :name="currentKey" :value="opt.label"
-                   v-model="answers[currentKey]" class="sr-only"
-                   @change="otherTexts[currentKey] = ''" />
+            <input
+              type="radio"
+              :name="currentKey"
+              :value="opt.label"
+              v-model="answers[currentKey]"
+              class="sr-only"
+              @change="otherTexts[currentKey] = ''"
+            />
             <span class="qc-radio" />
             <span class="qc-opt-text">
               {{ opt.label }}
@@ -142,10 +151,13 @@ function handleSubmit() {
         </div>
         <div class="qc-other">
           <span class="qc-other-label">其他：</span>
-          <input v-model="otherTexts[currentKey]" type="text"
-                 placeholder="以上没有符合的，手动输入"
-                 class="qc-other-input"
-                 @focus="answers[currentKey] = ''" />
+          <input
+            v-model="otherTexts[currentKey]"
+            type="text"
+            placeholder="以上没有符合的，手动输入"
+            class="qc-other-input"
+            @focus="answers[currentKey] = ''"
+          />
         </div>
       </div>
 
@@ -158,8 +170,12 @@ function handleSubmit() {
             class="qc-opt"
             :class="{ selected: isMultiSelected(currentKey, opt.label) }"
           >
-            <input type="checkbox" :value="opt.label"
-                   @change="toggleMulti(currentKey, opt.label)" class="sr-only" />
+            <input
+              type="checkbox"
+              :value="opt.label"
+              @change="toggleMulti(currentKey, opt.label)"
+              class="sr-only"
+            />
             <span class="qc-check" />
             <span class="qc-opt-text">
               {{ opt.label }}
@@ -169,16 +185,23 @@ function handleSubmit() {
         </div>
         <div class="qc-other">
           <span class="qc-other-label">其他：</span>
-          <input v-model="otherTexts[currentKey]" type="text"
-                 placeholder="补充选项中没有的内容"
-                 class="qc-other-input" />
+          <input
+            v-model="otherTexts[currentKey]"
+            type="text"
+            placeholder="补充选项中没有的内容"
+            class="qc-other-input"
+          />
         </div>
       </div>
 
       <!-- 文本输入 (input) -->
       <div v-else-if="currentQ.type === 'input'" class="qc-input-wrap">
-        <input v-model="answers[currentKey]" type="text"
-               :placeholder="`请输入${currentQ.header}...`" class="qc-input" />
+        <input
+          v-model="answers[currentKey]"
+          type="text"
+          :placeholder="`请输入${currentQ.header}...`"
+          class="qc-input"
+        />
       </div>
     </div>
 
@@ -186,24 +209,34 @@ function handleSubmit() {
     <div class="qc-footer">
       <button class="qc-nav-btn" :disabled="activeTab === 0" @click="prev">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M15 19l-7-7 7-7"
+          />
         </svg>
         上一题
       </button>
 
       <div class="qc-dots">
-        <span v-for="(_, idx) in questionnaire.questions" :key="idx"
-              class="qc-dot"
-              :class="{ active: idx === activeTab, done: isAnswered(idx) }"
-              @click="activeTab = idx" />
+        <span
+          v-for="(_, idx) in questionnaire.questions"
+          :key="idx"
+          class="qc-dot"
+          :class="{ active: idx === activeTab, done: isAnswered(idx) }"
+          @click="activeTab = idx"
+        />
       </div>
 
       <!-- 最后一题：显示提交按钮 -->
-      <button v-if="activeTab === total - 1"
-              class="qc-nav-btn qc-submit-btn"
-              :class="{ disabled: !allRequiredAnswered() || submitted }"
-              :disabled="!allRequiredAnswered() || submitted"
-              @click="handleSubmit">
+      <button
+        v-if="activeTab === total - 1"
+        class="qc-nav-btn qc-submit-btn"
+        :class="{ disabled: !allRequiredAnswered() || submitted }"
+        :disabled="!allRequiredAnswered() || submitted"
+        @click="handleSubmit"
+      >
         {{ submitted ? '已提交' : '提交' }}
       </button>
       <!-- 非最后一题：下一题 -->
@@ -237,7 +270,11 @@ function handleSubmit() {
   margin-bottom: 12px;
 }
 
-.qc-icon { width: 20px; height: 20px; flex-shrink: 0; }
+.qc-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
 
 .qc-counter {
   margin-left: auto;
@@ -272,7 +309,9 @@ function handleSubmit() {
   flex-shrink: 0;
 }
 
-.qc-tab:hover { background: #e0f2fe; }
+.qc-tab:hover {
+  background: #e0f2fe;
+}
 
 .qc-tab.active {
   background: #0ea5e9;
@@ -288,12 +327,21 @@ function handleSubmit() {
   flex-shrink: 0;
 }
 
-.qc-tab.done .qc-tab-dot { background: #22c55e; }
-.qc-tab.active .qc-tab-dot { background: white; }
-.qc-tab.active.done .qc-tab-dot { background: #bbf7d0; }
+.qc-tab.done .qc-tab-dot {
+  background: #22c55e;
+}
+.qc-tab.active .qc-tab-dot {
+  background: white;
+}
+.qc-tab.active.done .qc-tab-dot {
+  background: #bbf7d0;
+}
 
 /* 问题区域 */
-.qc-body { padding: 8px 0; min-height: 140px; }
+.qc-body {
+  padding: 8px 0;
+  min-height: 140px;
+}
 
 .qc-question-text {
   font-size: 15px;
@@ -302,9 +350,16 @@ function handleSubmit() {
   margin-bottom: 12px;
 }
 
-.qc-required { color: #ef4444; margin-left: 2px; }
+.qc-required {
+  color: #ef4444;
+  margin-left: 2px;
+}
 
-.qc-options { display: flex; flex-direction: column; gap: 6px; }
+.qc-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 .qc-opt {
   display: flex;
@@ -318,39 +373,79 @@ function handleSubmit() {
   border: 1px solid #e2e8f0;
 }
 
-.qc-opt:hover { border-color: #7dd3fc; background: #f0f9ff; }
-.qc-opt.selected { border-color: #0ea5e9; background: #e0f2fe; }
+.qc-opt:hover {
+  border-color: #7dd3fc;
+  background: #f0f9ff;
+}
+.qc-opt.selected {
+  border-color: #0ea5e9;
+  background: #e0f2fe;
+}
 
 .sr-only {
-  position: absolute; width: 1px; height: 1px;
-  overflow: hidden; clip: rect(0, 0, 0, 0);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
 }
 
 .qc-radio {
-  width: 18px; height: 18px; border-radius: 50%;
-  border: 2px solid #94a3b8; flex-shrink: 0; position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #94a3b8;
+  flex-shrink: 0;
+  position: relative;
 }
-.qc-opt.selected .qc-radio { border-color: #0ea5e9; }
+.qc-opt.selected .qc-radio {
+  border-color: #0ea5e9;
+}
 .qc-opt.selected .qc-radio::after {
-  content: ''; position: absolute;
-  top: 3px; left: 3px; width: 8px; height: 8px;
-  border-radius: 50%; background: #0ea5e9;
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #0ea5e9;
 }
 
 .qc-check {
-  width: 18px; height: 18px; border-radius: 4px;
-  border: 2px solid #94a3b8; flex-shrink: 0; position: relative;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 2px solid #94a3b8;
+  flex-shrink: 0;
+  position: relative;
 }
-.qc-opt.selected .qc-check { border-color: #0ea5e9; background: #0ea5e9; }
+.qc-opt.selected .qc-check {
+  border-color: #0ea5e9;
+  background: #0ea5e9;
+}
 .qc-opt.selected .qc-check::after {
-  content: ''; position: absolute;
-  top: 1px; left: 4px; width: 5px; height: 9px;
-  border: solid white; border-width: 0 2px 2px 0;
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 4px;
+  width: 5px;
+  height: 9px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
 
-.qc-opt-text { font-size: 14px; color: #334155; }
-.qc-opt-text small { display: block; font-size: 12px; color: #94a3b8; margin-top: 2px; }
+.qc-opt-text {
+  font-size: 14px;
+  color: #334155;
+}
+.qc-opt-text small {
+  display: block;
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
 
 /* 其他输入 */
 .qc-other {
@@ -380,9 +475,14 @@ function handleSubmit() {
   background: transparent;
 }
 
-.qc-other-input::placeholder { color: #94a3b8; font-size: 13px; }
+.qc-other-input::placeholder {
+  color: #94a3b8;
+  font-size: 13px;
+}
 
-.qc-input-wrap { margin-top: 4px; }
+.qc-input-wrap {
+  margin-top: 4px;
+}
 
 .qc-input {
   width: 100%;
@@ -394,7 +494,10 @@ function handleSubmit() {
   background: white;
   transition: border-color 0.15s;
 }
-.qc-input:focus { border-color: #0ea5e9; box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1); }
+.qc-input:focus {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1);
+}
 
 /* 底部导航 */
 .qc-footer {
@@ -420,31 +523,56 @@ function handleSubmit() {
   cursor: pointer;
   transition: all 0.15s;
 }
-.qc-nav-btn:hover:not(:disabled) { background: #f0f9ff; }
-.qc-nav-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.qc-nav-btn:hover:not(:disabled) {
+  background: #f0f9ff;
+}
+.qc-nav-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 .qc-next-btn {
   background: #0ea5e9;
   color: white;
   border-color: #0ea5e9;
 }
-.qc-next-btn:hover { background: #0284c7; }
+.qc-next-btn:hover {
+  background: #0284c7;
+}
 
 .qc-submit-btn {
   background: #0ea5e9;
   color: white;
   border-color: #0ea5e9;
 }
-.qc-submit-btn:hover:not(.disabled) { background: #0284c7; }
-.qc-submit-btn.disabled { background: #94a3b8; border-color: #94a3b8; cursor: not-allowed; }
+.qc-submit-btn:hover:not(.disabled) {
+  background: #0284c7;
+}
+.qc-submit-btn.disabled {
+  background: #94a3b8;
+  border-color: #94a3b8;
+  cursor: not-allowed;
+}
 
 /* 进度圆点 */
-.qc-dots { display: flex; gap: 6px; }
+.qc-dots {
+  display: flex;
+  gap: 6px;
+}
 
 .qc-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: #cbd5e1; cursor: pointer; transition: all 0.15s;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cbd5e1;
+  cursor: pointer;
+  transition: all 0.15s;
 }
-.qc-dot.active { background: #0ea5e9; transform: scale(1.3); }
-.qc-dot.done { background: #22c55e; }
+.qc-dot.active {
+  background: #0ea5e9;
+  transform: scale(1.3);
+}
+.qc-dot.done {
+  background: #22c55e;
+}
 </style>

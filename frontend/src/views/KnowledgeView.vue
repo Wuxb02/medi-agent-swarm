@@ -205,7 +205,7 @@ async function handleUpload() {
       uploadFile.value,
       uploadDocType.value,
       uploadDisease.value,
-      uploadSource.value
+      uploadSource.value,
     )
     uploadResult.value = `上传成功：${data.filename}，生成 ${data.chunks_added} 个分块`
     uploadFile.value = null
@@ -254,9 +254,7 @@ function getDiseaseLabel(disease: string): string {
   return diseaseLabels[disease] || disease
 }
 
-const selectedDoc = computed(() =>
-  documents.value.find((d) => d.doc_id === selectedDocId.value)
-)
+const selectedDoc = computed(() => documents.value.find((d) => d.doc_id === selectedDocId.value))
 
 const tabs = [
   { key: 'search' as TabKey, label: '搜索' },
@@ -370,9 +368,7 @@ const tabs = [
         <!-- 文档列表 -->
         <div :class="selectedDocId ? 'w-2/5' : 'w-full'" class="transition-all">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="text-sm font-semibold text-slate-700">
-              文档列表 ({{ documents.length }})
-            </h3>
+            <h3 class="text-sm font-semibold text-slate-700">文档列表 ({{ documents.length }})</h3>
             <button
               @click="loadDocuments"
               :disabled="docLoading"
@@ -382,7 +378,10 @@ const tabs = [
             </button>
           </div>
 
-          <div v-if="docLoading && documents.length === 0" class="text-center py-12 text-slate-400 text-sm">
+          <div
+            v-if="docLoading && documents.length === 0"
+            class="text-center py-12 text-slate-400 text-sm"
+          >
             加载中...
           </div>
           <div v-else-if="documents.length === 0" class="text-center py-12 text-slate-400 text-sm">
@@ -423,8 +422,18 @@ const tabs = [
                     title="查看详情"
                   >
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                      />
                     </svg>
                   </button>
                   <button
@@ -434,7 +443,12 @@ const tabs = [
                     title="删除"
                   >
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
                     </svg>
                   </button>
                   <div v-else class="flex gap-1" @click.stop>
@@ -462,7 +476,9 @@ const tabs = [
           v-if="selectedDocId"
           class="w-3/5 bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col"
         >
-          <div class="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50">
+          <div
+            class="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50"
+          >
             <div>
               <h4 class="text-sm font-semibold text-slate-700">{{ selectedDoc?.filename }}</h4>
               <span class="text-xs text-slate-400">{{ chunks.length }} 个分块</span>
@@ -495,7 +511,12 @@ const tabs = [
                 class="p-1.5 text-slate-400 hover:text-slate-600 transition"
               >
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
                 </svg>
               </button>
             </div>
@@ -521,7 +542,9 @@ const tabs = [
                 :key="chunk.milvus_id"
                 class="border border-slate-200 rounded-lg overflow-hidden"
               >
-                <div class="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200">
+                <div
+                  class="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-200"
+                >
                   <span class="text-xs font-medium text-slate-500">
                     分块 {{ chunk.chunk_id + 1 }} / {{ chunk.total_chunks || '?' }}
                   </span>
@@ -533,7 +556,9 @@ const tabs = [
                     复制
                   </button>
                 </div>
-                <pre class="p-3 text-xs text-slate-700 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-y-auto">{{ chunk.content }}</pre>
+                <pre
+                  class="p-3 text-xs text-slate-700 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-y-auto"
+                  >{{ chunk.content }}</pre>
               </div>
             </div>
           </div>
@@ -562,8 +587,18 @@ const tabs = [
             class="hidden"
             @change="onFileSelect"
           />
-          <svg class="w-10 h-10 mx-auto text-slate-400 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          <svg
+            class="w-10 h-10 mx-auto text-slate-400 mb-3"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="1.5"
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+            />
           </svg>
           <p class="text-sm text-slate-600 mb-1">
             {{ uploadFile ? uploadFile.name : '点击选择或拖拽文件到此处' }}

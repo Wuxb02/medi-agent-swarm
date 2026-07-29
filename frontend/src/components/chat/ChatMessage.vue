@@ -31,7 +31,10 @@ function handleCitationClick(event: MouseEvent) {
   if (!target.classList.contains('citation-ref')) return
   const refsStr = target.getAttribute('data-refs')
   if (!refsStr) return
-  const refNumbers = refsStr.split(',').map(Number).filter(n => !isNaN(n))
+  const refNumbers = refsStr
+    .split(',')
+    .map(Number)
+    .filter((n) => !isNaN(n))
   activeCitationRefs.value = refNumbers
   citationAnchorEl.value = target
 }
@@ -42,11 +45,14 @@ function closeCitationPopover() {
 }
 
 // 流式内容更新后，等待 DOM 更新
-watch(() => props.message.content, () => {
-  nextTick(() => {
-    closeCitationPopover()
-  })
-})
+watch(
+  () => props.message.content,
+  () => {
+    nextTick(() => {
+      closeCitationPopover()
+    })
+  },
+)
 
 const agentNameMap: Record<string, string> = {
   swarm_coordinator: '汇总输出',
@@ -58,33 +64,39 @@ const agentNameMap: Record<string, string> = {
 
 // 拆分为 LeadAgent 和 WorkerAgent 的 thinking blocks
 const leadBlocks = computed(() =>
-  (props.message.thinkingBlocks || []).filter(b => b.agentId === 'lead_agent')
+  (props.message.thinkingBlocks || []).filter((b) => b.agentId === 'lead_agent'),
 )
 
-const leadDecomposeBlocks = computed(() =>
-  leadBlocks.value.filter(b => b.iteration === 1)
-)
+const leadDecomposeBlocks = computed(() => leadBlocks.value.filter((b) => b.iteration === 1))
 
-const leadSynthesizeBlocks = computed(() =>
-  leadBlocks.value.filter(b => b.iteration === 2)
-)
+const leadSynthesizeBlocks = computed(() => leadBlocks.value.filter((b) => b.iteration === 2))
 
 const workerBlocks = computed(() =>
-  (props.message.thinkingBlocks || []).filter(b => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator')
+  (props.message.thinkingBlocks || []).filter(
+    (b) => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator',
+  ),
 )
 
 // 完整 Swarm 周期：分解 + 合成（≥2 子任务时的多 Agent 协作）
 const hasFullSwarmCycle = computed(() => leadSynthesizeBlocks.value.length > 0)
 
 // 单 Agent 模式有分解但无合成，仍需嵌套展示（LeadAgent 分解 + Worker 执行）
-const hasLeadDecomposeWithWorker = computed(() =>
-  leadDecomposeBlocks.value.length > 0 && workerGroups.value.length > 0 && !hasFullSwarmCycle.value
+const hasLeadDecomposeWithWorker = computed(
+  () =>
+    leadDecomposeBlocks.value.length > 0 &&
+    workerGroups.value.length > 0 &&
+    !hasFullSwarmCycle.value,
 )
 
 // WorkerAgent 分组（按 agentId）
 const workerGroups = computed(() => {
   if (workerBlocks.value.length === 0) return []
-  const groups: { agentId: string; agentName: string; blocks: ThinkingBlock[]; isActive: boolean }[] = []
+  const groups: {
+    agentId: string
+    agentName: string
+    blocks: ThinkingBlock[]
+    isActive: boolean
+  }[] = []
   const map: Record<string, number> = {}
   for (const block of workerBlocks.value) {
     if (map[block.agentId] === undefined) {
@@ -122,15 +134,18 @@ function isWorkerCollapsed(agentId: string): boolean {
 }
 
 // 流式输出结束后自动折叠所有分组框
-watch(() => props.message.isStreaming, (val, oldVal) => {
-  if (oldVal === true && val === false) {
-    leadCollapsed.value = true
-    workerSectionCollapsed.value = true
-    for (const group of workerGroups.value) {
-      collapsedWorkerGroups.value[group.agentId] = true
+watch(
+  () => props.message.isStreaming,
+  (val, oldVal) => {
+    if (oldVal === true && val === false) {
+      leadCollapsed.value = true
+      workerSectionCollapsed.value = true
+      for (const group of workerGroups.value) {
+        collapsedWorkerGroups.value[group.agentId] = true
+      }
     }
-  }
-})
+  },
+)
 </script>
 
 <template>
@@ -138,7 +153,9 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
     <div class="max-w-4xl mx-auto px-4">
       <!-- 用户消息 -->
       <div v-if="isUser" class="flex justify-end">
-        <div class="bg-blue-500 text-white px-4 py-2.5 rounded-2xl rounded-br-md max-w-[80%] text-sm leading-relaxed whitespace-pre-wrap">
+        <div
+          class="bg-blue-500 text-white px-4 py-2.5 rounded-2xl rounded-br-md max-w-[80%] text-sm leading-relaxed whitespace-pre-wrap"
+        >
           {{ message.content }}
         </div>
       </div>
@@ -147,14 +164,30 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
       <div v-else class="space-y-3">
         <!-- 回答内容 -->
         <div class="flex gap-3">
-          <div class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 text-xs font-semibold">AI</div>
+          <div
+            class="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 text-xs font-semibold"
+          >
+            AI
+          </div>
           <div class="flex-1 min-w-0">
-            <div v-if="message.isStreaming && !message.content" class="flex items-center gap-1 text-slate-400 text-sm">
+            <div
+              v-if="message.isStreaming && !message.content"
+              class="flex items-center gap-1 text-slate-400 text-sm"
+            >
               <span class="animate-pulse">思考中</span>
               <span class="flex gap-0.5">
-                <span class="w-1 h-1 bg-slate-400 rounded-full animate-bounce" style="animation-delay:0ms" />
-                <span class="w-1 h-1 bg-slate-400 rounded-full animate-bounce" style="animation-delay:150ms" />
-                <span class="w-1 h-1 bg-slate-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+                <span
+                  class="w-1 h-1 bg-slate-400 rounded-full animate-bounce"
+                  style="animation-delay: 0ms"
+                />
+                <span
+                  class="w-1 h-1 bg-slate-400 rounded-full animate-bounce"
+                  style="animation-delay: 150ms"
+                />
+                <span
+                  class="w-1 h-1 bg-slate-400 rounded-full animate-bounce"
+                  style="animation-delay: 300ms"
+                />
               </span>
             </div>
 
@@ -173,15 +206,34 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
                     fill="currentColor"
                     viewBox="0 0 20 20"
                   >
-                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                    <path
+                      fill-rule="evenodd"
+                      d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                    />
                   </svg>
-                  <span class="w-2 h-2 rounded-full" :class="leadBlocks.some(b => !b.isCollapsed) ? 'bg-blue-400 animate-pulse' : 'bg-blue-400'" />
+                  <span
+                    class="w-2 h-2 rounded-full"
+                    :class="
+                      leadBlocks.some((b) => !b.isCollapsed)
+                        ? 'bg-blue-400 animate-pulse'
+                        : 'bg-blue-400'
+                    "
+                  />
                   <span class="font-medium text-blue-700">任务协调</span>
                   <span class="text-blue-500">({{ leadBlocks.length }} 次迭代)</span>
-                  <span v-if="leadBlocks.some(b => !b.isCollapsed)" class="ml-auto flex gap-0.5">
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:0ms" />
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:150ms" />
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+                  <span v-if="leadBlocks.some((b) => !b.isCollapsed)" class="ml-auto flex gap-0.5">
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 0ms"
+                    />
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 150ms"
+                    />
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 300ms"
+                    />
                   </span>
                 </button>
 
@@ -214,52 +266,70 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
                         fill="currentColor"
                         viewBox="0 0 20 20"
                       >
-                        <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                        <path
+                          fill-rule="evenodd"
+                          d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                        />
                       </svg>
                       Agent 执行过程
                     </button>
                     <div v-if="!workerSectionCollapsed">
-                    <div
-                      v-for="wGroup in workerGroups"
-                      :key="wGroup.agentId"
-                      class="ml-3 border-l-2 border-blue-100 pl-3"
-                    >
-                      <!-- Worker 分组标题 -->
-                      <button
-                        @click="toggleWorkerGroup(wGroup.agentId)"
-                        class="w-full flex items-center gap-1.5 py-1 text-left hover:opacity-80 transition"
+                      <div
+                        v-for="wGroup in workerGroups"
+                        :key="wGroup.agentId"
+                        class="ml-3 border-l-2 border-blue-100 pl-3"
                       >
-                        <svg
-                          class="w-2.5 h-2.5 text-slate-400 transition-transform shrink-0"
-                          :class="{ 'rotate-90': !isWorkerCollapsed(wGroup.agentId) }"
-                          fill="currentColor"
-                          viewBox="0 0 20 20"
+                        <!-- Worker 分组标题 -->
+                        <button
+                          @click="toggleWorkerGroup(wGroup.agentId)"
+                          class="w-full flex items-center gap-1.5 py-1 text-left hover:opacity-80 transition"
                         >
-                          <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
-                        </svg>
-                        <span class="w-1.5 h-1.5 rounded-full" :class="wGroup.isActive ? 'bg-green-400 animate-pulse' : 'bg-green-400'" />
-                        <span class="font-medium text-slate-600">{{ wGroup.agentName }}</span>
-                        <span class="text-slate-400">({{ wGroup.blocks.length }} 次迭代)</span>
-                        <span v-if="wGroup.isActive" class="flex gap-0.5 ml-1">
-                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:0ms" />
-                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:150ms" />
-                          <span class="w-1 h-1 bg-green-400 rounded-full animate-bounce" style="animation-delay:300ms" />
-                        </span>
-                      </button>
-                      <!-- Worker 迭代块 -->
-                      <div v-if="!isWorkerCollapsed(wGroup.agentId)" class="space-y-1 pt-0.5">
-                        <ThinkingBlockItem
-                          v-for="block in wGroup.blocks"
-                          :key="block.id"
-                          :thinking="block.thinking"
-                          :agent-id="block.agentId"
-                          :iteration="block.iteration"
-                          :tool-steps="block.toolSteps"
-                          :elapsed-seconds="block.elapsedSeconds"
-                          :is-collapsed="block.isCollapsed"
-                        />
+                          <svg
+                            class="w-2.5 h-2.5 text-slate-400 transition-transform shrink-0"
+                            :class="{ 'rotate-90': !isWorkerCollapsed(wGroup.agentId) }"
+                            fill="currentColor"
+                            viewBox="0 0 20 20"
+                          >
+                            <path
+                              fill-rule="evenodd"
+                              d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                            />
+                          </svg>
+                          <span
+                            class="w-1.5 h-1.5 rounded-full"
+                            :class="wGroup.isActive ? 'bg-green-400 animate-pulse' : 'bg-green-400'"
+                          />
+                          <span class="font-medium text-slate-600">{{ wGroup.agentName }}</span>
+                          <span class="text-slate-400">({{ wGroup.blocks.length }} 次迭代)</span>
+                          <span v-if="wGroup.isActive" class="flex gap-0.5 ml-1">
+                            <span
+                              class="w-1 h-1 bg-green-400 rounded-full animate-bounce"
+                              style="animation-delay: 0ms"
+                            />
+                            <span
+                              class="w-1 h-1 bg-green-400 rounded-full animate-bounce"
+                              style="animation-delay: 150ms"
+                            />
+                            <span
+                              class="w-1 h-1 bg-green-400 rounded-full animate-bounce"
+                              style="animation-delay: 300ms"
+                            />
+                          </span>
+                        </button>
+                        <!-- Worker 迭代块 -->
+                        <div v-if="!isWorkerCollapsed(wGroup.agentId)" class="space-y-1 pt-0.5">
+                          <ThinkingBlockItem
+                            v-for="block in wGroup.blocks"
+                            :key="block.id"
+                            :thinking="block.thinking"
+                            :agent-id="block.agentId"
+                            :iteration="block.iteration"
+                            :tool-steps="block.toolSteps"
+                            :elapsed-seconds="block.elapsedSeconds"
+                            :is-collapsed="block.isCollapsed"
+                          />
+                        </div>
                       </div>
-                    </div>
                     </div>
                   </div>
 
@@ -300,15 +370,30 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
                     fill="currentColor"
                     viewBox="0 0 20 20"
                   >
-                    <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+                    <path
+                      fill-rule="evenodd"
+                      d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                    />
                   </svg>
-                  <span class="w-2 h-2 rounded-full" :class="group.isActive ? 'bg-blue-400 animate-pulse' : 'bg-green-400'" />
+                  <span
+                    class="w-2 h-2 rounded-full"
+                    :class="group.isActive ? 'bg-blue-400 animate-pulse' : 'bg-green-400'"
+                  />
                   <span class="font-medium text-slate-600">{{ group.agentName }}</span>
                   <span class="text-slate-400">({{ group.blocks.length }} 次迭代)</span>
                   <span v-if="group.isActive" class="ml-auto flex gap-0.5">
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:0ms" />
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:150ms" />
-                    <span class="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style="animation-delay:300ms" />
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 0ms"
+                    />
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 150ms"
+                    />
+                    <span
+                      class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
+                      style="animation-delay: 300ms"
+                    />
                   </span>
                 </button>
                 <!-- 各迭代子块（收起时隐藏） -->
@@ -347,33 +432,49 @@ watch(() => props.message.isStreaming, (val, oldVal) => {
             <QuestionnaireCard
               v-if="message.questionnaire"
               :questionnaire="message.questionnaire"
-              @submit="(answers) => chatStore.submitAnswers(message.questionnaire?.questionnaire_id || '', answers)"
+              @submit="
+                (answers) =>
+                  chatStore.submitAnswers(message.questionnaire?.questionnaire_id || '', answers)
+              "
               class="mt-3"
             />
 
             <!-- 免责声明 -->
-            <DisclaimerBanner
-              v-if="message.disclaimer"
-              :text="message.disclaimer"
-              class="mt-3"
-            />
+            <DisclaimerBanner v-if="message.disclaimer" :text="message.disclaimer" class="mt-3" />
 
             <!-- 元信息 -->
-            <div v-if="message.metadata" class="mt-2 flex items-center gap-3 text-xs text-slate-400">
+            <div
+              v-if="message.metadata"
+              class="mt-2 flex items-center gap-3 text-xs text-slate-400"
+            >
               <span v-if="message.metadata.totalTime">
                 {{ message.metadata.totalTime.toFixed(1) }}s
               </span>
               <span v-if="message.metadata.agentsInvolved.length">
-                {{ message.metadata.agentsInvolved.length }} 个 Agent · {{ message.metadata.agentsInvolved.map(id => agentNameMap[id] || id).join('、') }}
+                {{ message.metadata.agentsInvolved.length }} 个 Agent ·
+                {{ message.metadata.agentsInvolved.map((id) => agentNameMap[id] || id).join('、') }}
               </span>
               <span v-if="message.metadata.usage?.total_tokens">
                 {{ message.metadata.usage.total_tokens }} tokens
               </span>
               <template v-if="message.metadata.performanceMetrics">
                 <span class="text-slate-300">|</span>
-                <span>并行效率 {{ (message.metadata.performanceMetrics.parallelEfficiency * 100).toFixed(0) }}%</span>
-                <span>子任务覆盖 {{ (message.metadata.performanceMetrics.informationCoverage * 100).toFixed(0) }}%</span>
-                <span>信息冗余 {{ (message.metadata.performanceMetrics.redundancy * 100).toFixed(0) }}%</span>
+                <span
+                  >并行效率
+                  {{
+                    (message.metadata.performanceMetrics.parallelEfficiency * 100).toFixed(0)
+                  }}%</span
+                >
+                <span
+                  >子任务覆盖
+                  {{
+                    (message.metadata.performanceMetrics.informationCoverage * 100).toFixed(0)
+                  }}%</span
+                >
+                <span
+                  >信息冗余
+                  {{ (message.metadata.performanceMetrics.redundancy * 100).toFixed(0) }}%</span
+                >
               </template>
             </div>
           </div>

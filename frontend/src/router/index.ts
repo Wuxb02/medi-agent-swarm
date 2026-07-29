@@ -9,12 +9,32 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/chat' },
         { path: 'chat', name: 'Chat', component: () => import('../views/ChatView.vue') },
-        { path: 'chat/:sessionId', name: 'ChatSession', component: () => import('../views/ChatView.vue') },
-        { path: 'knowledge', name: 'Knowledge', component: () => import('../views/KnowledgeView.vue') },
-        { path: 'dashboard', name: 'Dashboard', component: () => import('../views/DashboardView.vue') },
+        {
+          path: 'chat/:sessionId',
+          name: 'ChatSession',
+          component: () => import('../views/ChatView.vue'),
+        },
+        {
+          path: 'knowledge',
+          name: 'Knowledge',
+          component: () => import('../views/KnowledgeView.vue'),
+        },
+        {
+          path: 'dashboard',
+          name: 'Dashboard',
+          component: () => import('../views/DashboardView.vue'),
+        },
         { path: 'traces', name: 'Traces', component: () => import('../views/TraceView.vue') },
-        { path: 'trace/:traceId', name: 'TraceDetail', component: () => import('../views/TraceView.vue') },
-        { path: 'personal', name: 'Personal', component: () => import('../views/PersonalView.vue') },
+        {
+          path: 'trace/:traceId',
+          name: 'TraceDetail',
+          component: () => import('../views/TraceView.vue'),
+        },
+        {
+          path: 'personal',
+          name: 'Personal',
+          component: () => import('../views/PersonalView.vue'),
+        },
       ],
     },
   ],

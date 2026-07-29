@@ -23,14 +23,14 @@ export async function getDocuments(): Promise<{ documents: DocumentSummary[]; to
 }
 
 export async function getDocumentChunks(
-  docId: string
+  docId: string,
 ): Promise<{ doc_id: string; chunks: ChunkDetail[]; total: number }> {
   const { data } = await api.get(`/knowledge/documents/${encodeURIComponent(docId)}/chunks`)
   return data
 }
 
 export async function deleteDocument(
-  docId: string
+  docId: string,
 ): Promise<{ doc_id: string; chunks_deleted: number }> {
   const { data } = await api.delete(`/knowledge/documents/${encodeURIComponent(docId)}`)
   return data
@@ -40,7 +40,7 @@ export async function uploadDocument(
   file: File,
   docType: string = 'general',
   disease: string = '',
-  source: string = '用户上传'
+  source: string = '用户上传',
 ): Promise<{ doc_id: string; filename: string; chunks_added: number }> {
   const formData = new FormData()
   formData.append('file', file)
@@ -59,7 +59,7 @@ export async function updateDocument(
   content: string,
   docType?: string,
   disease?: string,
-  source?: string
+  source?: string,
 ): Promise<{ doc_id: string; chunks_added: number }> {
   const { data } = await api.put(`/knowledge/documents/${encodeURIComponent(docId)}`, {
     content,
