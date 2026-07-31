@@ -23,6 +23,9 @@ class AgentState(TypedDict, total=False):
     subtask_type: str
     subtask_description: str
 
+    # === 用户原始问题（含图片 OCR 文本，所有 Agent 共用） ===
+    question: str
+
     # === 对话消息（OpenAI 格式） ===
     # 使用 LangGraph 的 add_messages reducer 自动追加
     messages: Annotated[List[Dict[str, Any]], add_messages]

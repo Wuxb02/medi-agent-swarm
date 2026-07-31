@@ -280,7 +280,7 @@ class LeadAgent:
         think_start = time.monotonic()
         if self.on_thinking:
             self.on_thinking(
-                content=f"正在分析用户问题：「{question[:80]}{'...' if len(question) > 80 else ''}」",
+                content=f"正在分析用户问题：「{question[:500]}{'...' if len(question) > 300 else ''}」",
                 iteration=iteration,
             )
 

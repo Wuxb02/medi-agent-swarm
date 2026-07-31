@@ -247,6 +247,7 @@ def build_supervisor_graph(
                 "subtask_id": task.get("id", ""),
                 "subtask_type": task.get("type", ""),
                 "subtask_description": task.get("description", ""),
+                "question": state["question"],  # 含图片分析文本的完整问题
                 "max_iterations": agent.config.get('max_iterations', 10),
                 "max_tool_calls": 2,
             })
@@ -374,6 +375,7 @@ def build_supervisor_graph(
                     "subtask_id": subtask.get("id", ""),
                     "subtask_type": subtask.get("type", ""),
                     "subtask_description": subtask.get("description", ""),
+                    "question": state["question"],  # 含图片分析文本的完整问题
                     "max_iterations": agent.config.get('max_iterations', 10),
                     "max_tool_calls": 2,
                 }),

@@ -243,7 +243,7 @@ class SwarmCoordinator:
         if session_id is None:
             session_id = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
 
-        logger.info(f"[LangGraph] Processing (session={session_id}): {question[:50]}...")
+        logger.info(f"[LangGraph] Processing (session={session_id}): {question[:300]}{'...' if len(question) > 300 else ''}")
 
         # 构建并执行 SupervisorGraph
         graph = build_supervisor_graph(

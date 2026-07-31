@@ -113,8 +113,13 @@ def build_agent_subgraph(
                 logger.info(f"加载 {len(history)} 条历史消息 (session={effective_id})")
                 messages.extend(history)
 
-        # 用户输入
-        question = state.get("subtask_description") or state.get("question", "")
+        # 用户输入：优先使用子任务描述，但若存在原始问题（含图片分析文本），作为上下文附加
+        subtask_desc = state.get("subtask_description") or ""
+        original_question = state.get("question", "")
+        if original_question and subtask_desc and original_question != subtask_desc:
+            question = f"## 背景信息（由系统提供）\n{original_question}\n\n## 当前任务\n{subtask_desc}"
+        else:
+            question = subtask_desc or original_question or ""
         user_input = agent.format_user_input({
             "question": question,
             "subtask_id": state.get("subtask_id", ""),
