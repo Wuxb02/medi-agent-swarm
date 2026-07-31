@@ -66,6 +66,10 @@ mediZJ/memory/profile/*
 # 医学知识文档（由生成脚本管理，不纳入版本控制）
 mediZJ/knowledge/data/documents/*
 
+# 图片上传
+mediZJ/data/uploads/*
+!mediZJ/data/uploads/.gitkeep
+
 # 测评
 mediZJ/eval/data/*.json
 mediZJ/eval/reports/*.md

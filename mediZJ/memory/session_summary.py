@@ -21,6 +21,11 @@ from itertools import combinations
 from loguru import logger
 
 
+DEFAULT_SESSION_SUMMARY_DIR = (
+    Path(__file__).resolve().parent / "swarm" / "session_summaries"
+)
+
+
 def _calculate_parallel_efficiency(
     task_decomposition: Dict[str, Any],
     agent_contributions: Dict[str, List[Any]],
@@ -429,8 +434,13 @@ class SessionSummaryManager:
     负责保存和检索会话总结
     """
 
-    def __init__(self, base_dir: str = "mediZJ/memory/swarm/session_summaries"):
-        self.base_dir = Path(base_dir)
+    def __init__(self, base_dir: str | Path | None = None):
+        summary_dir = (
+            DEFAULT_SESSION_SUMMARY_DIR
+            if base_dir is None
+            else Path(base_dir).expanduser().resolve()
+        )
+        self.base_dir = summary_dir
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_summary_path(self, session_id: str) -> Path:

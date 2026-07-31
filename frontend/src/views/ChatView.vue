@@ -17,8 +17,8 @@ function scrollToBottom() {
   })
 }
 
-async function handleSend(question: string) {
-  await chatStore.sendMessage(question)
+async function handleSend(question: string, images?: string[]) {
+  await chatStore.sendMessage(question, images)
   scrollToBottom()
 }
 

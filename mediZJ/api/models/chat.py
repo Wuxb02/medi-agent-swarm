@@ -23,6 +23,8 @@ class ChatRequest(BaseModel):
     context: Optional[Dict[str, Any]] = None
     # 用户标识：用于隔离个人健康档案，缺省为 default（单用户兼容行为）
     user_id: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # 图片 URL 列表（用于多模态分析，先上传后引用）
+    images: Optional[List[str]] = None
 
 
 class ChatResponse(BaseModel):
@@ -45,6 +47,7 @@ class MessageItem(BaseModel):
     """单条消息"""
     role: str
     content: str
+    images: Optional[List[str]] = None
     timestamp: Optional[str] = None
 
 

@@ -174,6 +174,7 @@ export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  images?: string[]
   timestamp: string
   isStreaming?: boolean
   suggestions?: string[]
@@ -290,6 +291,7 @@ export interface SessionTurn {
   user_message: {
     role: string
     content: string
+    images?: string[]
     timestamp?: string
   }
   assistant_message: {

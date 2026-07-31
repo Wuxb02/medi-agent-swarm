@@ -110,6 +110,8 @@ class SessionDB:
                     -- 'user' | 'assistant'
                 content            TEXT NOT NULL,
                 timestamp          TEXT NOT NULL,
+                images             TEXT,
+                    -- 图片 URL 列表 JSON（user 消息专用）
                 agent_events       TEXT,
                     -- SSE 事件列表 JSON
                 suggestions        TEXT,
@@ -148,6 +150,7 @@ class SessionDB:
             ("sessions", "information_coverage", "REAL DEFAULT 0"),
             ("sessions", "redundancy", "REAL DEFAULT 0"),
             ("messages", "citations", "TEXT"),
+            ("messages", "images", "TEXT"),
         ]
         for table, col, col_type in migrations:
             try:
@@ -260,11 +263,12 @@ class SessionDB:
             )
 
             # INSERT user message
+            images_json = json.dumps(user_msg.get("images") or [], ensure_ascii=False)
             conn.execute(
                 """
                 INSERT INTO messages
-                    (session_id, turn_index, role, content, timestamp)
-                VALUES (?, ?, ?, ?, ?)
+                    (session_id, turn_index, role, content, timestamp, images)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -272,6 +276,7 @@ class SessionDB:
                     "user",
                     user_msg.get("content", ""),
                     user_msg.get("timestamp", now),
+                    images_json,
                 ),
             )
 
@@ -350,7 +355,7 @@ class SessionDB:
             for mr in msg_rows:
                 msg = dict(mr)
                 # 反序列化 JSON 字段
-                for field in ("agent_events", "suggestions", "agents_involved", "citations"):
+                for field in ("agent_events", "suggestions", "agents_involved", "citations", "images"):
                     val = msg.get(field)
                     if val and isinstance(val, str):
                         try:

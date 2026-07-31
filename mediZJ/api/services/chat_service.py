@@ -13,12 +13,10 @@ from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
 from mediZJ.swarm.events import Event
 from mediZJ.api.models.chat import ChatRequest, ChatResponse, Citation
 from mediZJ.core.questionnaire_manager import QuestionnaireManager
+from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
 
 # 事件持久化目录（与 SessionSummaryManager 一致）
-_SUMMARY_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
-    "mediZJ", "memory", "swarm", "session_summaries"
-)
+_SUMMARY_DIR = DEFAULT_SESSION_SUMMARY_DIR
 
 # SQLite + Milvus 持久化
 from mediZJ.memory.session_db import SessionDB
@@ -146,13 +144,20 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
 async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> ChatResponse:
     """非流式问答（持锁后的实际处理）"""
     manager = get_manager(session_id)
+
+    # 图片分析：先用 Vision 模型将图片转为文字描述，再注入上下文
+    question = request.question
+    if request.images:
+        from mediZJ.api.services.image_analyzer import ImageAnalyzer
+        question = await ImageAnalyzer().analyze(request.images, request.question)
+
     coordinator = SwarmCoordinator(
         questionnaire_manager=manager,
         user_id=request.user_id
     )
     result = await asyncio.wait_for(
         coordinator.process(
-            question=request.question,
+            question=question,
             context=request.context,
             session_id=session_id
         ),
@@ -251,6 +256,12 @@ async def _chat_stream_impl(
 
         collector.add_span_callback(session_id, _on_span_complete)
 
+    # 图片分析：先用 Vision 模型将图片转为文字描述，再注入上下文
+    question = chat_req.question
+    if chat_req.images:
+        from mediZJ.api.services.image_analyzer import ImageAnalyzer
+        question = await ImageAnalyzer().analyze(chat_req.images, chat_req.question)
+
     # 2. 创建协调器 + 启动处理
     coordinator = SwarmCoordinator(
         event_callback=lambda event: bridge.queue.put_nowait(event),
@@ -261,7 +272,7 @@ async def _chat_stream_impl(
     process_task = asyncio.create_task(
         asyncio.wait_for(
             coordinator.process(
-                question=chat_req.question,
+                question=question,
                 context=chat_req.context,
                 session_id=session_id
             ),
@@ -543,8 +554,8 @@ def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: Dict[str, Any]):
     """将 SSE 事件列表持久化为 JSON 文件，供历史回放使用"""
-    os.makedirs(_SUMMARY_DIR, exist_ok=True)
-    filepath = os.path.join(_SUMMARY_DIR, f"session_{session_id}.json")
+    _SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = _SUMMARY_DIR / f"session_{session_id}.json"
     # 过滤掉流式内容增量事件（历史回放不需要）
     _SKIP_TYPES = {"agent_content_delta"}
     filtered = [e for e in events if e.get("event") not in _SKIP_TYPES]
@@ -618,6 +629,7 @@ def _persist_session_turn(
             "role": "user",
             "content": request.question,
             "timestamp": now,
+            "images": request.images or [],
         },
         assistant_msg={
             "role": "assistant",

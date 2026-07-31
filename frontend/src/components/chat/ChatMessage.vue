@@ -12,6 +12,10 @@ const props = defineProps<{
   message: ChatMessage
 }>()
 
+const emit = defineEmits<{
+  'preview-image': [url: string]
+}>()
+
 const chatStore = useChatStore()
 const { render } = useMarkdown()
 
@@ -154,9 +158,21 @@ watch(
       <!-- 用户消息 -->
       <div v-if="isUser" class="flex justify-end">
         <div
-          class="bg-blue-500 text-white px-4 py-2.5 rounded-2xl rounded-br-md max-w-[80%] text-sm leading-relaxed whitespace-pre-wrap"
+          class="bg-blue-500 text-white px-4 py-2.5 rounded-2xl rounded-br-md max-w-[80%] text-sm leading-relaxed"
         >
-          {{ message.content }}
+          <!-- 图片缩略图 -->
+          <div v-if="message.images?.length" class="flex gap-1 mb-2 flex-wrap justify-end">
+            <img
+              v-for="(url, idx) in message.images"
+              :key="idx"
+              :src="url"
+              class="max-w-[200px] max-h-[200px] rounded-lg object-cover border border-white/30 cursor-pointer hover:opacity-80 transition"
+              alt="用户上传图片"
+              @click="$emit('preview-image', url)"
+            />
+          </div>
+          <!-- 文本内容 -->
+          <div class="whitespace-pre-wrap">{{ message.content }}</div>
         </div>
       </div>
 

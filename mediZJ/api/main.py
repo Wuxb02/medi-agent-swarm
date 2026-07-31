@@ -3,6 +3,7 @@ from pathlib import Path
 from loguru import logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 # 文件日志配置（始终相对于项目根目录）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -41,6 +42,11 @@ app.include_router(sessions.router)
 app.include_router(dashboard.router)
 app.include_router(personal.router)
 app.include_router(traces.router)
+
+# 挂载上传目录为静态文件服务（图片访问）
+_uploads_path = _PROJECT_ROOT / "mediZJ" / "data" / "uploads"
+_uploads_path.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(_uploads_path)), name="uploads")
 
 
 @app.get("/")

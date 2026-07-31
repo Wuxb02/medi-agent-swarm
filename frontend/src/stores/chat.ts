@@ -19,8 +19,8 @@ export const useChatStore = defineStore('chat', () => {
 
   const { connect, disconnect } = useSSE()
 
-  async function sendMessage(question: string) {
-    if (isStreaming.value || !question.trim()) return
+  async function sendMessage(question: string, images?: string[]) {
+    if (isStreaming.value || (!question.trim() && !images?.length)) return
 
     error.value = null
 
@@ -29,6 +29,7 @@ export const useChatStore = defineStore('chat', () => {
       id: genId(),
       role: 'user',
       content: question,
+      images: images || [],
       timestamp: new Date().toISOString(),
     }
     messages.value.push(userMsg)
@@ -59,6 +60,7 @@ export const useChatStore = defineStore('chat', () => {
         {
           question,
           session_id: sessionId.value,
+          images: images?.length ? images : undefined,
         },
         {
           onStart(data) {
@@ -247,6 +249,7 @@ export const useChatStore = defineStore('chat', () => {
               id: genId(),
               role: 'user',
               content: turn.user_message.content,
+              images: (turn.user_message as Record<string, unknown>).images as string[] || [],
               timestamp: turn.user_message.timestamp || new Date().toISOString(),
             })
           }

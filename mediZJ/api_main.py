@@ -5,6 +5,8 @@
     python api_main.py --port 8080  # 指定端口
 """
 import argparse
+from pathlib import Path
+
 import uvicorn
 
 
@@ -15,11 +17,13 @@ def main():
     parser.add_argument("--reload", action="store_true", help="开发模式自动重载")
     args = parser.parse_args()
 
+    project_root = Path(__file__).resolve().parent.parent
     uvicorn.run(
         "mediZJ.api.main:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
+        app_dir=str(project_root),
     )
 
 
