@@ -10,24 +10,6 @@ def fixer():
     return AutoFixer()
 
 
-class TestFixMissingDisclaimer:
-    def test_adds_disclaimer_when_missing(self, fixer):
-        output = "您的症状可能是普通感冒。"
-        result = fixer.fix_missing_disclaimer(output)
-        assert len(result) > len(output)
-
-    def test_does_not_double_add(self, fixer):
-        output = "您的症状可能是感冒。免责声明：仅供参考。"
-        result = fixer.fix_missing_disclaimer(output)
-        # 不应重复添加
-        assert result.count("免责") <= output.count("免责") + 1
-
-    def test_already_has_reference_only(self, fixer):
-        output = "仅供参考，您的症状可能是普通感冒。"
-        result = fixer.fix_missing_disclaimer(output)
-        assert len(result) == len(output)  # 不应重复添加
-
-
 class TestFixHighRiskWarning:
     def test_adds_warning_for_chest_pain(self, fixer):
         output = "您的胸痛症状可能需要注意。"
@@ -73,13 +55,13 @@ class TestRemoveDiagnosisStatements:
 
 class TestFixOutput:
     def test_fix_output_routes_to_correct_fixer(self, fixer):
-        output = "您的感冒症状需要注意。"
-        result = fixer.fix_output(output, ["add_disclaimer"])
+        output = "您的胸痛症状可能需要注意。"
+        result = fixer.fix_output(output, ["add_emergency_warning"])
         assert len(result) > len(output)
 
     def test_multiple_fixes(self, fixer):
         output = "您的胸痛症状可能需要注意。"
-        result = fixer.fix_output(output, ["add_disclaimer", "add_emergency_warning"])
+        result = fixer.fix_output(output, ["add_emergency_warning"])
         assert len(result) > len(output)
 
     def test_no_fix_needed(self, fixer):

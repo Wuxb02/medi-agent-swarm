@@ -54,7 +54,6 @@ class SupervisorState(TypedDict, total=False):
     final_answer: str
     citations: List[Dict]
     suggestions: List[str]
-    disclaimer: str
     usage: Dict[str, int]
     agents_involved: List[str]
     swarm_enabled: bool

@@ -127,7 +127,6 @@ export interface AgentQuestionnaireData {
 
 export interface DoneData {
   answer: string
-  disclaimer?: string
   citations?: Citation[]
   swarm_enabled?: boolean
   agents_involved?: string[]
@@ -178,7 +177,6 @@ export interface ChatMessage {
   timestamp: string
   isStreaming?: boolean
   suggestions?: string[]
-  disclaimer?: string
   agentEvents?: AgentEvent[]
   thinkingBlocks?: ThinkingBlock[]
   delegations?: TaskDelegation[]
@@ -300,7 +298,6 @@ export interface SessionTurn {
     timestamp?: string
     agent_events?: unknown[]
     suggestions?: string[]
-    disclaimer?: string
     mode?: string
     agents_involved?: string[]
     total_time?: number

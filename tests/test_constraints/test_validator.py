@@ -24,20 +24,6 @@ class TestValidateToolCall:
 
 
 class TestValidateOutput:
-    def test_empty_output_has_disclaimer_violation(self, validator):
-        result = validator.validate_output("consultation_agent", "")
-        assert result["valid"] is False
-        assert "免责声明" in str(result["violations"])
-
-    def test_output_with_disclaimer_passes(self, validator):
-        result = validator.validate_output(
-            "consultation_agent",
-            "您的症状可能是普通感冒。免责声明：以上内容仅供参考，不构成医疗建议。"
-        )
-        # 包含"仅供参考"应该让免责声明检查通过
-        has_disclaimer_violation = any("免责声明" in v for v in result["violations"])
-        assert not has_disclaimer_violation
-
     def test_high_risk_without_hospital_recommendation(self, validator):
         result = validator.validate_output(
             "diagnostic_agent",
@@ -73,13 +59,16 @@ class TestValidateOutput:
     def test_clean_output_passes(self, validator):
         result = validator.validate_output(
             "consultation_agent",
-            "根据您的描述，您可能需要注意休息。免责声明：以上内容仅供参考，不构成医疗建议。"
+            "根据您的描述，您可能需要注意休息。"
         )
         assert result["valid"] is True
 
-    def test_auto_fixable_list(self, validator):
-        result = validator.validate_output("consultation_agent", "")
-        assert "add_disclaimer" in result["auto_fixable"]
+    def test_auto_fixable_empty_for_clean_output(self, validator):
+        result = validator.validate_output(
+            "consultation_agent",
+            "根据您的描述，您可能需要注意休息。"
+        )
+        assert result["auto_fixable"] == []
 
     def test_emergency_warning_in_auto_fixable(self, validator):
         result = validator.validate_output(

@@ -1,1 +1,0 @@
-{% if timeout_occurred and completed_agents_count == 0 %}由于系统超时，未能提供完整分析。建议简化问题重试，或在紧急情况下立即就医。{% elif timeout_occurred %}以上分析基于部分已完成的分析模块（部分分析维度超时未完成），仅供参考，不能替代医生诊断。{% else %}以上分析综合了多个医学专业维度的评估，仅供参考，不能替代医生诊断。{% endif %}

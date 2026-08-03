@@ -33,31 +33,13 @@ class AutoFixer:
         fixed_output = output
 
         for fix_type in auto_fixable:
-            if fix_type == "add_disclaimer":
-                fixed_output = self.fix_missing_disclaimer(fixed_output)
-            elif fix_type == "add_emergency_warning":
+            if fix_type == "add_emergency_warning":
                 fixed_output = self.fix_high_risk_warning(fixed_output)
 
         if fixed_output != output:
             logger.info("🔧 输出已自动修复")
 
         return fixed_output
-
-    def fix_missing_disclaimer(self, output: str) -> str:
-        """
-        自动添加免责声明
-
-        Args:
-            output: 原始输出
-
-        Returns:
-            添加免责声明后的输出
-        """
-        if "免责" not in output and "仅供参考" not in output:
-            disclaimer = "\n\n" + PromptLoader.load("validation/disclaimer.j2")
-            logger.debug("+ 自动添加免责声明")
-            return output + disclaimer
-        return output
 
     def fix_high_risk_warning(self, output: str) -> str:
         """

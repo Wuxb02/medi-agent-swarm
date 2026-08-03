@@ -84,7 +84,12 @@ watch(
 
       <!-- 消息列表 -->
       <div v-else>
-        <ChatMessage v-for="msg in chatStore.messages" :key="msg.id" :message="msg" />
+        <ChatMessage
+          v-for="(msg, index) in chatStore.messages"
+          :key="msg.id"
+          :message="msg"
+          :show-disclaimer="index === chatStore.messages.length - 1"
+        />
       </div>
     </div>
 

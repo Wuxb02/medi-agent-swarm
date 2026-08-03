@@ -146,8 +146,8 @@ async def interactive_mode():
                 for i, suggestion in enumerate(result['suggestions'], 1):
                     print(f"  {i}. {suggestion}")
 
-            # 显示免责声明
-            print(f"\n{result['disclaimer']}")
+            # 显示免责声明（固定文案，CLI 末尾统一展示）
+            print(f"\n⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。")
             print("\n" + "=" * 60 + "\n")
 
         except KeyboardInterrupt:

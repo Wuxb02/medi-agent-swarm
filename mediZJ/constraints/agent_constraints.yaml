@@ -25,7 +25,6 @@ agents:
 
     # 输出约束
     output_constraints:
-      - must_include_disclaimer  # 必须包含免责声明
       - max_response_length: 2000  # 最长2000字
       - must_use_respectful_tone  # 必须使用尊重的语气
 

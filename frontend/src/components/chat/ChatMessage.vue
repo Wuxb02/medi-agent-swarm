@@ -3,13 +3,13 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useMarkdown } from '../../composables/useMarkdown'
 import { useChatStore } from '../../stores/chat'
 import type { ChatMessage, ThinkingBlock } from '../../types'
-import DisclaimerBanner from './DisclaimerBanner.vue'
 import ThinkingBlockItem from './ThinkingBlock.vue'
 import QuestionnaireCard from './QuestionnaireCard.vue'
 import CitationPopover from './CitationPopover.vue'
 
 const props = defineProps<{
   message: ChatMessage
+  showDisclaimer?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -455,8 +455,26 @@ watch(
               class="mt-3"
             />
 
-            <!-- 免责声明 -->
-            <DisclaimerBanner v-if="message.disclaimer" :text="message.disclaimer" class="mt-3" />
+            <!-- 免责声明（仅对话最后一条消息在元信息上方展示） -->
+            <div
+              v-if="showDisclaimer"
+              class="mt-3 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700"
+            >
+              <svg
+                class="w-4 h-4 shrink-0 mt-0.5 text-amber-500"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
+                />
+              </svg>
+              <span>以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。</span>
+            </div>
 
             <!-- 元信息 -->
             <div

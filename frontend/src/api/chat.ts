@@ -9,7 +9,6 @@ export interface ChatRequest {
 export interface ChatResponse {
   answer: string
   suggestions: string[]
-  disclaimer: string
   session_id: string
   swarm_enabled: boolean
   agents_involved: string[]

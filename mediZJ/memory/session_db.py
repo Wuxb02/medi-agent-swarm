@@ -118,7 +118,6 @@ class SessionDB:
                     -- SSE 事件列表 JSON
                 suggestions        TEXT,
                     -- 建议列表 JSON
-                disclaimer         TEXT,
                 agents_involved    TEXT,
                     -- Agent 列表 JSON
                 total_time         REAL DEFAULT 0,
@@ -451,7 +450,7 @@ class SessionDB:
             turn_index: 轮次索引（从 0 开始）
             user_msg: 用户消息 {role, content, timestamp}
             assistant_msg: 助手消息 {role, content, timestamp, agent_events,
-                suggestions, disclaimer, agents_involved, total_time,
+                suggestions, agents_involved, total_time,
                 total_tokens, subtasks_completed, mode}
         """
 
@@ -534,10 +533,10 @@ class SessionDB:
                 """
                 INSERT INTO messages
                     (session_id, turn_index, role, content, timestamp,
-                     agent_events, suggestions, disclaimer,
+                     agent_events, suggestions,
                      agents_involved, total_time, total_tokens,
                      subtasks_completed, mode, citations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -549,7 +548,6 @@ class SessionDB:
                     if agent_events else None,
                     json.dumps(suggestions, ensure_ascii=False)
                     if suggestions else None,
-                    assistant_msg.get("disclaimer"),
                     json.dumps(agents_involved, ensure_ascii=False)
                     if agents_involved else None,
                     assistant_msg.get("total_time", 0),

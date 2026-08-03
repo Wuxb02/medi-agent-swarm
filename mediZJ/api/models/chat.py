@@ -31,7 +31,6 @@ class ChatResponse(BaseModel):
     """问答响应"""
     answer: str
     suggestions: List[str] = []
-    disclaimer: str = ""
     session_id: str
     swarm_enabled: bool = False
     agents_involved: List[str] = []

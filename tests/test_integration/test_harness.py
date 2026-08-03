@@ -34,7 +34,7 @@ class TestHarnessIntegration:
         )
         answer = result.get("response", result.get("answer", ""))
         fixer = AutoFixer()
-        fixed = fixer.fix_missing_disclaimer(answer)
+        fixed = fixer.fix_high_risk_warning(answer)
         assert len(fixed) >= len(answer)
 
     @pytest.mark.asyncio

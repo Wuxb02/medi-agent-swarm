@@ -98,12 +98,6 @@ class ConstraintValidator:
         violations = []
         auto_fixable = []
 
-        # 检查免责声明
-        if 'must_include_disclaimer' in all_constraints:
-            if '免责声明' not in output and 'disclaimer' not in output.lower() and '仅供参考' not in output:
-                violations.append("缺少免责声明")
-                auto_fixable.append("add_disclaimer")
-
         # 检查长度限制
         max_length_constraint = next(
             (c for c in all_constraints if isinstance(c, dict) and 'max_response_length' in c),

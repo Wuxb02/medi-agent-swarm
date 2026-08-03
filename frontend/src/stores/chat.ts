@@ -44,7 +44,6 @@ export const useChatStore = defineStore('chat', () => {
       agentEvents: [],
       thinkingBlocks: [],
       suggestions: [],
-      disclaimer: '',
     }
     messages.value.push(assistantMsg)
 
@@ -150,7 +149,6 @@ export const useChatStore = defineStore('chat', () => {
             const msg = messages.value.find((m) => m.id === assistantMsg.id)
             if (msg) {
               msg.content = data.answer || msg.content
-              msg.disclaimer = data.disclaimer || ''
               msg.citations = data.citations || []
               msg.isStreaming = false
               msg.metadata = {
@@ -267,7 +265,6 @@ export const useChatStore = defineStore('chat', () => {
               timestamp: (am.timestamp as string) || new Date().toISOString(),
               isStreaming: false,
               suggestions: (am.suggestions as string[]) || [],
-              disclaimer: (am.disclaimer as string) || '',
               citations: (am.citations as ChatMessage['citations']) || [],
               agentEvents,
               thinkingBlocks,
@@ -309,7 +306,6 @@ export const useChatStore = defineStore('chat', () => {
             timestamp: (detail.created_at as string) || new Date().toISOString(),
             isStreaming: false,
             suggestions: (detail.suggestions as string[]) || [],
-            disclaimer: (detail.disclaimer as string) || '',
             agentEvents,
             thinkingBlocks,
             metadata: {

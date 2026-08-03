@@ -13,8 +13,8 @@ class TestPromptLoader:
 
     def test_load_static_template(self):
         """验证 PromptLoader 可以加载 .j2 模板。"""
-        # disclaimer 模板是纯文本无变量
-        content = PromptLoader.load("validation/disclaimer.j2")
+        # high_risk_warning 模板是纯文本无变量
+        content = PromptLoader.load("validation/high_risk_warning.j2")
         assert isinstance(content, str)
         assert len(content) > 0
 

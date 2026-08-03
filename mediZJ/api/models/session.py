@@ -41,7 +41,6 @@ class SessionDetail(BaseModel):
     # 从 JSON 事件文件恢复的完整数据
     agent_events: List[Dict[str, Any]] = []
     suggestions: List[str] = []
-    disclaimer: str = ""
     subtasks_completed: int = 0
     total_tokens: int = 0
     prompt_tokens: int = 0

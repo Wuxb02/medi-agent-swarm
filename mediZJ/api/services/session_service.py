@@ -180,8 +180,6 @@ def _build_detail_from_db(session_data: Dict[str, Any]) -> SessionDetail:
                 val = msg.get(field)
                 if val:
                     assistant_msg[field] = val
-            if msg.get("disclaimer"):
-                assistant_msg["disclaimer"] = msg["disclaimer"]
             if msg.get("total_time"):
                 assistant_msg["total_time"] = msg["total_time"]
             if msg.get("total_tokens"):
@@ -229,10 +227,6 @@ def _build_detail_from_db(session_data: Dict[str, Any]) -> SessionDetail:
         suggestions=(
             last_turn.assistant_message.get("suggestions", [])
             if last_turn else []
-        ),
-        disclaimer=(
-            last_turn.assistant_message.get("disclaimer", "")
-            if last_turn else ""
         ),
         total_tokens=session_data.get("total_tokens", 0),
         parallel_efficiency=session_data.get("parallel_efficiency", 0),
@@ -392,7 +386,6 @@ def _merge_events_json(md_filepath: str, detail: SessionDetail):
                     data = json.load(f)
                 detail.agent_events = data.get("events", [])
                 detail.suggestions = data.get("suggestions", [])
-                detail.disclaimer = data.get("disclaimer", "")
                 detail.subtasks_completed = data.get("subtasks_completed", 0)
                 if data.get("answer"):
                     detail.answer = data["answer"]
@@ -558,12 +551,6 @@ def _rebuild_events_from_md(content: str, detail: SessionDetail):
                     },
                 },
             )
-
-    disclaimer_match = re.search(
-        r"(?:【免责声明】|## 免责声明)\s*\n(.+?)(?=\n---|\n## |\Z)", content, re.DOTALL
-    )
-    if disclaimer_match:
-        detail.disclaimer = disclaimer_match.group(1).strip()
 
     suggestions_match = re.search(
         r"(?:【核心建议】|## 核心建议)\s*\n([\s\S]*?)(?=\n---|\n(?:## |【))", content
