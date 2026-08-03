@@ -1,15 +1,13 @@
 """仪表盘服务：统计数据聚合"""
-from typing import Dict, List
-from loguru import logger
-
+from typing import Dict, List, Optional
 from mediZJ.api.services.session_service import list_sessions, get_session_detail
 from mediZJ.api.services.knowledge_service import get_knowledge_base_size
 from mediZJ.api.models.dashboard import DashboardStats
 
 
-def get_dashboard_stats() -> DashboardStats:
+def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
     """获取仪表盘统计数据"""
-    sessions = list_sessions(limit=200)
+    sessions = list_sessions(limit=200, user_id=user_id)
 
     total_sessions = len(sessions)
     swarm_sessions = sum(1 for s in sessions if s.mode == "swarm")
@@ -22,7 +20,7 @@ def get_dashboard_stats() -> DashboardStats:
     response_times: List[float] = []
 
     for s in sessions:
-        detail = get_session_detail(s.session_id)
+        detail = get_session_detail(s.session_id, user_id=user_id)
         if detail:
             # 按实际参与的 Agent 统计
             for agent in detail.agents_involved:

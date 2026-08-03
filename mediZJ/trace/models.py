@@ -39,6 +39,7 @@ class SpanTiming:
 class TraceAttributes:
     """Trace 级属性"""
     session_id: str = ""
+    user_id: str = "default"
     mode: str = ""  # single_agent / swarm / fallback
     question_summary: str = ""  # 前 200 字符
     agents_involved: List[str] = field(default_factory=list)

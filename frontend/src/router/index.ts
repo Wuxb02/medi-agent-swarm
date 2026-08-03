@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -38,6 +39,18 @@ const router = createRouter({
       ],
     },
   ],
+})
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  await auth.restore()
+  if (!auth.isAuthenticated && to.name !== 'Personal') {
+    return {
+      name: 'Personal',
+      query: { redirect: to.fullPath },
+    }
+  }
+  return true
 })
 
 export default router

@@ -18,20 +18,33 @@ SUMMARY_DIR = os.path.join(
 )
 
 _db = SessionDB()
-_vectors = SessionVectorStore()
+_vectors: Optional[SessionVectorStore] = None
+
+
+def _get_session_vectors() -> SessionVectorStore:
+    """按需初始化会话向量库。"""
+
+    global _vectors
+    if _vectors is None:
+        _vectors = SessionVectorStore()
+    return _vectors
 
 
 # ─── 公开 API ──────────────────────────────────────────────
 
 
-def list_sessions(limit: int = 50, offset: int = 0) -> List[SessionListItem]:
+def list_sessions(
+    limit: int = 50,
+    offset: int = 0,
+    user_id: Optional[str] = None,
+) -> List[SessionListItem]:
     """列出历史会话（SQLite 分页查询）
 
     .md 文件不再混入分页结果，避免破坏 offset 语义。
     如需兼容旧数据，应先迁移至 SQLite。
     """
     try:
-        db_sessions = _db.list_sessions(limit, offset)
+        db_sessions = _db.list_sessions(limit, offset, user_id=user_id)
         return [
             SessionListItem(
                 session_id=s["session_id"],
@@ -48,26 +61,32 @@ def list_sessions(limit: int = 50, offset: int = 0) -> List[SessionListItem]:
         return []
 
 
-def count_sessions() -> int:
+def count_sessions(user_id: Optional[str] = None) -> int:
     """获取会话总数"""
     try:
-        return _db.count_sessions()
+        return _db.count_sessions(user_id=user_id)
     except Exception as e:
         logger.warning(f"Failed to count sessions: {e}")
         return 0
 
 
-def get_session_detail(session_id: str) -> Optional[SessionDetail]:
+def get_session_detail(
+    session_id: str,
+    user_id: Optional[str] = None,
+) -> Optional[SessionDetail]:
     """获取会话详情（优先 SQLite，回退 .md + .json）"""
     # 1. 从 SQLite 读取
     try:
-        session_data = _db.get_session(session_id)
+        session_data = _db.get_session(session_id, user_id=user_id)
         if session_data and session_data.get("messages"):
             return _build_detail_from_db(session_data)
     except Exception as e:
         logger.warning(f"Failed to get session from SQLite: {e}")
 
     # 2. 回退到 .md + .json 文件解析
+    if user_id not in (None, "default"):
+        return None
+
     for filepath in _iter_summary_files():
         if session_id in filepath and filepath.endswith(".md"):
             detail = _parse_detail_file(filepath, session_id)
@@ -78,19 +97,22 @@ def get_session_detail(session_id: str) -> Optional[SessionDetail]:
     return None
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str, user_id: Optional[str] = None) -> bool:
     """删除会话（SQLite + Milvus + 旧文件全部清理）"""
     deleted = False
 
     # 1. 删除 SQLite 记录
     try:
-        deleted = _db.delete_session(session_id) or deleted
+        deleted = _db.delete_session(session_id, user_id=user_id) or deleted
     except Exception as e:
         logger.warning(f"Failed to delete from SQLite: {e}")
 
+    if not deleted:
+        return False
+
     # 2. 删除 Milvus 向量记录
     try:
-        _vectors.delete_session(session_id)
+        _get_session_vectors().delete_session(session_id)
     except Exception as e:
         logger.warning(f"Failed to delete from Milvus: {e}")
 

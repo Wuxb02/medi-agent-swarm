@@ -2,6 +2,7 @@
 import { ref, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useChatStore } from '../../stores/chat'
+import { useAuthStore } from '../../stores/auth'
 import { getSessions, deleteSession } from '../../api/session'
 import { getPersonalInfo } from '../../api/personal'
 import type { SessionItem } from '../../types'
@@ -9,6 +10,7 @@ import type { SessionItem } from '../../types'
 const router = useRouter()
 const route = useRoute()
 const chatStore = useChatStore()
+const auth = useAuthStore()
 
 const navItems = [
   {
@@ -35,6 +37,10 @@ const pendingCount = ref(0)
 const newSessionId = ref<string | null>(null) // 追踪最新创建的会话 ID，用于 loadSessions 后重新标记
 
 async function loadPendingCount() {
+  if (!auth.isAuthenticated) {
+    pendingCount.value = 0
+    return
+  }
   try {
     const data = await getPersonalInfo()
     pendingCount.value = (data.pending_items || []).length
@@ -44,7 +50,7 @@ async function loadPendingCount() {
 }
 
 async function loadSessions() {
-  if (loading.value) return
+  if (loading.value || !auth.isAuthenticated) return
   loading.value = true
   try {
     sessions.value = await getSessions(200, 0)
@@ -110,9 +116,23 @@ function truncate(str: string, len: number): string {
 }
 
 onMounted(() => {
-  loadSessions()
-  loadPendingCount()
+  if (auth.isAuthenticated) {
+    loadSessions()
+    loadPendingCount()
+  }
 })
+
+watch(
+  () => auth.user?.user_id,
+  (userId) => {
+    sessions.value = []
+    pendingCount.value = 0
+    if (userId) {
+      loadSessions()
+      loadPendingCount()
+    }
+  },
+)
 
 // 新会话创建时（sessionId 从 null 变为值）立即在列表头部插入占位条目
 watch(
@@ -289,7 +309,8 @@ watch(
             d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
           />
         </svg>
-        个人中心
+        <span class="truncate">{{ auth.user?.username || '登录' }}</span>
+        <span v-if="auth.isAdmin" class="text-[10px] text-blue-300">管理员</span>
         <span
           v-if="pendingCount > 0"
           class="absolute right-3 top-1/2 -translate-y-1/2 min-w-[18px] h-[18px] px-1 flex items-center justify-center text-[10px] font-medium bg-orange-500 text-white rounded-full"

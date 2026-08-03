@@ -1,13 +1,21 @@
 """问答路由"""
+import asyncio
 import uuid
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import APIRouter, Request, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, Request, UploadFile, File, HTTPException
 from starlette.responses import StreamingResponse
 
 from mediZJ.api.models.chat import ChatRequest, ChatResponse, MessageHistory, MessageItem, AnswerRequest, AnswerResponse
-from mediZJ.api.services.chat_service import chat_non_stream, chat_stream, get_manager
+from mediZJ.api.services.chat_service import (
+    chat_non_stream,
+    chat_stream,
+    claim_session,
+    get_manager,
+    session_owner,
+)
+from mediZJ.api.auth import get_current_user
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -17,6 +25,25 @@ _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 _ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _MAX_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+def _validate_owned_images(images: list[str] | None, user: dict) -> None:
+    """确保聊天引用的每张图片都属于当前用户。"""
+
+    if not images:
+        return
+    from mediZJ.memory.session_db import SessionDB
+
+    db = SessionDB()
+    for image_url in images:
+        filename = Path(image_url).name
+        metadata = db.get_upload(filename)
+        if metadata is None:
+            if user["role"] == "admin" and (_UPLOAD_DIR / filename).is_file():
+                continue
+            raise HTTPException(status_code=404, detail="Image not found")
+        if metadata["user_id"] != user["user_id"] and user["role"] != "admin":
+            raise HTTPException(status_code=404, detail="Image not found")
 
 
 def _detect_image_type(data: bytes) -> str | None:
@@ -33,16 +60,44 @@ def _detect_image_type(data: bytes) -> str | None:
 
 
 @router.post("", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    user: dict = Depends(get_current_user),
+):
     """非流式问答"""
-    return await chat_non_stream(request)
+    authenticated_request = request.model_copy(
+        update={"user_id": user["user_id"]}
+    )
+    _validate_owned_images(authenticated_request.images, user)
+    if authenticated_request.session_id:
+        try:
+            claim_session(authenticated_request.session_id, user["user_id"])
+        except PermissionError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
+    return await chat_non_stream(authenticated_request)
 
 
 @router.post("/stream")
-async def chat_stream_endpoint(chat_req: ChatRequest, http_request: Request):
+async def chat_stream_endpoint(
+    chat_req: ChatRequest,
+    http_request: Request,
+    user: dict = Depends(get_current_user),
+):
     """流式问答（换行分隔 JSON）"""
+    authenticated_request = chat_req.model_copy(
+        update={"user_id": user["user_id"]}
+    )
+    _validate_owned_images(authenticated_request.images, user)
+    if authenticated_request.session_id:
+        try:
+            claim_session(authenticated_request.session_id, user["user_id"])
+        except PermissionError as exc:
+            raise HTTPException(status_code=404, detail="Session not found") from exc
     return StreamingResponse(
-        chat_stream(chat_req, http_request),
+        chat_stream(
+            authenticated_request,
+            http_request,
+        ),
         media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
@@ -53,8 +108,13 @@ async def chat_stream_endpoint(chat_req: ChatRequest, http_request: Request):
 
 
 @router.post("/answer", response_model=AnswerResponse)
-async def submit_answer(request: AnswerRequest):
+async def submit_answer(
+    request: AnswerRequest,
+    user: dict = Depends(get_current_user),
+):
     """提交问卷答案（用于交互式问诊）"""
+    if session_owner(request.session_id) != user["user_id"]:
+        raise HTTPException(status_code=404, detail="Session not found")
     manager = get_manager(request.session_id)
     resolved = manager.resolve(request.questionnaire_id, request.answers)
     if resolved:
@@ -64,32 +124,44 @@ async def submit_answer(request: AnswerRequest):
 
 
 @router.get("/history/{session_id}", response_model=MessageHistory)
-async def get_chat_history(session_id: str):
+async def get_chat_history(
+    session_id: str,
+    user: dict = Depends(get_current_user),
+):
     """获取会话历史"""
     from mediZJ.memory.short_term import ShortTermMemory
+    from mediZJ.memory.session_db import SessionDB
+
+    db = SessionDB()
+    session_data = await asyncio.to_thread(
+        db.get_session,
+        session_id,
+        user["user_id"],
+    )
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     memory = ShortTermMemory()
     raw_messages = await memory.get_recent_messages(session_id=session_id, limit=50)
 
     # 内存无数据时从 SQLite 加载（同步驱动，下线程执行）
     if not raw_messages:
-        import asyncio
-        from mediZJ.memory.session_db import SessionDB
-        db = SessionDB()
-        session_data = await asyncio.to_thread(db.get_session, session_id)
-        if session_data:
-            raw_messages = [
-                {"role": m["role"], "content": m["content"], "timestamp": m.get("timestamp"),
-                 "images": m.get("images")}
-                for m in session_data.get("messages", [])
-                if m.get("role") in ("user", "assistant")
-            ]
+        raw_messages = [
+            {"role": m["role"], "content": m["content"], "timestamp": m.get("timestamp"),
+             "images": m.get("images")}
+            for m in session_data.get("messages", [])
+            if m.get("role") in ("user", "assistant")
+        ]
 
     messages = [
         MessageItem(
             role=msg.get("role", "unknown"),
             content=msg.get("content", ""),
-            images=msg.get("images"),
+            images=(
+                msg.get("images")
+                if isinstance(msg.get("images"), list)
+                else None
+            ),
             timestamp=msg.get("timestamp")
         )
         for msg in raw_messages
@@ -99,7 +171,10 @@ async def get_chat_history(session_id: str):
 
 
 @router.post("/upload-image")
-async def upload_image(file: UploadFile = File(...)):
+async def upload_image(
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
     """上传聊天图片（用于多模态分析）"""
     if not file.filename:
         raise HTTPException(status_code=400, detail="文件名为空")
@@ -127,6 +202,15 @@ async def upload_image(file: UploadFile = File(...)):
     mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
                 ".gif": "image/gif", ".webp": "image/webp"}
     content_type = mime_map.get(ext, "image/jpeg")
+
+    from mediZJ.memory.session_db import SessionDB
+    SessionDB().save_upload(
+        filename=unique_name,
+        user_id=user["user_id"],
+        original_name=file.filename,
+        content_type=content_type,
+        size=len(content),
+    )
 
     from loguru import logger
     logger.info(f"Image uploaded: {unique_name} ({len(content)} bytes)")

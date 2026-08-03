@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from mediZJ.trace.storage import TraceSqliteStorage
-from mediZJ.trace.models import Span, SpanType, SpanStatus, TraceAttributes
+from mediZJ.trace.models import Span, SpanType, TraceAttributes
 
 
 @pytest.fixture(autouse=True)
@@ -119,3 +119,24 @@ class TestListTracesFilter:
         traces_a = storage.list_traces(session_id="sess-a")
         assert len(traces_a) == 1
         assert traces_a[0]["trace_id"] == "trace-1"
+
+    def test_filter_and_read_by_user(self, storage):
+        """普通用户只能读取自己的 Trace。"""
+
+        root = Span(
+            id="r-user",
+            trace_id="trace-user",
+            span_type=SpanType.TRACE,
+            name="request",
+            trace_attrs=TraceAttributes(
+                session_id="sess-user",
+                user_id="alice",
+            ),
+        )
+        root.timing.finish()
+        storage.save(root, [root])
+
+        assert len(storage.list_traces(user_id="alice")) == 1
+        assert storage.list_traces(user_id="bob") == []
+        assert storage.get_trace("trace-user", user_id="alice") is not None
+        assert storage.get_trace("trace-user", user_id="bob") is None

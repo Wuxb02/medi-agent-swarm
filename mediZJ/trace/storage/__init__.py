@@ -84,6 +84,7 @@ class TraceSqliteStorage:
             CREATE TABLE IF NOT EXISTS traces (
                 trace_id         TEXT PRIMARY KEY,
                 session_id       TEXT NOT NULL,
+                user_id          TEXT NOT NULL DEFAULT 'default',
                 status           TEXT DEFAULT 'ok',
                 start_time       TEXT NOT NULL,
                 end_time         TEXT,
@@ -123,6 +124,17 @@ class TraceSqliteStorage:
             CREATE INDEX IF NOT EXISTS idx_trace_session
                 ON traces(session_id);
         """)
+        try:
+            conn.execute(
+                "ALTER TABLE traces ADD COLUMN "
+                "user_id TEXT NOT NULL DEFAULT 'default'"
+            )
+        except sqlite3.OperationalError:
+            pass
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trace_user "
+            "ON traces(user_id, start_time)"
+        )
 
     def save(self, root_span, flat_spans: List):
         """保存 trace：写入 traces 表（树 JSON）+ spans 表（扁平行）
@@ -139,6 +151,7 @@ class TraceSqliteStorage:
             # 从根 span 提取 trace 属性
             trace_attrs = root_span.trace_attrs
             session_id = trace_attrs.session_id if trace_attrs else trace_id
+            user_id = trace_attrs.user_id if trace_attrs else "default"
             mode = trace_attrs.mode if trace_attrs else ""
             question_summary = trace_attrs.question_summary if trace_attrs else ""
             agents_involved = trace_attrs.agents_involved if trace_attrs else []
@@ -147,13 +160,14 @@ class TraceSqliteStorage:
             # 写入 traces 表（先写，满足 FK 约束）
             conn.execute(
                 """INSERT OR REPLACE INTO traces
-                   (trace_id, session_id, status, start_time, end_time,
+                   (trace_id, session_id, user_id, status, start_time, end_time,
                     duration_ms, mode, total_tokens, agents_involved,
                     span_count, question_summary, tree_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     trace_id,
                     session_id,
+                    user_id,
                     root_span.status.value,
                     root_span.timing.start_time.isoformat(),
                     root_span.timing.end_time.isoformat() if root_span.timing.end_time else None,
@@ -195,18 +209,42 @@ class TraceSqliteStorage:
 
         self._execute(_do_save)
 
-    def get_trace(self, trace_id: str) -> Optional[Dict[str, Any]]:
+    def get_trace(
+        self,
+        trace_id: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """获取完整 trace 树（从 tree_json）"""
         def _do_get(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT tree_json FROM traces WHERE trace_id = ?", (trace_id,)
-            ).fetchone()
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT tree_json FROM traces WHERE trace_id = ?",
+                    (trace_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT tree_json FROM traces "
+                    "WHERE trace_id = ? AND user_id = ?",
+                    (trace_id, user_id),
+                ).fetchone()
             return json.loads(row["tree_json"]) if row else None
         return self._execute(_do_get)
 
-    def get_flat_spans(self, trace_id: str) -> List[Dict[str, Any]]:
+    def get_flat_spans(
+        self,
+        trace_id: str,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """获取扁平 span 列表"""
         def _do_get(conn: sqlite3.Connection):
+            if user_id is not None:
+                owner = conn.execute(
+                    "SELECT 1 FROM traces "
+                    "WHERE trace_id = ? AND user_id = ?",
+                    (trace_id, user_id),
+                ).fetchone()
+                if owner is None:
+                    return []
             rows = conn.execute(
                 "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time",
                 (trace_id,),
@@ -215,11 +253,24 @@ class TraceSqliteStorage:
         return self._execute(_do_get)
 
     def list_traces(
-        self, limit: int = 50, offset: int = 0, session_id: Optional[str] = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """列出最近 trace"""
         def _do_list(conn: sqlite3.Connection):
-            if session_id:
+            if session_id and user_id:
+                rows = conn.execute(
+                    """SELECT trace_id, session_id, status, start_time, duration_ms,
+                              mode, total_tokens, agents_involved, span_count,
+                              question_summary
+                       FROM traces WHERE session_id = ? AND user_id = ?
+                       ORDER BY start_time DESC LIMIT ? OFFSET ?""",
+                    (session_id, user_id, limit, offset),
+                ).fetchall()
+            elif session_id:
                 rows = conn.execute(
                     """SELECT trace_id, session_id, status, start_time, duration_ms,
                               mode, total_tokens, agents_involved, span_count,
@@ -227,6 +278,15 @@ class TraceSqliteStorage:
                        FROM traces WHERE session_id = ?
                        ORDER BY start_time DESC LIMIT ? OFFSET ?""",
                     (session_id, limit, offset),
+                ).fetchall()
+            elif user_id:
+                rows = conn.execute(
+                    """SELECT trace_id, session_id, status, start_time, duration_ms,
+                              mode, total_tokens, agents_involved, span_count,
+                              question_summary
+                       FROM traces WHERE user_id = ?
+                       ORDER BY start_time DESC LIMIT ? OFFSET ?""",
+                    (user_id, limit, offset),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -244,13 +304,28 @@ class TraceSqliteStorage:
             return results
         return self._execute(_do_list)
 
-    def count_traces(self, session_id: Optional[str] = None) -> int:
+    def count_traces(
+        self,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> int:
         """统计 trace 总数"""
         def _do_count(conn: sqlite3.Connection):
-            if session_id:
+            if session_id and user_id:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM traces "
+                    "WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
+                ).fetchone()
+            elif session_id:
                 row = conn.execute(
                     "SELECT COUNT(*) as cnt FROM traces WHERE session_id = ?",
                     (session_id,),
+                ).fetchone()
+            elif user_id:
+                row = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM traces WHERE user_id = ?",
+                    (user_id,),
                 ).fetchone()
             else:
                 row = conn.execute("SELECT COUNT(*) as cnt FROM traces").fetchone()

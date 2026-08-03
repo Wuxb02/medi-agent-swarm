@@ -9,11 +9,10 @@ Milvus 会话向量存储
 存储路径：memory/data/session_vectors.db
 Collection：session_summaries
 """
-import json
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from loguru import logger
 
@@ -91,6 +90,7 @@ class SessionVectorStore:
         self,
         session_id: str,
         summary_text: str,
+        user_id: str = "default",
         mode: str = "single",
         created_at: str = "",
         total_tokens: int = 0,
@@ -111,6 +111,7 @@ class SessionVectorStore:
             {
                 "vector": vector.tolist(),
                 "session_id": session_id,
+                "user_id": user_id,
                 "summary": summary_text[:2000],  # 限制长度
                 "mode": mode,
                 "created_at": created_at,
@@ -130,7 +131,10 @@ class SessionVectorStore:
                 logger.error(f"Failed to index session {session_id}: {e}")
 
     def search_similar(
-        self, query: str, top_k: int = 3
+        self,
+        query: str,
+        top_k: int = 3,
+        user_id: str = "default",
     ) -> List[Dict[str, Any]]:
         """
         语义搜索相似会话
@@ -153,8 +157,9 @@ class SessionVectorStore:
                     collection_name=self.collection_name,
                     data=[query_vector.tolist()],
                     limit=top_k,
+                    filter=f'user_id == "{user_id}"',
                     output_fields=[
-                        "session_id", "summary", "mode",
+                        "session_id", "user_id", "summary", "mode",
                         "created_at", "total_tokens",
                     ],
                 )

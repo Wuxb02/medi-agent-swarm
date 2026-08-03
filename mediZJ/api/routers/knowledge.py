@@ -1,5 +1,5 @@
 """知识库路由"""
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from mediZJ.api.models.knowledge import (
     KnowledgeSearchRequest,
@@ -16,6 +16,7 @@ from mediZJ.api.services.knowledge_service import (
     list_all_documents, get_document_chunks,
     delete_document, upload_document, update_document,
 )
+from mediZJ.api.auth import require_admin
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -54,7 +55,10 @@ async def get_chunks(doc_id: str):
 
 
 @router.delete("/documents/{doc_id:path}", response_model=DocumentDeleteResponse)
-async def remove_document(doc_id: str):
+async def remove_document(
+    doc_id: str,
+    _admin: dict = Depends(require_admin),
+):
     """删除文档"""
     result = delete_document(doc_id)
     if result.chunks_deleted == 0:
@@ -68,6 +72,7 @@ async def upload_file(
     doc_type: str = Form("general"),
     disease: str = Form(""),
     source: str = Form("用户上传"),
+    _admin: dict = Depends(require_admin),
 ):
     """上传文件到知识库"""
     if not file.filename:
@@ -100,7 +105,11 @@ async def upload_file(
 
 
 @router.put("/documents/{doc_id:path}", response_model=DocumentUploadResponse)
-async def update_doc(doc_id: str, request: DocumentUpdateRequest):
+async def update_doc(
+    doc_id: str,
+    request: DocumentUpdateRequest,
+    _admin: dict = Depends(require_admin),
+):
     """更新文档内容"""
     try:
         return update_document(

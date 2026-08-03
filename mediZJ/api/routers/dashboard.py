@@ -1,9 +1,10 @@
 """仪表盘路由"""
 import time
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from mediZJ.api.models.dashboard import DashboardStats, HealthResponse
 from mediZJ.api.services.dashboard_service import get_dashboard_stats
+from mediZJ.api.auth import get_current_user
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -12,9 +13,10 @@ _start_time = time.time()
 
 
 @router.get("/dashboard/stats", response_model=DashboardStats)
-async def get_stats():
+async def get_stats(user: dict = Depends(get_current_user)):
     """获取仪表盘统计数据"""
-    return get_dashboard_stats()
+    user_id = None if user["role"] == "admin" else user["user_id"]
+    return get_dashboard_stats(user_id=user_id)
 
 
 @router.get("/health", response_model=HealthResponse)

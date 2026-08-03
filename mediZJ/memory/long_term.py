@@ -47,13 +47,18 @@ class LongTermMemory:
     - 会话开始前检索相似案例
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        user_id: str = "default",
+    ):
         """
         初始化长期记忆管理器
 
         Args:
             config: Mem0 配置字典，包含 api_key 等配置
         """
+        self.user_id = user_id
         if not MEM0_AVAILABLE:
             self.enabled = False
             logger.warning("Mem0 not available. Long-term memory disabled.")
@@ -124,7 +129,7 @@ class LongTermMemory:
                 asyncio.to_thread(
                     self.mem0.add,
                     messages=[{"role": "user", "content": memory_text}],
-                    user_id="mediZJ_user",
+                    user_id=f"mediZJ_user_{self.user_id}",
                     metadata={
                         "type": "session_summary",
                         "session_id": session_id,
@@ -175,7 +180,7 @@ class LongTermMemory:
                 asyncio.to_thread(
                     self.mem0.search,
                     query=query,
-                    user_id="mediZJ_user",
+                    user_id=f"mediZJ_user_{self.user_id}",
                     limit=limit * 2
                 ),
                 timeout=5.0
@@ -224,6 +229,5 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []
-
 
 

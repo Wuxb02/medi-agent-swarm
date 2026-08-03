@@ -14,16 +14,23 @@ from mediZJ.swarm.events import Event
 from mediZJ.api.models.chat import ChatRequest, ChatResponse, Citation
 from mediZJ.core.questionnaire_manager import QuestionnaireManager
 from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
+from mediZJ.memory.session_db import SessionDB
+from mediZJ.memory.session_vector_store import SessionVectorStore
 
 # 事件持久化目录（与 SessionSummaryManager 一致）
 _SUMMARY_DIR = DEFAULT_SESSION_SUMMARY_DIR
 
-# SQLite + Milvus 持久化
-from mediZJ.memory.session_db import SessionDB
-from mediZJ.memory.session_vector_store import SessionVectorStore
-
 _session_db = SessionDB()
-_session_vectors = SessionVectorStore()
+_session_vectors: Optional[SessionVectorStore] = None
+
+
+def _get_session_vectors() -> SessionVectorStore:
+    """按需初始化会话向量库，避免 API 导入时加载模型。"""
+
+    global _session_vectors
+    if _session_vectors is None:
+        _session_vectors = SessionVectorStore()
+    return _session_vectors
 
 # Trace 惰性导入
 try:
@@ -50,6 +57,7 @@ _REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "300"))
 # per-session 请求互斥锁：同会话并发请求排队执行，
 # 防止短期记忆/turn_index/问卷管理器的写竞争
 _session_locks: Dict[str, asyncio.Lock] = {}
+_session_owners: Dict[str, str] = {}
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -71,6 +79,30 @@ def _cleanup_one(session_id: str):
     lock = _session_locks.get(session_id)
     if lock is not None and not lock.locked():
         _session_locks.pop(session_id, None)
+    _session_owners.pop(session_id, None)
+
+
+def claim_session(session_id: str, user_id: str) -> None:
+    """声明会话归属，阻止不同用户复用同一会话 ID。"""
+
+    active_owner = _session_owners.get(session_id)
+    if active_owner is not None and active_owner != user_id:
+        raise PermissionError("会话不属于当前用户")
+
+    persisted = _session_db.get_session(session_id)
+    if persisted is not None and persisted.get("user_id") != user_id:
+        raise PermissionError("会话不属于当前用户")
+    _session_owners[session_id] = user_id
+
+
+def session_owner(session_id: str) -> Optional[str]:
+    """返回进行中或已持久化会话的用户 ID。"""
+
+    owner = _session_owners.get(session_id)
+    if owner is not None:
+        return owner
+    persisted = _session_db.get_session(session_id)
+    return persisted.get("user_id") if persisted else None
 
 
 def _cleanup_expired(now: float):
@@ -132,6 +164,7 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     )
     try:
+        claim_session(session_id, request.user_id or "default")
         async with _get_session_lock(session_id):
             return await _chat_non_stream_locked(request, session_id)
     except asyncio.TimeoutError:
@@ -216,6 +249,7 @@ async def chat_stream(
     session_id = chat_req.session_id or (
         f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     )
+    claim_session(session_id, chat_req.user_id or "default")
     async with _get_session_lock(session_id):
         async for chunk in _chat_stream_impl(chat_req, http_request, session_id):
             yield chunk
@@ -648,11 +682,15 @@ def _persist_session_turn(
             "redundancy": result.get("performance_metrics", {}).get("redundancy", 0),
             "citations": result.get("citations", []),
         },
+        user_id=request.user_id or "default",
     )
 
     # 索引到 Milvus（每次更新摘要，用于语义搜索）
     try:
-        session_data = _session_db.get_session(session_id)
+        session_data = _session_db.get_session(
+            session_id,
+            request.user_id or "default",
+        )
         if session_data:
             messages = session_data.get("messages", [])
             user_msgs = [m for m in messages if m["role"] == "user"]
@@ -661,9 +699,10 @@ def _persist_session_turn(
             summary = (
                 f"会话共 {turn_count} 轮。首问：{first_q}"
             )
-            _session_vectors.index_session(
+            _get_session_vectors().index_session(
                 session_id=session_id,
                 summary_text=summary,
+                user_id=request.user_id or "default",
                 mode=session_data.get("mode", "single"),
                 created_at=session_data.get("created_at", ""),
                 total_tokens=session_data.get("total_tokens", 0),

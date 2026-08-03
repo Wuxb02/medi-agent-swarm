@@ -113,7 +113,7 @@ class SwarmCoordinator:
         # 记忆管理器
         self.session_manager = SessionSummaryManager()
         self.short_term_memory = ShortTermMemory(storage_type="memory", llm_client=self.llm_client)  # 或 "redis"
-        self.long_term_memory = LongTermMemory()
+        self.long_term_memory = LongTermMemory(user_id=user_id or "default")
         self.personal_profile = PersonalProfile(user_id=user_id or "default")
         self.ltm_save_task = None
 
@@ -551,7 +551,9 @@ class SwarmCoordinator:
             for s in (root_spans or []):
                 if s.span_type.value == 'trace':
                     s.trace_attrs = TraceAttributes(
-                        session_id=session_id, mode=mode or '',
+                        session_id=session_id,
+                        user_id=self.personal_profile.user_id,
+                        mode=mode or '',
                         question_summary=q, agents_involved=agents,
                         total_tokens=tokens,
                     )

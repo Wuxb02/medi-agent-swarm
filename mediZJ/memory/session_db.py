@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -90,6 +91,7 @@ class SessionDB:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id     TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL DEFAULT 'default',
                 created_at     TEXT NOT NULL,
                 updated_at     TEXT NOT NULL,
                 mode           TEXT DEFAULT 'single',
@@ -138,14 +140,62 @@ class SessionDB:
                 updated_at TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS users (
+                user_id             TEXT PRIMARY KEY,
+                username            TEXT NOT NULL,
+                username_normalized TEXT NOT NULL UNIQUE,
+                role                TEXT NOT NULL DEFAULT 'user',
+                is_active           INTEGER NOT NULL DEFAULT 1,
+                created_at          TEXT NOT NULL,
+                last_login_at       TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                token_hash   TEXT PRIMARY KEY,
+                user_id      TEXT NOT NULL,
+                created_at   TEXT NOT NULL,
+                expires_at   TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                FOREIGN KEY (user_id)
+                    REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS uploads (
+                filename      TEXT PRIMARY KEY,
+                user_id       TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                content_type  TEXT NOT NULL,
+                size          INTEGER NOT NULL,
+                created_at    TEXT NOT NULL,
+                FOREIGN KEY (user_id)
+                    REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, turn_index);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+                ON auth_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_uploads_user
+                ON uploads(user_id, created_at);
         """)
+
+        now = datetime.now().isoformat()
+        conn.execute(
+            """
+            INSERT INTO users
+                (user_id, username, username_normalized, role, is_active,
+                 created_at, last_login_at)
+            VALUES ('default', 'default', 'default', 'user', 1, ?, NULL)
+            ON CONFLICT(user_id) DO NOTHING
+            """,
+            (now,),
+        )
 
     @staticmethod
     def _migrate_tables(conn: sqlite3.Connection):
         """数据库迁移：为已有表添加新列"""
         migrations = [
+            ("sessions", "user_id", "TEXT NOT NULL DEFAULT 'default'"),
             ("sessions", "parallel_efficiency", "REAL DEFAULT 0"),
             ("sessions", "information_coverage", "REAL DEFAULT 0"),
             ("sessions", "redundancy", "REAL DEFAULT 0"),
@@ -157,6 +207,184 @@ class SessionDB:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+
+        conn.execute(
+            "UPDATE sessions SET user_id = 'default' "
+            "WHERE user_id IS NULL OR user_id = ''"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_user "
+            "ON sessions(user_id, updated_at)"
+        )
+
+    # ========== 用户与登录会话 ==========
+
+    def get_or_create_user(
+        self,
+        username: str,
+        role: str = "user",
+    ) -> Dict[str, Any]:
+        """按规范化用户名获取用户，不存在时自动创建。"""
+
+        normalized = username.casefold()
+
+        def _do_get_or_create(conn: sqlite3.Connection) -> Dict[str, Any]:
+            now = datetime.now().isoformat()
+            row = conn.execute(
+                "SELECT * FROM users WHERE username_normalized = ?",
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                user_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO users
+                        (user_id, username, username_normalized, role,
+                         is_active, created_at, last_login_at)
+                    VALUES (?, ?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(username_normalized) DO NOTHING
+                    """,
+                    (user_id, username, normalized, role, now, now),
+                )
+                conn.execute(
+                    """
+                    UPDATE OR IGNORE profiles
+                    SET user_id = ?
+                    WHERE lower(user_id) = ? AND user_id != 'default'
+                    """,
+                    (user_id, normalized),
+                )
+                row = conn.execute(
+                    "SELECT * FROM users WHERE username_normalized = ?",
+                    (normalized,),
+                ).fetchone()
+            effective_role = "admin" if role == "admin" else row["role"]
+            conn.execute(
+                """
+                UPDATE users
+                SET last_login_at = ?, role = ?
+                WHERE user_id = ?
+                """,
+                (now, effective_role, row["user_id"]),
+            )
+            row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?",
+                (row["user_id"],),
+            ).fetchone()
+            return dict(row)
+
+        return self._execute(_do_get_or_create)
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """按用户 ID 查询账号。"""
+
+        def _do_get(conn: sqlite3.Connection):
+            row = conn.execute(
+                "SELECT * FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+        return self._execute(_do_get)
+
+    def save_auth_session(
+        self,
+        token_hash: str,
+        user_id: str,
+        expires_at: str,
+    ) -> None:
+        """保存登录令牌哈希。"""
+
+        def _do_save(conn: sqlite3.Connection):
+            now = datetime.now().isoformat()
+            conn.execute(
+                """
+                INSERT INTO auth_sessions
+                    (token_hash, user_id, created_at, expires_at, last_seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (token_hash, user_id, now, expires_at, now),
+            )
+
+        self._execute(_do_save)
+
+    def get_auth_session(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        """查询登录会话及其用户信息。"""
+
+        def _do_get(conn: sqlite3.Connection):
+            row = conn.execute(
+                """
+                SELECT a.token_hash, a.user_id, a.expires_at,
+                       u.username, u.role, u.is_active
+                FROM auth_sessions AS a
+                JOIN users AS u ON u.user_id = a.user_id
+                WHERE a.token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE auth_sessions SET last_seen_at = ? "
+                    "WHERE token_hash = ?",
+                    (datetime.now().isoformat(), token_hash),
+                )
+            return dict(row) if row else None
+
+        return self._execute(_do_get)
+
+    def delete_auth_session(self, token_hash: str) -> bool:
+        """撤销指定登录会话。"""
+
+        def _do_delete(conn: sqlite3.Connection):
+            cursor = conn.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            return cursor.rowcount > 0
+
+        return self._execute(_do_delete)
+
+    def save_upload(
+        self,
+        filename: str,
+        user_id: str,
+        original_name: str,
+        content_type: str,
+        size: int,
+    ) -> None:
+        """记录上传文件归属。"""
+
+        def _do_save(conn: sqlite3.Connection):
+            conn.execute(
+                """
+                INSERT INTO uploads
+                    (filename, user_id, original_name, content_type,
+                     size, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    filename,
+                    user_id,
+                    original_name,
+                    content_type,
+                    size,
+                    datetime.now().isoformat(),
+                ),
+            )
+
+        self._execute(_do_save)
+
+    def get_upload(self, filename: str) -> Optional[Dict[str, Any]]:
+        """查询上传文件元数据。"""
+
+        def _do_get(conn: sqlite3.Connection):
+            row = conn.execute(
+                "SELECT * FROM uploads WHERE filename = ?",
+                (filename,),
+            ).fetchone()
+            return dict(row) if row else None
+
+        return self._execute(_do_get)
 
     # ========== 个人健康档案（profiles 表） ==========
 
@@ -213,6 +441,7 @@ class SessionDB:
         turn_index: int,
         user_msg: Dict[str, Any],
         assistant_msg: Dict[str, Any],
+        user_id: str = "default",
     ):
         """
         保存一轮对话（user + assistant），事务原子写入
@@ -229,14 +458,21 @@ class SessionDB:
         def _do_save(conn: sqlite3.Connection):
             now = datetime.now().isoformat()
 
+            owner = conn.execute(
+                "SELECT user_id FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if owner is not None and owner["user_id"] != user_id:
+                raise PermissionError("会话不属于当前用户")
+
             # UPSERT session 元数据
             conn.execute(
                 """
                 INSERT INTO sessions
-                    (session_id, created_at, updated_at, mode,
+                    (session_id, user_id, created_at, updated_at, mode,
                      first_question, total_tokens, message_count, turn_count,
                      parallel_efficiency, information_coverage, redundancy)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     updated_at     = excluded.updated_at,
                     mode           = excluded.mode,
@@ -249,6 +485,7 @@ class SessionDB:
                 """,
                 (
                     session_id,
+                    user_id,
                     user_msg.get("timestamp", now),
                     now,
                     assistant_msg.get("mode", "single"),
@@ -261,6 +498,13 @@ class SessionDB:
                     assistant_msg.get("redundancy", 0),
                 ),
             )
+
+            persisted_owner = conn.execute(
+                "SELECT user_id FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if persisted_owner["user_id"] != user_id:
+                raise PermissionError("会话不属于当前用户")
 
             # INSERT user message
             images_json = json.dumps(user_msg.get("images") or [], ensure_ascii=False)
@@ -322,7 +566,11 @@ class SessionDB:
             f"Saved turn {turn_index} for session {session_id}"
         )
 
-    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def get_session(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """
         获取完整会话（含所有 messages）
 
@@ -333,10 +581,17 @@ class SessionDB:
         """
 
         def _do_get(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
-            row = conn.execute(
-                "SELECT * FROM sessions WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT * FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM sessions "
+                    "WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
+                ).fetchone()
             if not row:
                 return None
 
@@ -386,36 +641,71 @@ class SessionDB:
 
         return self._execute(_do_count)
 
-    def list_sessions(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def list_sessions(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """列出会话摘要，按 updated_at DESC"""
 
         def _do_list(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-            rows = conn.execute(
-                """
-                SELECT * FROM sessions
-                ORDER BY updated_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            ).fetchall()
+            if user_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM sessions
+                    ORDER BY updated_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM sessions
+                    WHERE user_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (user_id, limit, offset),
+                ).fetchall()
             return [dict(r) for r in rows]
 
         return self._execute(_do_list)
 
-    def count_sessions(self) -> int:
+    def count_sessions(self, user_id: Optional[str] = None) -> int:
         """获取会话总数"""
 
         def _do_count(conn: sqlite3.Connection) -> int:
-            row = conn.execute("SELECT COUNT(*) AS cnt FROM sessions").fetchone()
+            if user_id is None:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM sessions"
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM sessions WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
             return row["cnt"] if row else 0
 
         return self._execute(_do_count)
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> bool:
         """删除会话及其所有 messages（CASCADE）"""
 
         def _do_delete(conn: sqlite3.Connection) -> bool:
-            # 先删 messages（虽然 CASCADE 会处理，但显式更安全）
+            if user_id is not None:
+                owned = conn.execute(
+                    "SELECT 1 FROM sessions "
+                    "WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
+                ).fetchone()
+                if owned is None:
+                    return False
             conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
