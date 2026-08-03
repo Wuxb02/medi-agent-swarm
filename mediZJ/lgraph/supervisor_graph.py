@@ -11,8 +11,6 @@ SupervisorGraph — 替代 SwarmCoordinator.process() 的 LangGraph 主图
 """
 import asyncio
 import uuid
-import re
-import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
@@ -25,7 +23,6 @@ from mediZJ.lgraph.supervisor_state import SupervisorState
 from mediZJ.lgraph.agent_subgraph import build_agent_subgraph
 from mediZJ.lgraph.tool_registry import ToolRegistry
 from mediZJ.swarm.events import Event, EventType
-from mediZJ.core.prompt_loader import PromptLoader
 
 # Trace
 try:
@@ -276,7 +273,7 @@ def build_supervisor_graph(
 
         # 程序化追加参考资料章节
         if citations:
-            ref_section = _format_references_section(citations)
+            ref_section = coordinator.format_references_section(citations)
             if ref_section:
                 final_answer += "\n" + ref_section
 
@@ -302,8 +299,7 @@ def build_supervisor_graph(
                 f"单任务路由到 {agent_id}" if len(subtasks) == 1
                 else "无可用子任务，降级到 ConsultationAgent"
             ),
-            "suggestions": _extract_suggestions(final_answer),
-            "disclaimer": "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
+            "suggestions": coordinator.extract_suggestions(final_answer),
         }
 
     def _send_workers_node(state: SupervisorState) -> dict:
@@ -533,7 +529,7 @@ def build_supervisor_graph(
 
         # 程序化追加参考资料章节
         if swarm_citations:
-            ref_section = _format_references_section(swarm_citations)
+            ref_section = coordinator.format_references_section(swarm_citations)
             if ref_section:
                 final_answer += "\n" + ref_section
 
@@ -556,20 +552,12 @@ def build_supervisor_graph(
             content=state["question"],
         )
 
-        # 免责声明
-        disclaimer = PromptLoader.render(
-            "validation/swarm_disclaimer.j2",
-            timeout_occurred=timeout_occurred,
-            completed_agents_count=len(completed_agents),
-        )
-
         return {
             "final_answer": final_answer,
             "citations": swarm_citations,
             "usage": swarm_usage,
             "agents_involved": completed_agents,
-            "suggestions": _extract_suggestions(final_answer),
-            "disclaimer": disclaimer,
+            "suggestions": coordinator.extract_suggestions(final_answer),
             "timeout_occurred": timeout_occurred,
             "swarm_metadata": {
                 "num_subtasks": len(state.get("subtasks", [])),
@@ -768,70 +756,3 @@ def _cleanup_worker_callbacks(agent):
         agent.set_on_thinking_done(None)
         agent.set_on_content_token(None)
         agent.set_on_questionnaire(None)
-
-
-def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[int, int]]):
-    """将 SharedContext 中各 Worker 贡献文本中的旧引用编号替换为新编号
-
-    与 SwarmCoordinator._apply_renumber_map 行为一致。
-    """
-    citation_pattern = re.compile(r'\[(\d+(?:[,\-]\d+)*)\]')
-
-    for agent_id, mapping in renumber_map.items():
-        if not mapping:
-            continue
-        contribs = shared_ctx.agent_contributions.get(agent_id, [])
-        for contrib in contribs:
-            if not isinstance(contrib.result, dict):
-                continue
-            answer = contrib.result.get("answer", "")
-            if not answer:
-                continue
-
-            def replace_ref(match):
-                nums_str = match.group(1)
-                parts = re.split(r'([,\-])', nums_str)
-                new_parts = []
-                for part in parts:
-                    if part in (',', '-'):
-                        new_parts.append(part)
-                    else:
-                        try:
-                            old_num = int(part)
-                            new_num = mapping.get(old_num, old_num)
-                            new_parts.append(str(new_num))
-                        except ValueError:
-                            new_parts.append(part)
-                return '[' + ''.join(new_parts) + ']'
-
-            contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
-
-
-def _format_references_section(citations: list) -> str:
-    """将引用列表格式化为 ## 参考资料 Markdown 章节"""
-    if not citations:
-        return ""
-    lines = ["", "## 参考资料", ""]
-    for ref in citations:
-        index = ref.get("index", "")
-        filename = ref.get("filename", "")
-        if filename:
-            lines.append(f"[{index}] {filename}")
-        else:
-            lines.append(f"[{index}]")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def _extract_suggestions(final_answer: str) -> List[str]:
-    """从最终答案中提取建议"""
-    suggestions = []
-    if "## 核心建议" in final_answer or "【核心建议】" in final_answer:
-        start_marker = "## 核心建议" if "## 核心建议" in final_answer else "【核心建议】"
-        start_idx = final_answer.find(start_marker) + len(start_marker)
-        end_match = re.search(r'\n## ', final_answer[start_idx:])
-        end_idx = start_idx + end_match.start() if end_match else len(final_answer)
-        suggestions_text = final_answer[start_idx:end_idx]
-        matches = re.findall(r'\d+\.\s*([^\n]+)', suggestions_text)
-        suggestions = matches[:5]
-    return suggestions or ["请遵循医嘱，注意休息和营养"]
