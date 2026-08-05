@@ -35,6 +35,7 @@ class SupervisorState(TypedDict, total=False):
     intent_confidence: float        # 0.0 ~ 1.0
     intent_source: str              # "llm" | "fallback"
     skip_long_term_retrieval: bool  # 是否跳过 Mem0 长期记忆检索
+    chat_mode: bool                 # others 意图时直接聊天回应，跳过任务分解
 
     # === 任务分解 ===
     subtasks: List[Dict[str, Any]]  # LeadAgent JSON 格式

@@ -83,7 +83,16 @@ async def retrieve_memories_with_intent_gate(
         "intent_source": intent_result.source,
         "intent_reason": intent_result.reason,
         "skip_long_term_retrieval": intent_result.skip_long_term,
+        # others 意图：直接聊天回应，跳过任务分解
+        "chat_mode": intent_result.skip_long_term,
     }
+
+
+def route_by_intent(state: Dict[str, Any]) -> str:
+    """根据意图路由：others（寒暄/无关话题）→ 闲聊直答；medical → 正常流程。"""
+    if state.get("chat_mode") or state.get("intent") == "others":
+        return "chat_reply"
+    return "clarify"
 
 
 def build_supervisor_graph(
@@ -351,6 +360,53 @@ def build_supervisor_graph(
                 else "无可用子任务，降级到 ConsultationAgent"
             ),
             "suggestions": coordinator.extract_suggestions(final_answer),
+        }
+
+    async def _chat_reply_node(state: SupervisorState) -> dict:
+        """节点: 闲聊模式——others 意图时 LeadAgent 直接聊天回应，跳过任务分解"""
+        enhanced_context = {
+            "personal_profile": state.get("personal_profile", ""),
+            "recent_history": state.get("recent_history", []),
+        }
+
+        _ctx = traced_span(SpanType.STAGE, name="chat_reply") if TRACE_AVAILABLE else None
+        if _ctx:
+            _ctx.__enter__()
+
+        try:
+            reply = await lead_agent.chat_reply(
+                question=state["question"],
+                context=enhanced_context,
+                event_callback=event_callback,
+            )
+        finally:
+            if _ctx:
+                _ctx.__exit__(None, None, None)
+
+        answer = reply.get("answer", "")
+
+        # 记录到短期记忆（chat 模式也需要，否则后续"我刚才问了什么"无法召回）
+        await coordinator.short_term_memory.add_message(
+            session_id=state["session_id"], role="user",
+            content=state["question"],
+        )
+        await coordinator.short_term_memory.add_message(
+            session_id=state["session_id"], role="assistant",
+            content=answer,
+        )
+
+        logger.info(f"[SupervisorGraph] 闲聊回复完成: {answer[:100]}")
+
+        return {
+            "final_answer": answer,
+            "citations": [],
+            "usage": {},
+            "agents_involved": ["lead_agent"],
+            "swarm_enabled": False,
+            "mode": "chat",
+            "route_reason": "意图为 others，LeadAgent 直接聊天回应",
+            "suggestions": [],
+            "subtasks": [],
         }
 
     def _send_workers_node(state: SupervisorState) -> dict:
@@ -632,22 +688,25 @@ def build_supervisor_graph(
         end_time = datetime.now()
         total_time = (end_time - start_time).total_seconds()
 
-        # LTM fire-and-forget
+        # LTM fire-and-forget（闲聊模式跳过：寒暄无记忆价值，且省一次 LLM 评估）
         final_answer = state.get("final_answer", "")
         mode = state.get("mode", "single_agent")
         usage = state.get("usage", {})
+        chat_mode = state.get("chat_mode", False)
 
-        ltm_task = asyncio.ensure_future(coordinator._save_long_term_memory(
-            session_id=session_id,
-            question=state["question"],
-            answer=final_answer,
-            metadata={
-                "mode": mode,
-                "subtasks_count": len(state.get("subtasks", [])),
-                "total_time": total_time,
-                "total_tokens": usage.get("total_tokens", 0),
-            },
-        ))
+        ltm_task = None
+        if not chat_mode:
+            ltm_task = asyncio.ensure_future(coordinator._save_long_term_memory(
+                session_id=session_id,
+                question=state["question"],
+                answer=final_answer,
+                metadata={
+                    "mode": mode,
+                    "subtasks_count": len(state.get("subtasks", [])),
+                    "total_time": total_time,
+                    "total_tokens": usage.get("total_tokens", 0),
+                },
+            ))
 
         return {
             "total_time": total_time,
@@ -697,6 +756,7 @@ def build_supervisor_graph(
 
     # 注册节点
     builder.add_node("retrieve_memories", _retrieve_memories)
+    builder.add_node("chat_reply", _chat_reply_node)
     builder.add_node("clarify", _clarify)
     builder.add_node("assess_decompose", _assess_decompose)
     builder.add_node("single_agent", _single_agent_node)
@@ -707,7 +767,18 @@ def build_supervisor_graph(
 
     # 边连接
     builder.add_edge(START, "retrieve_memories")
-    builder.add_edge("retrieve_memories", "clarify")
+
+    # 意图路由：others（寒暄/无关话题）→ 闲聊直答；医疗 → 澄清 → 任务分解
+    builder.add_conditional_edges(
+        "retrieve_memories",
+        route_by_intent,
+        {
+            "chat_reply": "chat_reply",
+            "clarify": "clarify",
+        }
+    )
+
+    builder.add_edge("chat_reply", "finalize")
     builder.add_edge("clarify", "assess_decompose")
 
     # 条件路由：single / swarm / fallback

@@ -152,6 +152,7 @@ class TestRetrieveMemoriesGate:
         coordinator.short_term_memory.get_recent_messages.assert_awaited_once()
         assert result["intent"] == "others"
         assert result["skip_long_term_retrieval"] is True
+        assert result["chat_mode"] is True  # others 意图 → 闲聊直答模式
         assert result["similar_memories"] == []
 
     @pytest.mark.asyncio
@@ -168,6 +169,7 @@ class TestRetrieveMemoriesGate:
 
         coordinator.long_term_memory.search_similar_sessions.assert_awaited_once()
         assert result["skip_long_term_retrieval"] is False
+        assert result["chat_mode"] is False  # medical 意图 → 正常任务分解
         assert result["similar_memories"] == [{"memory_id": "m1"}]
 
     @pytest.mark.asyncio
@@ -187,6 +189,95 @@ class TestRetrieveMemoriesGate:
 
         assert result["skip_long_term_retrieval"] is False
         assert result["similar_memories"] == []
+
+
+class TestChatModeRouting:
+    """图级测试：others 意图 → chat_reply 直答，medical → 正常澄清/分解。"""
+
+    def _make_coordinator(self, intent: str, chat_answer: str = "你好！有什么可以帮您？"):
+        from unittest.mock import AsyncMock, MagicMock
+
+        coordinator = type("Coordinator", (), {})()
+        coordinator.short_term_memory = type("STM", (), {
+            "get_recent_messages": AsyncMock(return_value=[]),
+            "add_message": AsyncMock(return_value=None),
+        })()
+        coordinator.long_term_memory = type("LTM", (), {
+            "search_similar_sessions": AsyncMock(return_value=[]),
+        })()
+        coordinator.personal_profile = type("PP", (), {"to_text": lambda self: "暂无"})()
+        coordinator.questionnaire_manager = None  # 无问卷管理器，clarify 直接跳过
+        coordinator._refresh_worker_profiles = lambda *args, **kwargs: None
+        coordinator._save_long_term_memory = AsyncMock(return_value=None)
+
+        # mock Worker Agents（build_supervisor_graph 构造时会访问）
+        coordinator.consultation_agent = MagicMock()
+        coordinator.diagnostic_agent = MagicMock()
+        coordinator.research_agent = MagicMock()
+
+        # mock LeadAgent：chat_reply 返回固定文本，assess_and_decompose 返回单任务
+        coordinator.lead_agent = type("LA", (), {
+            "chat_reply": AsyncMock(return_value={"answer": chat_answer}),
+            "assess_and_decompose": AsyncMock(return_value={
+                "subtasks": [{"description": "回答用户问题",
+                              "assigned_agent": "consultation_agent"}],
+            }),
+            "clarify": AsyncMock(return_value={
+                "clarified": False, "collected_info": "", "raw_answers": {},
+            }),
+            "set_on_thinking": lambda *a, **k: None,
+            "set_on_thinking_done": lambda *a, **k: None,
+        })()
+
+        # 注入固定意图
+        coordinator.intent_classifier = type("IC", (), {
+            "classify": AsyncMock(return_value=IntentResult(
+                intent=intent, confidence=0.9, source="llm", reason="test",
+            )),
+        })()
+        return coordinator
+
+    @pytest.mark.asyncio
+    async def test_others_routes_to_chat_reply(self):
+        from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
+
+        coordinator = self._make_coordinator(intent="others")
+        graph = build_supervisor_graph(coordinator, tool_registry=None)
+        result_state = await graph.ainvoke(
+            {"question": "你好", "session_id": "c1"},
+            config={"configurable": {"thread_id": "c1"}},
+        )
+
+        # 走了 chat_reply，没走任务分解
+        coordinator.lead_agent.chat_reply.assert_awaited_once()
+        coordinator.lead_agent.assess_and_decompose.assert_not_awaited()
+        assert result_state["mode"] == "chat"
+        assert result_state["final_answer"] == "你好！有什么可以帮您？"
+        assert result_state["chat_mode"] is True
+        assert result_state["agents_involved"] == ["lead_agent"]
+        # 闲聊模式不保存 LTM
+        coordinator._save_long_term_memory.assert_not_awaited()
+        # 但会写入短期记忆（user + assistant），保证后续"我刚才问了什么"可召回
+        stm_calls = coordinator.short_term_memory.add_message.await_args_list
+        assert len(stm_calls) == 2
+        assert stm_calls[0].kwargs["role"] == "user"
+        assert stm_calls[0].kwargs["content"] == "你好"
+        assert stm_calls[1].kwargs["role"] == "assistant"
+        assert stm_calls[1].kwargs["content"] == "你好！有什么可以帮您？"
+
+    @pytest.mark.asyncio
+    async def test_medical_does_not_route_to_chat(self):
+        """medical 意图：路由到正常流程（clarify），不是 chat_reply。"""
+        from mediZJ.lgraph.supervisor_graph import route_by_intent
+
+        # others 意图（chat_mode=True）→ chat_reply
+        assert route_by_intent({"chat_mode": True, "intent": "others"}) == "chat_reply"
+        # others 意图（仅 intent 字段）→ chat_reply
+        assert route_by_intent({"intent": "others"}) == "chat_reply"
+        # medical 意图 → 正常流程 clarify
+        assert route_by_intent({"intent": "medical", "chat_mode": False}) == "clarify"
+        # 缺省（无意图信息，如异常降级）→ 保守走正常流程
+        assert route_by_intent({}) == "clarify"
 
 
 class TestEventType:

@@ -96,6 +96,94 @@ class LeadAgent:
         """获取澄清阶段的系统提示词"""
         return PromptLoader.load("swarm/lead_clarify.j2")
 
+    async def chat_reply(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """闲聊模式回复：以聊天机器人角色直接回应非医疗输入（others 意图）。
+
+        不做任务分解、不调用 Worker Agent。简单寒暄/致谢/无关话题在此直接回应，
+        但若用户输入涉及医疗诉求（医学安全优先），则引导回医疗主题。
+
+        Args:
+            question: 用户原始问题
+            context: 已有上下文（记忆等）
+            event_callback: 事件回调（用于流式推送）
+
+        Returns:
+            {"answer": 回复文本}
+        """
+        # 发射 thinking 开始
+        iteration = 1
+        think_start = time.monotonic()
+        if self.on_thinking:
+            self.on_thinking(
+                content=f"正在以聊天模式回应：「{question[:200]}」",
+                iteration=iteration,
+            )
+
+        # 注入近期对话历史（OpenAI 格式 user/assistant 消息，供"我刚才问了什么"等召回）
+        history_messages = []
+        if context and isinstance(context.get("recent_history"), list):
+            for msg in context["recent_history"]:
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    history_messages.append({"role": role, "content": content})
+
+        context_text = "无"
+        if context:
+            parts = []
+            if context.get("personal_profile") and context["personal_profile"] != "暂无":
+                parts.append(f"## 用户档案\n{context['personal_profile']}")
+            if parts:
+                context_text = "\n\n".join(parts)
+
+        try:
+            messages = [
+                {"role": "system", "content": PromptLoader.load("swarm/chat_reply.j2")},
+                *history_messages,
+                {"role": "user", "content": PromptLoader.render(
+                    "swarm/chat_reply_user.j2",
+                    question=question,
+                    context=context_text,
+                )},
+            ]
+
+            if event_callback:
+                def _on_content_token(token: str) -> None:
+                    event_callback(Event(
+                        type=EventType.AGENT_CONTENT_DELTA,
+                        source_agent=self.agent_id,
+                        data={"content": token},
+                    ))
+
+                answer = await self.llm_client.chat_with_tools_stream(
+                    messages=messages,
+                    tools=None,
+                    temperature=0.7,
+                    on_content_token=_on_content_token,
+                )
+                # chat_with_tools_stream 返回 LLMResponse，取 content
+                answer_text = answer.content or ""
+            else:
+                answer_text = await self.llm_client.chat(
+                    messages,
+                    temperature=0.7,
+                )
+        except Exception as e:
+            logger.error(f"LeadAgent chat_reply error: {e}")
+            answer_text = "抱歉，我暂时无法回应。请问有什么健康问题需要帮助吗？"
+
+        # 发射 thinking_done
+        if self.on_thinking_done:
+            elapsed = round(time.monotonic() - think_start, 1)
+            self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+
+        return {"answer": answer_text}
+
     async def clarify(
         self,
         question: str,
