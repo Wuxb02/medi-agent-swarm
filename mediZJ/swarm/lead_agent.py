@@ -102,7 +102,7 @@ class LeadAgent:
         context: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
         event_callback: Optional[Any] = None,
-        clarify_timeout: float = 30.0,
+        clarify_timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         信息澄清阶段：通过结构化问卷收集用户背景信息
@@ -115,7 +115,7 @@ class LeadAgent:
             context: 已有上下文（记忆等）
             session_id: 会话 ID
             event_callback: 事件回调（用于推送问卷到前端）
-            clarify_timeout: 问卷等待超时秒数（默认 30s）
+            clarify_timeout: 问卷等待超时秒数；None 表示无限等待（默认，用户不回答则一直挂起）
 
         Returns:
             {
@@ -201,13 +201,16 @@ class LeadAgent:
                     },
                 ))
 
-            # 等待用户回答
+            # 等待用户回答（无限等待，用户不回答则一直挂起）
             try:
                 answers = await self.questionnaire_manager.create_pending(
                     questionnaire_id, timeout=clarify_timeout
                 )
             except asyncio.TimeoutError:
-                logger.warning(f"LeadAgent clarify: 问卷超时（{clarify_timeout}s），跳过澄清")
+                logger.warning(
+                    f"LeadAgent clarify: 问卷超时"
+                    f"（{clarify_timeout if clarify_timeout is not None else '∞'}s），跳过澄清"
+                )
                 return {
                     "clarified": False,
                     "collected_info": "",

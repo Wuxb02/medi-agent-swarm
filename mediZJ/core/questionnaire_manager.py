@@ -25,7 +25,7 @@ class QuestionnaireManager:
     async def create_pending(
         self,
         questionnaire_id: str,
-        timeout: float = 300.0
+        timeout: Optional[float] = None
     ) -> Dict[str, Any]:
         """创建 Future 并等待用户回答。
 
@@ -34,18 +34,18 @@ class QuestionnaireManager:
 
         Args:
             questionnaire_id: 问卷唯一标识
-            timeout: 超时秒数（默认 300 秒 = 5 分钟）
+            timeout: 超时秒数；None 表示无限等待（用户不回答则一直挂起）
 
         Returns:
             用户答案字典，如 {"q0": "35", "q1": "男", ...}
 
         Raises:
-            TimeoutError: 用户未在指定时间内回答
+            TimeoutError: 用户未在指定时间内回答（仅 timeout 非 None 时）
         """
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[questionnaire_id] = future
 
-        logger.info(f"问卷 {questionnaire_id} 等待用户回答（超时: {timeout}s）")
+        logger.info(f"问卷 {questionnaire_id} 等待用户回答（超时: {timeout if timeout is not None else '∞'}s）")
 
         try:
             result = await asyncio.wait_for(future, timeout=timeout)

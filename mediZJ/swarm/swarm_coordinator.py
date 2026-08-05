@@ -23,6 +23,7 @@ from mediZJ.core.prompt_loader import PromptLoader
 from mediZJ.swarm.shared_context import SharedContext, SubTask, TaskStatus
 from mediZJ.swarm.lead_agent import LeadAgent
 from mediZJ.swarm.events import Event, EventType
+from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from mediZJ.memory import (
     SessionSummaryManager,
@@ -101,6 +102,9 @@ class SwarmCoordinator:
         self.long_term_memory = LongTermMemory(user_id=user_id or "default")
         self.personal_profile = PersonalProfile(user_id=user_id or "default")
         self.ltm_save_task = None
+
+        # 意图识别（用于门控 Mem0 长期记忆检索）
+        self.intent_classifier = IntentClassifier(llm_client=self.llm_client)
 
         # LangGraph ToolRegistry
         self._tool_registry = None
@@ -268,6 +272,8 @@ class SwarmCoordinator:
             "usage": result_state.get("usage", {}),
             "citations": result_state.get("citations", []),
             "mode": result_state.get("mode", "langgraph"),
+            "intent": result_state.get("intent"),
+            "skip_long_term_retrieval": result_state.get("skip_long_term_retrieval", False),
             "_swarm_finalized": True,
         }
 

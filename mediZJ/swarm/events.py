@@ -25,6 +25,7 @@ class EventType(Enum):
     AGENT_QUESTIONNAIRE = "agent_questionnaire"  # Agent 向前端发送结构化问卷
     AGENT_QUESTIONNAIRE_CANCELLED = "agent_questionnaire_cancelled"  # 问卷被取消（超时/系统取消）
     TRACE_SPAN = "trace_span"                    # Trace span 完成事件（实时推送）
+    INTENT_CLASSIFIED = "intent_classified"      # 意图识别结果（检索门控）
 
 
 @dataclass

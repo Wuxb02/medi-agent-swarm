@@ -36,6 +36,9 @@ except ImportError:
 
 # ---- Tool Call 数据结构（轻量内部表示） ----
 
+# 不消耗 Worker 工具调用配额的系统交互工具（激活技能 / 前端问卷）
+_NON_COUNTED_TOOLS = frozenset({"activate_skill", "question_for_user"})
+
 class _ToolCall:
     """LLM 返回的单个工具调用"""
     __slots__ = ('id', 'name', 'arguments')
@@ -191,19 +194,24 @@ def make_tool_execution_node(
                     )
 
                     logger.info(f"Skill 激活: {skill_name} → {len(tool_names)} 个工具可见")
-                # activate_skill 不计入 tool_call_count
-            else:
-                # 计入 tool_call_count
+            elif tc.name not in _NON_COUNTED_TOOLS:
+                # activate_skill / question_for_user 不计入 tool_call_count
                 tool_call_count += 1
 
             # ---- question_for_user 问卷检测 ----
-            if (isinstance(result, dict)
-                    and result.get("needs_user_input")
-                    and tc.name == "question_for_user"):
+            questionnaire_requested = (
+                isinstance(result, dict)
+                and result.get("needs_user_input")
+                and tc.name == "question_for_user"
+            )
+            if questionnaire_requested:
                 questionnaire_pending = {
                     "id": result.get("questionnaire_id", ""),
                     "data": result.get("questionnaire_data", {}),
                     "_questions_ref": result.get("_questions_ref", []),
+                    # 问卷工具调用 id：用于在暂停节点生成与 assistant.tool_calls
+                    # 配对的 tool 消息，避免消息历史出现未配对的 tool_calls
+                    "tool_call_id": tc.id,
                 }
                 logger.info(f"问卷待处理: {questionnaire_pending['id']}")
 
@@ -225,13 +233,15 @@ def make_tool_execution_node(
                     success=("error" not in result_str.lower()),
                 )
 
-            # 构建工具结果消息
-            tool_results.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "name": tc.name,
-                "content": json.dumps(result, ensure_ascii=False, default=str),
-            })
+            # 问卷请求不生成 tool 消息：暂停节点恢复后会用真实 tool_call_id
+            # 生成配对消息（question_for_user 是前端交互，无真实工具执行结果）
+            if not questionnaire_requested:
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tc.name,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
 
         # 整理引用列表
         reference_list = sorted(collected_refs.values(), key=lambda r: r.get("index", 0))

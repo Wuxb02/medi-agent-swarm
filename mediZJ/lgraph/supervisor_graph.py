@@ -23,6 +23,7 @@ from mediZJ.lgraph.supervisor_state import SupervisorState
 from mediZJ.lgraph.agent_subgraph import build_agent_subgraph
 from mediZJ.lgraph.tool_registry import ToolRegistry
 from mediZJ.swarm.events import Event, EventType
+from mediZJ.swarm.intent_classifier import IntentClassifier
 
 # Trace
 try:
@@ -31,6 +32,58 @@ try:
     TRACE_AVAILABLE = True
 except ImportError:
     TRACE_AVAILABLE = False
+
+
+async def retrieve_memories_with_intent_gate(
+    coordinator,
+    session_id: str,
+    question: str,
+    intent_classifier: Optional[IntentClassifier] = None,
+) -> Dict[str, Any]:
+    """并行检索短期记忆，并按意图门控 Mem0 长期记忆检索。
+
+    意图为 others（寒暄/致谢/无关话题）时跳过长期记忆检索，
+    短期记忆（当前会话历史）始终保留。任何异常降级为空列表，不阻断链路。
+    """
+    classifier = intent_classifier or IntentClassifier()
+
+    # 短期记忆检索 与 意图判断并行（意图判断用于决定是否检索 Mem0）
+    recent_task = asyncio.create_task(
+        coordinator.short_term_memory.get_recent_messages(
+            session_id=session_id, limit=10,
+        )
+    )
+    intent_task = asyncio.create_task(classifier.classify(question))
+
+    recent_history = await recent_task
+    intent_result = await intent_task
+
+    similar_memories: List[Dict[str, Any]] = []
+    if intent_result.skip_long_term:
+        logger.info(
+            f"[SupervisorGraph] 意图={intent_result.intent}({intent_result.source}), "
+            f"跳过长期记忆检索"
+        )
+    else:
+        try:
+            similar_memories = (
+                await coordinator.long_term_memory.search_similar_sessions(
+                    query=question, limit=3,
+                )
+            )
+        except BaseException as exc:
+            logger.warning(f"长期记忆检索失败: {exc}")
+            similar_memories = []
+
+    return {
+        "recent_history": recent_history,
+        "similar_memories": similar_memories,
+        "intent": intent_result.intent,
+        "intent_confidence": intent_result.confidence,
+        "intent_source": intent_result.source,
+        "intent_reason": intent_result.reason,
+        "skip_long_term_retrieval": intent_result.skip_long_term,
+    }
 
 
 def build_supervisor_graph(
@@ -64,44 +117,43 @@ def build_supervisor_graph(
 
     # ===== 节点函数 =====
 
-    async def _retrieve_memories(state: SupervisorState) -> dict:
-        """节点: 并行检索短期记忆和长期记忆（替代 coordinator._retrieve_memories）"""
-        session_id = state["session_id"]
-        question = state["question"]
+    intent_classifier = getattr(coordinator, "intent_classifier", None) or IntentClassifier()
 
-        results = await asyncio.gather(
-            coordinator.short_term_memory.get_recent_messages(
-                session_id=session_id, limit=10,
-            ),
-            coordinator.long_term_memory.search_similar_sessions(
-                query=question, limit=3,
-            ),
-            return_exceptions=True,
+    async def _retrieve_memories(state: SupervisorState) -> dict:
+        """节点: 并行检索短期记忆，并按意图门控长期记忆（替代 coordinator._retrieve_memories）"""
+        result = await retrieve_memories_with_intent_gate(
+            coordinator=coordinator,
+            session_id=state["session_id"],
+            question=state["question"],
+            intent_classifier=intent_classifier,
         )
 
-        recent_history = results[0] if not isinstance(results[0], BaseException) else []
-        similar_memories = results[1] if not isinstance(results[1], BaseException) else []
-
-        if isinstance(results[0], BaseException):
-            logger.warning(f"短期记忆检索失败: {results[0]}")
-        if isinstance(results[1], BaseException):
-            logger.warning(f"长期记忆检索失败: {results[1]}")
+        if event_callback:
+            event_callback(Event(
+                type=EventType.INTENT_CLASSIFIED,
+                source_agent="intent_classifier",
+                data={
+                    "intent": result["intent"],
+                    "confidence": result["intent_confidence"],
+                    "source": result["intent_source"],
+                    "reason": result.get("intent_reason", ""),
+                    "skip_long_term_retrieval": result["skip_long_term_retrieval"],
+                },
+            ))
 
         # 刷新 Worker 档案
         coordinator._refresh_worker_profiles()
 
         personal_text = coordinator.personal_profile.to_text()
+        result["personal_profile"] = personal_text if personal_text != "暂无" else ""
 
         logger.info(
             f"[SupervisorGraph] 记忆检索完成: "
-            f"recent={len(recent_history)}条, similar={len(similar_memories)}条"
+            f"recent={len(result['recent_history'])}条, "
+            f"similar={len(result['similar_memories'])}条"
         )
 
-        return {
-            "recent_history": recent_history,
-            "similar_memories": similar_memories,
-            "personal_profile": personal_text if personal_text != "暂无" else "",
-        }
+        return result
 
     async def _clarify(state: SupervisorState) -> dict:
         """节点: 信息澄清阶段（替代 coordinator._do_clarify）
@@ -130,7 +182,6 @@ def build_supervisor_graph(
                 context=enhanced_context,
                 session_id=state["session_id"],
                 event_callback=event_callback,
-                clarify_timeout=30.0,
             )
         finally:
             if _ctx:

@@ -402,13 +402,17 @@ def build_agent_subgraph(
 
         logger.info(f"问卷 {questionnaire_id} 收到回答: {formatted_text[:100]}...")
 
+        # 用工具执行时记录的真实 tool_call_id 生成配对 tool 消息，
+        # 确保消息历史中 assistant.tool_calls 都有对应 tool 响应
+        tool_call_id = pending.get("tool_call_id") or f"questionnaire_{questionnaire_id}"
+
         # 将用户回答作为工具结果追加到消息历史（仅返回新增消息，由 add_messages reducer 合并）
         return {
             "questionnaire_pending": None,
             "questionnaire_answers": user_answer,
             "messages": [{
                 "role": "tool",
-                "tool_call_id": f"questionnaire_{questionnaire_id}",
+                "tool_call_id": tool_call_id,
                 "name": "question_for_user",
                 "content": json.dumps({
                     "success": True,
@@ -453,19 +457,17 @@ def build_agent_subgraph(
             # 无 tool_calls → 最终回答
             return "done"
 
-        # 检查是否达到最大工具调用次数
+        # 检查是否达到最大工具调用次数（activate_skill / question_for_user 不计入）
         non_activate = [tc for tc in tool_calls
-                        if _get_tc_name(tc) != "activate_skill"]
+                        if _get_tc_name(tc) not in ("activate_skill", "question_for_user")]
         tool_call_count = state.get("tool_call_count", 0)
         if non_activate and tool_call_count >= max_tool_calls:
             logger.warning(f"达到最大工具调用次数 {max_tool_calls}，强制收尾")
             return "force_answer"
 
-        # 检查是否有问卷
-        for tc in tool_calls:
-            if _get_tc_name(tc) == "question_for_user":
-                return "questionnaire"
-
+        # 全部工具调用（含 question_for_user）统一走 tool_execution 节点，
+        # 由工具执行结果检测 needs_user_input 进入问卷暂停（tool 消息必须与
+        # assistant.tool_calls 一一配对，跳过执行会留下未配对的 tool_calls）
         return "tool_execution"
 
     def _route_after_tool(state: AgentState) -> str:
@@ -513,7 +515,6 @@ def build_agent_subgraph(
         _route_after_llm,
         {
             "tool_execution": "tool_execution",
-            "questionnaire": "questionnaire_pause",
             "force_answer": "force_answer",
             "done": "finalize_answer",
         }

@@ -691,9 +691,9 @@ class AgentLoop:
             )
 
         try:
-            # 等待用户回答（阻塞，最多 300 秒）
+            # 等待用户回答（无限等待，用户不回答则一直挂起）
             answers = await self.questionnaire_manager.create_pending(
-                questionnaire_id, timeout=300.0
+                questionnaire_id, timeout=None
             )
 
             # 格式化答案为 LLM 可读文本

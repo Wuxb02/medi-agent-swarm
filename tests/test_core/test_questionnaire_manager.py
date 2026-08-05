@@ -33,6 +33,19 @@ class TestQuestionnaireManager:
             await qm.create_pending("q2", timeout=0.01)
 
     @pytest.mark.asyncio
+    async def test_no_timeout_waits_forever_until_resolved(self, qm):
+        """timeout=None 时无限等待，直到用户回答才返回。"""
+        task = asyncio.ensure_future(qm.create_pending("q-no-timeout", timeout=None))
+        # 给一点时间确认 future 已创建且未超时返回
+        await asyncio.sleep(0.05)
+        assert task.done() is False
+        # 用户回答后恢复
+        qm.resolve("q-no-timeout", {"q0": "answer"})
+        result = await asyncio.wait_for(task, timeout=1.0)
+        assert result == {"q0": "answer"}
+        assert qm.has_pending is False
+
+    @pytest.mark.asyncio
     async def test_resolve_after_timeout_returns_false(self, qm):
         try:
             await qm.create_pending("q3", timeout=0.01)

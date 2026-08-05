@@ -30,6 +30,12 @@ class SupervisorState(TypedDict, total=False):
     personal_profile: str
     collected_info: str             # clarify 阶段收集的信息
 
+    # === 意图识别（检索门控） ===
+    intent: str                     # medical | others
+    intent_confidence: float        # 0.0 ~ 1.0
+    intent_source: str              # "llm" | "fallback"
+    skip_long_term_retrieval: bool  # 是否跳过 Mem0 长期记忆检索
+
     # === 任务分解 ===
     subtasks: List[Dict[str, Any]]  # LeadAgent JSON 格式
     route_decision: str             # "single" | "swarm" | "fallback"
