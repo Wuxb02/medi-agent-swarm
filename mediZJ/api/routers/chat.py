@@ -112,9 +112,21 @@ async def submit_answer(
     request: AnswerRequest,
     user: dict = Depends(get_current_user),
 ):
-    """提交问卷答案（用于交互式问诊）"""
+    """提交问卷答案（用于交互式问诊）
+
+    答案经会话级信号队列传递给正在 interrupt 挂起的 SSE 流，
+    由 SSE 内部用 Command(resume=...) 恢复图执行。
+    同时保留 QuestionnaireManager.resolve 用于幂等校验（未命中时降级）。
+    """
     if session_owner(request.session_id) != user["user_id"]:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    from mediZJ.api.services.session_runtime import put_answer
+
+    if put_answer(request.session_id, request.answers):
+        return AnswerResponse(success=True, message="答案已提交")
+
+    # 无活动信号队列（非流式/已清理）：回退到 QuestionnaireManager 兼容逻辑
     manager = get_manager(request.session_id)
     resolved = manager.resolve(request.questionnaire_id, request.answers)
     if resolved:

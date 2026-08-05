@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import type { QuestionnaireData } from '../../types'
 
 const props = defineProps<{
   questionnaire: QuestionnaireData
+  error?: string
 }>()
 
 const emit = defineEmits<{
@@ -14,6 +15,14 @@ const answers = reactive<Record<string, any>>({})
 const otherTexts = reactive<Record<string, string>>({})
 const submitted = ref(false)
 const activeTab = ref(0)
+
+// 提交失败时重置提交态，允许重试（保留已填答案）
+watch(
+  () => props.error,
+  (val) => {
+    if (val) submitted.value = false
+  },
+)
 
 const total = computed(() => props.questionnaire.questions.length)
 const currentQ = computed(() => props.questionnaire.questions[activeTab.value])
@@ -246,6 +255,22 @@ function handleSubmit() {
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
         </svg>
       </button>
+
+      <!-- 提交失败提示 -->
+      <div
+        v-if="error"
+        class="mt-2 text-xs text-red-600 flex items-center gap-1"
+      >
+        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="2"
+            d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+          />
+        </svg>
+        <span>{{ error }}</span>
+      </div>
     </div>
   </div>
 </template>

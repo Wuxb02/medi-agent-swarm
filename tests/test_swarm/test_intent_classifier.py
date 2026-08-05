@@ -145,14 +145,12 @@ class TestRetrieveMemoriesGate:
             coordinator,
             session_id="s1",
             question="你好",
-            intent_classifier=coordinator.intent_classifier,
+            intent="others",
         )
 
         coordinator.long_term_memory.search_similar_sessions.assert_not_awaited()
         coordinator.short_term_memory.get_recent_messages.assert_awaited_once()
-        assert result["intent"] == "others"
         assert result["skip_long_term_retrieval"] is True
-        assert result["chat_mode"] is True  # others 意图 → 闲聊直答模式
         assert result["similar_memories"] == []
 
     @pytest.mark.asyncio
@@ -164,12 +162,11 @@ class TestRetrieveMemoriesGate:
             coordinator,
             session_id="s2",
             question="我头痛",
-            intent_classifier=coordinator.intent_classifier,
+            intent="medical",
         )
 
         coordinator.long_term_memory.search_similar_sessions.assert_awaited_once()
         assert result["skip_long_term_retrieval"] is False
-        assert result["chat_mode"] is False  # medical 意图 → 正常任务分解
         assert result["similar_memories"] == [{"memory_id": "m1"}]
 
     @pytest.mark.asyncio
@@ -184,7 +181,7 @@ class TestRetrieveMemoriesGate:
             coordinator,
             session_id="s3",
             question="我头痛",
-            intent_classifier=coordinator.intent_classifier,
+            intent="medical",
         )
 
         assert result["skip_long_term_retrieval"] is False
@@ -274,10 +271,10 @@ class TestChatModeRouting:
         assert route_by_intent({"chat_mode": True, "intent": "others"}) == "chat_reply"
         # others 意图（仅 intent 字段）→ chat_reply
         assert route_by_intent({"intent": "others"}) == "chat_reply"
-        # medical 意图 → 正常流程 clarify
-        assert route_by_intent({"intent": "medical", "chat_mode": False}) == "clarify"
+        # medical 意图 → 澄清决策
+        assert route_by_intent({"intent": "medical", "chat_mode": False}) == "clarify_decide"
         # 缺省（无意图信息，如异常降级）→ 保守走正常流程
-        assert route_by_intent({}) == "clarify"
+        assert route_by_intent({}) == "clarify_decide"
 
 
 class TestEventType:

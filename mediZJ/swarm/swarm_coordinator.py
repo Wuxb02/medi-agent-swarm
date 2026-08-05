@@ -15,7 +15,7 @@ import json
 import re
 import uuid
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Callable
 from loguru import logger
 
 from mediZJ.core import LLMClient
@@ -43,7 +43,6 @@ except ImportError:
 
 # LangGraph 依赖
 try:
-    from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
     from mediZJ.lgraph.tool_registry import ToolRegistry
     from mediZJ.core.skill_loader import discover_skills
     from mediZJ.core.skill_models import SkillDefinition
@@ -181,7 +180,7 @@ class SwarmCoordinator:
             description="激活指定 Skill。激活后可以使用该 Skill 的工具。同一时间只能有一个 Skill 处于激活状态。",
         )
 
-        # 注册基础工具：question_for_user
+        # 注册基础工具：question_for_user（仅 LeadAgent 可见，Worker 不可调用）
         from mediZJ.core.tools.questionnaire import create_question_for_user_tool
 
         def _get_manager():
@@ -192,6 +191,7 @@ class SwarmCoordinator:
             name="question_for_user",
             func=q_func,
             description="向用户发送结构化问卷，收集诊断所需信息。",
+            allowed_agents=["lead_agent"],
         )
 
         logger.info(
@@ -221,16 +221,53 @@ class SwarmCoordinator:
 
         logger.info(f"[LangGraph] Processing (session={session_id}): {question[:300]}{'...' if len(question) > 300 else ''}")
 
-        # 构建并执行 SupervisorGraph
-        graph = build_supervisor_graph(
-            coordinator=self,
-            tool_registry=self._tool_registry,
-            event_callback=self.event_callback,
+        graph = self.build_graph(event_callback=self.event_callback)
+        config = {"configurable": {"thread_id": session_id}}
+        initial_state = self.build_initial_state(
+            question, context, session_id, start_time,
         )
 
-        config = {"configurable": {"thread_id": session_id}}
+        try:
+            result_state = await self.run_graph(graph, initial_state, config)
+        except Exception as e:
+            logger.error(f"[LangGraph] 图执行异常: {e}")
+            return {
+                "answer": f"系统处理异常: {e}",
+                "session_id": session_id,
+                "swarm_enabled": False,
+                "agents_involved": [],
+                "error": str(e),
+            }
 
-        initial_state = {
+        return self.compose_result(question, result_state, start_time, session_id)
+
+    # ===== SupervisorGraph 构建与执行（供 API 层流式路径复用）=====
+
+    def build_graph(self, event_callback: Optional[Callable] = None,
+                    hitl_enabled: bool = False):
+        """构建 SupervisorGraph（每次调用返回新图，含独立 MemorySaver）
+
+        Args:
+            event_callback: 事件回调（流式 SSE 推送）
+            hitl_enabled: 是否启用 HITL 问卷（流式路径 True，非流式 False）
+        """
+        from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
+        return build_supervisor_graph(
+            self,
+            self._tool_registry,
+            event_callback,
+            hitl_enabled=hitl_enabled,
+        )
+
+    def build_initial_state(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]],
+        session_id: str,
+        start_time: datetime,
+    ) -> Dict[str, Any]:
+        """构建 SupervisorState 初始状态"""
+        return {
             "question": question,
             "session_id": session_id,
             "context": context or {},
@@ -245,18 +282,43 @@ class SwarmCoordinator:
             "_swarm_finalized": False,
         }
 
-        try:
-            result_state = await graph.ainvoke(initial_state, config)
-        except Exception as e:
-            logger.error(f"[LangGraph] 图执行异常: {e}")
-            return {
-                "answer": f"系统处理异常: {e}",
-                "session_id": session_id,
-                "swarm_enabled": False,
-                "agents_involved": [],
-                "error": str(e),
-            }
+    async def run_graph(self, graph, initial_state: Dict[str, Any],
+                        config: Dict[str, Any], resume: Any = None) -> Dict[str, Any]:
+        """执行 SupervisorGraph；interrupt 挂起时返回 {"_interrupted": True}
 
+        Args:
+            resume: 非 None 时用 Command(resume=...) 从 interrupt 断点恢复
+        """
+        from langgraph.types import Command
+
+        try:
+            if resume is not None:
+                result = await graph.ainvoke(Command(resume=resume), config)
+            else:
+                result = await graph.ainvoke(initial_state, config)
+        except Exception as e:
+            # LangGraph 在 interrupt 时可能抛 GraphInterrupt（取决于版本/stream 模式）
+            if getattr(e, "__class__", None) and "GraphInterrupt" in type(e).__name__:
+                logger.info(
+                    f"[LangGraph] 图在 interrupt 处挂起 "
+                    f"(session={config.get('configurable', {}).get('thread_id')})"
+                )
+                return {"_interrupted": True}
+            raise
+
+        # ainvoke 正常返回但状态含 __interrupt__（LangGraph 1.x 行为）→ 同样视为挂起
+        if isinstance(result, dict) and "__interrupt__" in result:
+            logger.info(
+                f"[LangGraph] 图在 interrupt 处挂起 "
+                f"(session={config.get('configurable', {}).get('thread_id')})"
+            )
+            return {"_interrupted": True}
+
+        return result
+
+    def compose_result(self, question: str, result_state: Dict[str, Any],
+                       start_time: datetime, session_id: str) -> Dict[str, Any]:
+        """将 SupervisorState 结果组装为对外 result（含 LTM fire-and-forget）"""
         end_time = datetime.now()
 
         result = {

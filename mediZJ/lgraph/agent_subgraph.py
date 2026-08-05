@@ -4,22 +4,18 @@ AgentSubGraph — 替代 AgentLoop.run() 的 LangGraph 子图
 将 AgentLoop 的 Think-Act-Observe while 循环映射为 LangGraph 状态图：
 - prepare_messages → llm_call → 条件路由
   - tools → tool_execution → 回到 llm_call（循环）
-  - questionnaire → questionnaire_pause [interrupt] → 回到 llm_call
   - force_answer → force_answer → END
   - done → END
 
 每个 Worker Agent 独立运行一个 AgentSubGraph 实例。
+子图不含 interrupt/checkpoint：问卷澄清仅由主图 clarify 阶段（LeadAgent）负责。
 """
-import uuid
 import json
-import time
 import asyncio
 from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt
-from langgraph.checkpoint.memory import MemorySaver
 
 from langchain_core.messages import convert_to_openai_messages
 
@@ -47,7 +43,6 @@ def build_agent_subgraph(
     on_tool_step: Optional[Callable] = None,
     on_thinking_done: Optional[Callable] = None,
     on_content_token: Optional[Callable] = None,
-    on_questionnaire: Optional[Callable] = None,
 ) -> StateGraph:
     """
     为给定 Agent 构建 LangGraph 子图
@@ -61,7 +56,6 @@ def build_agent_subgraph(
         on_tool_step: 工具步骤回调
         on_thinking_done: 推理轮次结束回调
         on_content_token: 内容 token 回调
-        on_questionnaire: 问卷事件回调
 
     Returns:
         编译后的 CompiledStateGraph
@@ -80,7 +74,6 @@ def build_agent_subgraph(
         tool_registry=tool_registry,
         validator=validator,
         on_tool_step=on_tool_step,
-        on_questionnaire=on_questionnaire,
     )
 
     # ===== 节点函数 =====
@@ -168,7 +161,9 @@ def build_agent_subgraph(
 
         # 根据 active_skill 过滤可见工具
         active_skill = state.get("active_skill")
-        visible_tools = tool_registry.get_visible_tools(active_skill)
+        visible_tools = tool_registry.get_visible_tools(
+            active_skill, agent_id=state.get("agent_id"),
+        )
 
         messages = state.get("messages", [])
 
@@ -375,53 +370,6 @@ def build_agent_subgraph(
             "message_count": msg_count,
         }
 
-    async def _questionnaire_pause_node(state: AgentState) -> dict:
-        """问卷中断节点：使用 LangGraph interrupt() 挂起等待用户回答"""
-        pending = state.get("questionnaire_pending", {})
-        if not pending:
-            logger.warning("questionnaire_pause 节点被调用但没有 pending 问卷数据")
-            return {"questionnaire_pending": None}
-
-        questionnaire_id = pending.get("id", str(uuid.uuid4()))
-        questionnaire_data = pending.get("data", {})
-
-        logger.info(f"[AgentSubGraph] 问卷中断: {questionnaire_id}")
-
-        # interrupt() 挂起图执行，返回用户答案
-        # 用户答案通过 Command(resume=...) 注入
-        user_answer = interrupt({
-            "type": "questionnaire",
-            "questionnaire_id": questionnaire_id,
-            "questionnaire_data": questionnaire_data,
-            "source_agent": state.get("agent_id", ""),
-        })
-
-        # 格式化用户答案为 LLM 可读文本
-        questions_ref = pending.get("_questions_ref", [])
-        formatted_text = _format_answers(questions_ref, user_answer)
-
-        logger.info(f"问卷 {questionnaire_id} 收到回答: {formatted_text[:100]}...")
-
-        # 用工具执行时记录的真实 tool_call_id 生成配对 tool 消息，
-        # 确保消息历史中 assistant.tool_calls 都有对应 tool 响应
-        tool_call_id = pending.get("tool_call_id") or f"questionnaire_{questionnaire_id}"
-
-        # 将用户回答作为工具结果追加到消息历史（仅返回新增消息，由 add_messages reducer 合并）
-        return {
-            "questionnaire_pending": None,
-            "questionnaire_answers": user_answer,
-            "messages": [{
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "name": "question_for_user",
-                "content": json.dumps({
-                    "success": True,
-                    "answers": user_answer,
-                    "formatted_text": formatted_text,
-                }, ensure_ascii=False),
-            }],
-        }
-
     # ===== 条件路由函数 =====
 
     def _route_after_llm(state: AgentState) -> str:
@@ -457,24 +405,19 @@ def build_agent_subgraph(
             # 无 tool_calls → 最终回答
             return "done"
 
-        # 检查是否达到最大工具调用次数（activate_skill / question_for_user 不计入）
+        # 检查是否达到最大工具调用次数（activate_skill 不计入）
         non_activate = [tc for tc in tool_calls
-                        if _get_tc_name(tc) not in ("activate_skill", "question_for_user")]
+                        if _get_tc_name(tc) != "activate_skill"]
         tool_call_count = state.get("tool_call_count", 0)
         if non_activate and tool_call_count >= max_tool_calls:
             logger.warning(f"达到最大工具调用次数 {max_tool_calls}，强制收尾")
             return "force_answer"
 
-        # 全部工具调用（含 question_for_user）统一走 tool_execution 节点，
-        # 由工具执行结果检测 needs_user_input 进入问卷暂停（tool 消息必须与
-        # assistant.tool_calls 一一配对，跳过执行会留下未配对的 tool_calls）
+        # 工具调用统一走 tool_execution 节点
         return "tool_execution"
 
     def _route_after_tool(state: AgentState) -> str:
         """工具执行后的路由决策"""
-        if state.get("questionnaire_pending"):
-            return "questionnaire_pause"
-
         if state.get("completed"):
             return "done"
 
@@ -487,12 +430,6 @@ def build_agent_subgraph(
         # 回到 LLM 调用继续循环
         return "llm_call"
 
-    def _route_after_questionnaire(state: AgentState) -> str:
-        """问卷回答后的路由"""
-        if state.get("completed"):
-            return "done"
-        return "llm_call"
-
     # ===== 构建图 =====
 
     builder = StateGraph(AgentState)
@@ -503,7 +440,6 @@ def build_agent_subgraph(
     builder.add_node("tool_execution", _tool_execution_node)
     builder.add_node("force_answer", _force_answer_node)
     builder.add_node("finalize_answer", _finalize_answer_node)
-    builder.add_node("questionnaire_pause", _questionnaire_pause_node)
 
     # 边连接
     builder.add_edge(START, "prepare_messages")
@@ -525,19 +461,8 @@ def build_agent_subgraph(
         "tool_execution",
         _route_after_tool,
         {
-            "questionnaire_pause": "questionnaire_pause",
             "llm_call": "llm_call",
             "force_answer": "force_answer",
-            "done": "finalize_answer",
-        }
-    )
-
-    # 问卷暂停后回到 LLM
-    builder.add_conditional_edges(
-        "questionnaire_pause",
-        _route_after_questionnaire,
-        {
-            "llm_call": "llm_call",
             "done": "finalize_answer",
         }
     )
@@ -548,10 +473,8 @@ def build_agent_subgraph(
     # 强制收尾后结束
     builder.add_edge("force_answer", END)
 
-    # 编译
-    return builder.compile(
-        checkpointer=MemorySaver(),
-    )
+    # 编译（子图无 interrupt，无需 checkpointer —— 按需引入 checkpoint）
+    return builder.compile()
 
 
 # ===== 辅助函数 =====

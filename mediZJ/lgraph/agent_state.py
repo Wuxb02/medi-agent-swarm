@@ -41,10 +41,6 @@ class AgentState(TypedDict, total=False):
     active_skill: Optional[str]     # 当前激活的 Skill 名称，None 表示未激活
     compat_mode: bool               # 兼容模式（平铺所有工具）
 
-    # === 问卷控制（Human-in-the-Loop） ===
-    questionnaire_pending: Optional[Dict[str, Any]]   # 待处理的问卷 {id, data}
-    questionnaire_answers: Optional[Dict[str, Any]]   # 用户回答
-
     # === 结果收集 ===
     final_answer: str               # 最终回答文本
     references: List[Dict]          # 知识库引用列表（doc_id 去重）

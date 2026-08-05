@@ -11,7 +11,7 @@
 
 - **🌐 Web 前端界面**: Vue 3 + FastAPI 全栈架构，支持智能问答、知识库浏览、会话管理、仪表盘 ✅
 - **📡 流式响应**: 实时推送 Agent 执行过程，可视化 Agent 参与情况 ✅
-- **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），实现"先问后诊" ✅
+- **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），基于 LangGraph interrupt/Command 挂起恢复，支持 **LLM 自决多轮追问**（硬上限 3 轮），实现"先问后诊" ✅
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
@@ -22,6 +22,8 @@
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 - **🔍 Trace 追踪**: 全链路请求追踪，六种 Span 类型（TRACE/STAGE/AGENT/ITERATION/LLM/TOOL），瀑布图可视化，per-agent/tool/llm 聚合统计 ✅
 - **🚦 并发安全**: per-session 请求互斥与记忆写锁、个人档案按 user_id 隔离、LLM 全局并发限流 + 共享连接池、阻塞调用全部下线程，支持多用户同时提问 ✅
+- **🔐 免密登录**: 多用户身份隔离（SQLite 随机会话令牌 + Cookie），个人档案按 user_id 隔离，非登录用户强制跳转个人中心 ✅
+- **🖼️ 多模态图片**: 图片上传 → Vision 模型（VISION_* 配置）解析 OCR 文本 → 注入 Agent 子任务上下文 ✅
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -67,7 +69,7 @@
    - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
-   - 短期记忆：会话级对话历史（10条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
+   - 短期记忆：会话级对话历史（retrieve 阶段取最近 10 条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
    - 个人档案：SQLite `profiles` 表（Markdown 文本整体入库），通过 AgentLoop 注入为 system message，所有 Agent 共享
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
@@ -105,7 +107,7 @@ class SkillDefinition:
 
 ## 🩺 交互式问诊（question_for_user）
 
-系统在将用户问题分发给 Worker Agent 之前，由 **LeadAgent 先执行信息澄清阶段**，通过结构化问卷收集用户背景信息，实现"先问后诊"。
+系统在将用户问题分发给 Worker Agent 之前，由 **LeadAgent 先执行信息澄清阶段**，通过结构化问卷收集用户背景信息，实现"先问后诊"。澄清基于 **LangGraph interrupt() 打断 + Command(resume) 恢复**，图执行在问卷处挂起、用户提交答案后恢复，**checkpoint 按需引入**（仅流式路径挂载 MemorySaver）。
 
 ### 工作流程
 
@@ -113,35 +115,46 @@ class SkillDefinition:
 用户输入: "我最近头疼"
     │
     ▼
-LeadAgent.clarify()
+意图识别（intent_classify 节点）
+    ├─ others（寒暄/无关）→ chat_reply 闲聊直答
+    └─ medical → clarify 澄清流程
+            │
+            ▼
+clarify_decide 节点（每轮）
+    ├─ 达到 3 轮硬上限？→ 汇总已收集信息，结束澄清
+    ├─ LLM 判断：无需更多信息 → 结束澄清
+    └─ LLM 调用 question_for_user → 构建 XML 问卷
+            │
+            ├─ 发射 AGENT_QUESTIONNAIRE 事件 → SSE 推送到前端
+            │
+            ▼
+clarify_ask 节点（interrupt 挂起）←─ ─ ─ ─ ─ ─ ─ ─ ┐
+            │                                          │
+            ▼                                          │
+前端 QuestionnaireCard 渲染                          │
+  ┌──────────────────────┐                            │
+  │  年龄 | 性别 | 症状    │  ← Tab 切换式             │
+  │ ┌──────────────────┐ │                            │
+  │ │ 症状持续了多久？   │ │                            │
+  │ │ ○ 不到1天         │ │                            │
+  │ │ ● 1-3天          │ │                            │
+  │ │ ○ 1周左右        │ │                            │
+  │ │ 其他：[____]      │ │  ← 自由输入框              │
+  │ └──────────────────┘ │                            │
+  │    < 上一题  ●●○  下一题 >                         │
+  └──────────────────────┘                            │
+    │                                                 │
+    ├─ 用户填写并提交                                  │
+    │                                                 │
+    ├─ POST /api/chat/answer ── 答案入信号队列 ────────┘
+    │                                                 │
+    ▼                                                 │
+Command(resume=answers) 恢复图 → clarify_ask 返回答案 ──┘（回到 clarify_decide）
     │
-    ├─ LLM 判断: 需要更多信息（症状细节、持续时间、病史等）
+    ├─ LLM 判定需继续追问？→ 再次发第二份问卷（多轮，最多 3 轮）
     │
-    ├─ 调用 question_for_user 工具 → 构建 XML 问卷
-    │
-    ├─ 发射 AGENT_QUESTIONNAIRE 事件 → SSE 推送到前端
-    │
-    ├─ AgentLoop 暂停（await Future）←─ ─ ─ ─ ─ ─ ─ ┐
-    │                                           │
-    ▼                                           │
-前端 QuestionnaireCard 渲染                       │
-  ┌──────────────────────┐                        │
-  │  年龄 | 性别 | 症状    │  ← Tab 切换式          │
-  │ ┌──────────────────┐ │                        │
-  │ │ 症状持续了多久？   │ │                        │
-  │ │ ○ 不到1天         │ │                        │
-  │ │ ● 1-3天          │ │                        │
-  │ │ ○ 1周左右        │ │                        │
-  │ │ 其他：[____]      │ │  ← 自由输入框           │
-  │ └──────────────────┘ │                        │
-  │    < 上一题  ●●○  下一题 >                       │
-  └──────────────────────┘                        │
-    │                                             │
-    ├─ 用户填写并提交                               │
-    │                                             │
-    ├─ POST /api/chat/answer ──── resolve Future ─┘
-    │
-    ├─ AgentLoop 恢复，收集到的信息作为 tool_result
+    ▼（澄清完成，携带 collected_info）
+记忆检索（retrieve_memories，先澄清再检索）
     │
     ▼
 LeadAgent.assess_and_decompose(问题 + collected_info)
@@ -154,11 +167,14 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 | 组件 | 文件 | 职责 |
 |------|------|------|
 | **question_for_user 工具** | `mediZJ/core/tools/questionnaire.py` | XML 问卷解析 + 结构化数据构建 |
-| **QuestionnaireManager** | `mediZJ/core/questionnaire_manager.py` | asyncio.Future 暂停/恢复管理 |
-| **LeadAgent.clarify()** | `mediZJ/swarm/lead_agent.py` | LLM tool calling 收集信息 |
-| **AGENT_QUESTIONNAIRE 事件** | `mediZJ/swarm/events.py` | 向前端推送问卷 |
-| **QuestionnaireCard 组件** | `frontend/src/components/chat/QuestionnaireCard.vue` | Tab 切换式问卷 UI |
-| **答案提交端点** | `mediZJ/api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 |
+| **clarify_decide 节点** | `mediZJ/lgraph/supervisor_graph.py` | 每轮 LLM 判定是否追问，发问卷、存 pending payload（硬上限 3 轮） |
+| **clarify_ask 节点** | `mediZJ/lgraph/supervisor_graph.py` | 唯一 `interrupt()` 挂起点，resume 返回用户答案 |
+| **SessionRuntime** | `mediZJ/api/services/session_runtime.py` | 缓存 graph + MemorySaver，跨请求复用完成恢复 |
+| **SSE 状态机** | `mediZJ/api/services/chat_service.py` | `while True + phase` 循环，支持 0/1/多次 interrupt 挂起恢复 |
+| **AGENT_QUESTIONNAIRE 事件** | `mediZJ/swarm/events.py` | 向前端推送问卷（另有 AGENT_QUESTIONNAIRE_CANCELLED 取消事件） |
+| **QuestionnaireCard 组件** | `frontend/src/components/chat/QuestionnaireCard.vue` | Tab 切换式问卷 UI（含提交失败错误态） |
+| **答案提交端点** | `mediZJ/api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 → 入信号队列 |
+| **QuestionnaireManager** | `mediZJ/core/questionnaire_manager.py` | 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担） |
 
 ### XML 问卷格式
 
@@ -191,17 +207,22 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 
 ### 关键设计
 
-1. **LeadAgent 统一收集**：澄清阶段仅在 LeadAgent 层面执行，Worker Agent 不再自行提问
-2. **暂停/恢复机制**：基于 `asyncio.Future`，工具返回 `needs_user_input` 标记后 AgentLoop 自动 await，前端提交后 resolve 继续
-3. **上下文注入**：clarify 和 assess 阶段自动注入用户档案（仅已确认信息）+ 近期对话 + 历史相似案例，避免重复提问已有信息
-4. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
-5. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
-6. **最多 2 轮澄清**：LeadAgent 最多进行 2 轮问卷交互，避免无限循环
+1. **仅 LeadAgent 澄清**：澄清阶段仅在 LeadAgent 层面执行，`question_for_user` 工具通过 `allowed_agents=["lead_agent"]` 权限收口，Worker Agent 不可见、不可调用
+2. **interrupt 挂起/Command 恢复**：澄清基于 LangGraph `interrupt()` 打断 + `Command(resume=...)` 恢复，替代旧版 asyncio.Future 阻塞；checkpoint 按需引入（仅流式路径挂载 MemorySaver）
+3. **decide/ask 双节点多轮循环**：`_clarify_decide`（LLM 判定是否追问）+ `_clarify_ask`（唯一 interrupt 挂起点）构成环，每轮 resume 只重跑 ask（无 LLM 重放）；**LLM 自决追问 + 硬上限 3 轮**，第 4 次 LLM 不会被调用
+4. **SSE 状态机**：`_chat_stream_impl` 用 `while True + phase` 统一管理 0/1/多次 interrupt——挂起时等待答案、收到后 resume、可能再次挂起，resume 后正常完成则收尾（不卡死）
+5. **先澄清再检索**：意图分类独立节点提前路由闲聊/澄清；记忆检索（retrieve_memories）后移到 clarify 完成后、任务分解之前
+6. **上下文注入**：clarify 决策每轮注入用户档案 + 近期对话 + 历史相似案例 + 已收集答案，避免重复提问已有信息；收集的信息打包为 collected_info 注入任务分解
+7. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
+8. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
+9. **提交失败保护**：前端仅 POST 成功才清空问卷卡片；失败保留卡片 + 错误提示，用户可重试（避免后端一直等答案、SSE 挂起导致会话卡死）
 
 
 ## 🚀 从零开始运行
 
 ### 1. 环境准备
+
+需要 Python 3.10+（建议 3.12）。
 
 ```bash
 conda create -n medix-swarm python=3.12 -y
@@ -212,7 +233,11 @@ cd medix-agent-swarm
 ### 2. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+# 方式 1: uv（推荐，lockfile 锁定）
+uv sync
+
+# 方式 2: pip + conda 环境
+pip install -r requirements.txt  # requirements.txt 不在仓库中，需按 pyproject.toml 手动安装
 ```
 
 ### 3. 配置 API
@@ -232,6 +257,31 @@ LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL_NAME=your-model-name
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
+
+# 并发与超时配置
+LLM_MAX_CONCURRENCY=16
+LLM_TIMEOUT=60
+REQUEST_TIMEOUT=300
+
+# 登录配置（免密登录，仅适用于本地或可信网络）
+MEDIZJ_ADMIN_USERNAME=admin
+AUTH_SESSION_DAYS=7
+AUTH_COOKIE_SECURE=false
+
+# Embedding 模型
+EMBEDDING_MODEL_NAME=BAAI/bge-small-zh-v1.5
+
+# Vision 多模态模型配置（可选，用于图片解析；未设置则回退到主 LLM）
+VISION_MODEL_NAME=gpt-4o
+VISION_API_KEY=
+VISION_BASE_URL=
+VISION_TEMPERATURE=0.3
+VISION_MAX_TOKENS=2048
+
+# AB Test Baseline 配置（同模型无包装，用于对比评估）
+BASELINE_LLM_API_KEY=your_baseline_api_key_here
+BASELINE_LLM_BASE_URL=https://api.openai.com/v1
+BASELINE_LLM_MODEL_NAME=gpt-4o
 
 # Mem0 长期记忆配置（可选）
 MEM0_API_KEY=m0-your-api-key-here
@@ -262,13 +312,13 @@ python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床�
 集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
 
 ```bash
-# 单元测试（289 个，无需外部服务，秒级完成）
+# 单元测试（329 个，无需外部服务，秒级完成）
 pytest tests/ -m "not integration"
 
 # 集成测试（20 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
 pytest tests/ -m "integration" --run-integration
 
-# 全部测试
+# 全部测试（349 个）
 pytest tests/ --run-integration
 
 # 覆盖率报告
@@ -304,15 +354,24 @@ medix-agent-swarm/
 │   ├── main.py                          # CLI 入口
 │   ├── api_main.py                      # Web 服务入口（uvicorn）
 │   ├── api/                             # FastAPI 后端 API 层
-│   │   ├── main.py                      # FastAPI 应用入口、CORS
+│   │   ├── main.py                      # FastAPI 应用入口、CORS、路由挂载
+│   │   ├── auth.py                      # 免密登录认证（SQLite 随机会话令牌 + Cookie）
 │   │   ├── routers/
-│   │   │   ├── chat.py                  # /api/chat 问答接口（含流式）
+│   │   │   ├── chat.py                  # /api/chat 问答接口（含流式、图片上传）
 │   │   │   ├── knowledge.py             # /api/knowledge 知识库检索
 │   │   │   ├── sessions.py              # /api/sessions 会话管理
 │   │   │   ├── dashboard.py             # /api/dashboard 仪表盘 + 健康检查
-│   │   │   └── personal.py              # /api/personal 个人健康档案
+│   │   │   ├── personal.py              # /api/personal 个人健康档案
+│   │   │   ├── traces.py                # /api/traces 追踪查询
+│   │   │   └── auth.py                  # /api/auth 登录/登出/当前用户
 │   │   ├── models/                      # Pydantic 请求/响应模型
 │   │   ├── services/                    # 业务逻辑封装
+│   │   │   ├── chat_service.py          # 流式状态机（while True + phase）
+│   │   │   ├── session_runtime.py       # 会话级 graph + MemorySaver 缓存
+│   │   │   ├── image_analyzer.py        # Vision 多模态图片解析
+│   │   │   ├── dashboard_service.py     # 仪表盘统计
+│   │   │   ├── knowledge_service.py     # 知识库服务
+│   │   │   └── session_service.py       # 会话服务
 │   │   └── dependencies.py             # 依赖注入
 │   ├── agents/                          # Agent 实现
 │   │   ├── base_agent.py                # Agent 基类
@@ -321,13 +380,15 @@ medix-agent-swarm/
 │   │   ├── research_agent.py            # 医学研究 Agent
 │   │   └── skill_registry_mixin.py      # Skill 注册混入
 │   ├── core/                            # 核心引擎
-│   │   ├── agent_loop.py                # Agent Loop（集成约束验证，动态工具刷新，用户档案注入，问卷暂停/恢复）
-│   │   ├── llm_client.py                # LLM 客户端
+│   │   ├── agent_loop.py                # Agent Loop（集成约束验证，动态工具刷新，用户档案注入）
+│   │   ├── llm_client.py                # LLM 客户端（全局并发信号量 + 共享连接池）
+│   │   ├── circuit_breaker.py           # 进程级熔断器（连续失败断开）
+│   │   ├── stream_token_router.py       # 流式 token 路由
 │   │   ├── prompt_loader.py             # Jinja2 Prompt 模板加载器
 │   │   ├── skill_loader.py              # 动态加载 Skills（支持多函数加载、指令提取）
 │   │   ├── skill_registry.py            # Skill 注册表（双层注册、compat_mode 自动检测）
 │   │   ├── skill_models.py              # SkillDefinition 数据模型
-│   │   ├── questionnaire_manager.py     # 问卷 Future 暂停/恢复管理器
+│   │   ├── questionnaire_manager.py     # 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担）
 │   │   ├── tools/                       # 统一基础工具目录
 │   │   │   ├── __init__.py              # 统一导出
 │   │   │   ├── activate_skill.py        # activate_skill 工具工厂
@@ -345,27 +406,38 @@ medix-agent-swarm/
 │   │   │   ├── lead_clarify_user.j2     # LeadAgent 澄清阶段用户提示词
 │   │   │   ├── synthesis.j2
 │   │   │   ├── assessment_user.j2
-│   │   │   └── timeout_fallback.j2
+│   │   │   ├── timeout_fallback.j2
+│   │   │   ├── chat_reply.j2            # 闲聊直答系统提示词
+│   │   │   └── chat_reply_user.j2       # 闲聊直答用户提示词
 │   │   ├── research/                    # 研究模块提示词
 │   │   │   ├── evidence_synthesis.j2
 │   │   │   └── query_planning.j2
 │   │   ├── memory/                      # 记忆相关提示词
 │   │   │   ├── compression_system.j2
 │   │   │   ├── compression_user.j2
-│   │   │   └── quality_eval.j2          # 质量评估 + 信息分类
+│   │   │   ├── quality_eval.j2          # 质量评估 + 信息分类
+│   │   │   └── intent_gate.j2           # 意图识别门控
 │   │   ├── agent_loop/                  # Agent Loop 控制消息
 │   │   │   ├── tool_limit.j2
 │   │   │   └── force_answer.j2
-│   │   └── validation/                  # 输出验证模板
-│   │       ├── disclaimer.j2
-│   │       ├── high_risk_warning.j2
-│   │       ├── truncation_notice.j2
-│   │       └── swarm_disclaimer.j2
+│   │   ├── validation/                  # 输出验证模板
+│   │   │   ├── high_risk_warning.j2
+│   │   │   └── truncation_notice.j2
+│   │   └── _language_rule.j2            # 统一中文语言规则
 │   ├── swarm/                           # Swarm 协调器
-│   │   ├── events.py                    # 事件驱动通信（含 AGENT_QUESTIONNAIRE）
-│   │   ├── lead_agent.py                # 信息澄清 + 任务分解 + 结果汇总
+│   │   ├── events.py                    # 事件驱动通信（16 种事件类型，含 AGENT_QUESTIONNAIRE）
+│   │   ├── intent_classifier.py         # 意图识别（medical / others，失败降级 medical）
+│   │   ├── lead_agent.py                # 闲聊直答 + 澄清决策 + 任务分解 + 结果汇总
 │   │   ├── shared_context.py            # 共享环境（信息素）
 │   │   └── swarm_coordinator.py         # 智能路由（clarify → decompose → route）
+│   ├── lgraph/                          # LangGraph 状态图（主链路）
+│   │   ├── supervisor_graph.py          # SupervisorGraph：intent_classify → (chat_reply | clarify_decide ⇄ clarify_ask) → retrieve_memories → assess_decompose → route
+│   │   ├── agent_subgraph.py            # AgentSubGraph：Worker Think-Act-Observe 子图
+│   │   ├── stream_adapter.py            # 流式输出适配器
+│   │   ├── supervisor_state.py          # 主图状态（含 clarify_rounds / clarify_pending）
+│   │   ├── agent_state.py               # Worker 子图状态
+│   │   ├── tool_registry.py             # 工具注册中心（allowed_agents 权限收口）
+│   │   └── tool_executor.py             # 工具执行节点（约束验证 + references 收集）
 │   ├── trace/                           # Agent 追踪系统
 │   │   ├── __init__.py                  # 模块导出
 │   │   ├── models.py                    # Span 数据模型（6 种类型 + 4 类属性）
@@ -379,8 +451,14 @@ medix-agent-swarm/
 │   │   ├── short_term.py                # 短期记忆（单例，写时增量压缩 + 子会话隔离）
 │   │   ├── personal_profile.py          # 个人健康档案（SQLite profiles 表）
 │   │   ├── session_summary.py           # 会话总结
+│   │   ├── session_db.py                # 会话数据库（sessions + messages 表）
+│   │   ├── session_vector_store.py      # Milvus 会话向量索引
 │   │   ├── entropy_manager.py           # 熵管理器（向量语义去重 + LLM 摘要 + 截断降级）
-│   │   └── embedding.py                 # 共享 embedding 工具（模型加载 + 余弦相似度）
+│   │   ├── embedding.py                 # 共享 embedding 工具（模型加载 + 余弦相似度）
+│   │   └── scripts/                     # 初始化/迁移脚本
+│   │       ├── init_session_db.py
+│   │       ├── clear_all_data.py
+│   │       └── migrate_profiles_to_db.py
 │   ├── constraints/                     # 约束系统
 │   │   ├── agent_constraints.yaml       # Agent 能力边界
 │   │   ├── swarm_constraints.yaml       # Swarm 协作规则
@@ -389,13 +467,18 @@ medix-agent-swarm/
 │   │   └── auto_fixer.py                # 自动修复器
 │   ├── knowledge/                       # Milvus 知识库
 │   │   ├── milvus_kb.py                 # 知识库封装（CRUD + 语义搜索）
+│   │   ├── entity_index.py              # 医学实体倒排索引
 │   │   ├── data/documents/              # 医学知识文档
 │   │   └── scripts/
 │   │       ├── import_hardcoded_data.py # 批量导入文档
-│   │       └── deduplicate.py           # 数据去重脚本
+│   │       ├── deduplicate.py           # 数据去重脚本
+│   │       ├── gen_part1_lifestyle_symptom.py  # 生成生活方式/症状文档
+│   │       ├── gen_part2_icd10.py             # 生成 ICD-10 文档
+│   │       └── gen_part3_guidelines.py        # 生成临床指南文档
 │   ├── research/                        # DeepResearch 模块
 │   │   ├── deep_research_workflow.py
 │   │   ├── evidence_synthesizer.py
+│   │   ├── knowledge_base.py
 │   │   └── web_search.py
 │   └── eval/                            # 评估框架
 │       ├── runner.py                    # 评估统一入口
@@ -406,10 +489,12 @@ medix-agent-swarm/
 ├── frontend/                            # Vue 3 前端项目
 │   ├── src/
 │   │   ├── views/                       # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView
-│   │   ├── components/                  # 组件：chat/, agents/, knowledge/, dashboard/, layout/, trace/
-│   │   ├── stores/                      # Pinia 状态管理
-│   │   ├── api/                         # API 调用层（chat, knowledge, sessions, dashboard, personal, trace）
+│   │   ├── components/                  # 组件：agents/, chat/, layout/, trace/
+│   │   ├── stores/                      # Pinia 状态管理（chat, auth, dashboard, knowledge, personal, trace）
+│   │   ├── api/                         # API 调用层（auth, chat, dashboard, image, knowledge, personal, session, trace）
 │   │   ├── composables/                 # useSSE (流式), useMarkdown
+│   │   ├── utils/                       # eventAggregator, formatToolResult
+│   │   ├── router/                      # Vue Router 配置（含免密登录守卫）
 │   │   └── types/                       # TypeScript 类型定义
 │   ├── vite.config.ts
 │   └── package.json
@@ -417,21 +502,23 @@ medix-agent-swarm/
 ├── tests/                               # 测试套件（pytest 现代化）
 │   ├── conftest.py                      # 共享 fixtures（mock LLM、环境变量、临时目录）
 │   ├── helpers.py                       # 测试辅助函数
-│   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager
+│   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager, circuit_breaker, stream_token_router
 │   ├── test_agents/                     # Agent：能力标签、工具注册
-│   ├── test_swarm/                      # Swarm：events, shared_context
+│   ├── test_swarm/                      # Swarm：events, shared_context, intent_classifier, tool_executor, supervisor_clarify
 │   ├── test_memory/                     # 记忆：short_term（含并发安全）, entropy_manager, personal_profile（用户隔离）
-│   ├── test_api/                        # API 层：chat_service 并发互斥
+│   ├── test_api/                        # API 层：chat_service 并发互斥、auth 登录
 │   ├── test_constraints/                # 约束验证
 │   ├── test_validation/                 # 自动修复
 │   ├── test_trace/                      # Trace：models, context, collector, storage
+│   ├── test_knowledge/                  # 知识库：entity_index
 │   ├── test_research/                   # 深度研究：evidence_synthesizer
 │   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
 │
 ├── scripts/                             # 运维脚本
 │   └── stress_chat.py                   # 并发压测脚本（asyncio + httpx，支持干跑模式）
 │
-├── .claude/skills/                      # Claude Code Skills (10个)│   ├── search-knowledge/                # 搜索医学知识库
+├── .claude/skills/                      # Claude Code Skills (10个)
+│   ├── search-knowledge/                # 搜索医学知识库
 │   ├── assess-risk/                     # 风险评估
 │   ├── analyze-symptoms/                # 症状分析
 │   ├── recommend-lifestyle/             # 生活方式建议
@@ -446,6 +533,7 @@ medix-agent-swarm/
 ├── logs/                                # 日志
 ├── pyproject.toml                       # 项目配置和依赖
 ├── CLAUDE.md                            # Claude Code 项目指南
+├── AGENTS.md                            # Agent 指南
 └── .env                                 # 环境变量配置
 ```
 
@@ -471,6 +559,7 @@ medix-agent-swarm/
 | `deep_research` | 深度研究 | 网络搜索 | 最新进展 |
 | `search_history` | 搜索会话历史 | 短期记忆 | 当前会话上下文 |
 | `search_similar_cases` | 搜索相似案例 | 长期记忆 | 跨会话经验 |
+| `render_markdown_html` | Markdown/HTML 互转 | 工具内置 | 文档渲染 |
 
 ### 3个专业 Agent（自主选择 Skills）
 
@@ -489,23 +578,23 @@ medix-agent-swarm/
 - **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `clinical_guideline`, `deep_research`
 
-### 2个协调 Agent
+### 协调 Agent
 
-- **LeadAgent**: 信息澄清 + 任务分解 + 结果汇总（独占历史上下文）
-- **SwarmCoordinator**: 记忆检索 + 路由分发 + 子会话合并（路由由 LeadAgent 评估自动决定）
+- **LeadAgent**: 闲聊直答（others 意图）+ 信息澄清 + 任务分解 + 结果汇总（独占历史上下文）
+- **SwarmCoordinator**: 记忆检索 + 意图分类 + 路由分发 + 子会话合并（路由由 LeadAgent 评估自动决定）
 
 ## 🌐 Web 界面
 
-系统提供基于 Vue 3 + FastAPI 的 Web 界面，支持以下功能模块：
+系统提供基于 Vue 3 + FastAPI 的 Web 界面，支持以下功能模块（首访需在个人中心完成免密登录，所有请求经 Cookie 会话令牌鉴权）：
 
 | 页面 | 功能 | 路由 |
 |------|------|------|
 | **智能问答** | 聊天式问答，实时展示 Agent 协作过程，Markdown 渲染 | `/chat` |
 | **知识库** | 医学知识语义搜索、文档管理（增删改查）、文件上传、chunk 查看 | `/knowledge` |
-| **历史会话** | 会话列表查看、恢复、删除 | `/sessions` |
+| **历史会话** | 会话列表在侧边栏展示：查看/恢复、删除、新建 | 侧边栏 |
 | **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
-| **个人中心** | 查看/编辑个人健康档案（年龄、性别、病史等） | `/personal` |
-| **Trace 追踪** | 请求追踪、Agent 耗时分析、LLM 调用详情、工具调用统计 | `/trace` |
+| **个人中心** | 免密登录 + 查看/编辑个人健康档案（年龄、性别、病史等） | `/personal` |
+| **Trace 追踪** | 请求追踪、Agent 耗时分析、LLM 调用详情、工具调用统计 | `/traces`、`/trace/:traceId` |
 
 ### Web 架构
 
@@ -532,7 +621,11 @@ SharedContext.on_event_callback → 事件推送
 | POST | `/api/chat` | 非流式问答 |
 | POST | `/api/chat/stream` | 流式问答（换行分隔 JSON） |
 | POST | `/api/chat/answer` | 提交问卷答案（交互式问诊） |
+| POST | `/api/chat/upload-image` | 上传图片（Vision 解析） |
 | GET | `/api/chat/history/{session_id}` | 获取会话历史 |
+| POST | `/api/auth/login` | 免密登录 |
+| POST | `/api/auth/logout` | 登出 |
+| GET | `/api/auth/me` | 当前用户 |
 | POST | `/api/knowledge/search` | 知识库搜索（去重，返回完整文档） |
 | GET | `/api/knowledge/types` | 知识库类型列表 |
 | GET | `/api/knowledge/documents` | 文档列表 |
@@ -544,13 +637,18 @@ SharedContext.on_event_callback → 事件推送
 | GET | `/api/sessions/{session_id}` | 会话详情 |
 | DELETE | `/api/sessions/{session_id}` | 删除会话 |
 | GET | `/api/dashboard/stats` | 仪表盘统计 |
+| GET | `/api/health` | 健康检查 |
 | GET | `/api/personal` | 获取个人健康档案 |
 | PUT | `/api/personal` | 更新个人健康档案 |
-| GET | `/api/health` | 健康检查 |
+| POST | `/api/personal/pending/confirm` | 确认待确认档案项 |
+| POST | `/api/personal/pending/dismiss` | 忽略待确认档案项 |
+| GET | `/api/personal/records` | 获取档案记录 |
+| PUT | `/api/personal/records` | 更新档案记录 |
 | GET | `/api/traces` | Trace 列表 |
 | GET | `/api/traces/{trace_id}` | Trace 详情 |
 | GET | `/api/traces/{trace_id}/spans` | Trace Span 列表 |
 | GET | `/api/traces/{trace_id}/waterfall` | 瀑布图数据 |
+| GET | `/api/traces/{trace_id}/stages` | 阶段数据 |
 | GET | `/api/traces/stats/agents` | Agent 耗时统计 |
 | GET | `/api/traces/stats/tools` | 工具调用统计 |
 | GET | `/api/traces/stats/llm` | LLM 调用统计 |
@@ -566,9 +664,9 @@ SharedContext.on_event_callback → 事件推送
 
 ```env
 # LLM 配置（OpenAI 兼容 API）
-LLM_API_KEY=your-llm-api-key
-LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-LLM_MODEL_NAME=your-model
+LLM_API_KEY=your_api_key_here
+LLM_BASE_URL=https://api.example.com/v1
+LLM_MODEL_NAME=gpt-4o
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
@@ -577,8 +675,28 @@ LLM_MAX_CONCURRENCY=16   # LLM 全局并发上限（信号量，保护上游 API
 LLM_TIMEOUT=60           # 单次 LLM 请求超时（秒）
 REQUEST_TIMEOUT=300      # 单次问答请求总超时（秒），超时返回 504
 
+# 登录配置（免密登录，仅适用于本地或可信网络）
+MEDIZJ_ADMIN_USERNAME=admin
+AUTH_SESSION_DAYS=7
+AUTH_COOKIE_SECURE=false
+
+# Embedding 模型配置（HuggingFace Hub，首次加载自动下载，之后走本地缓存）
+EMBEDDING_MODEL_NAME=BAAI/bge-small-zh-v1.5
+
 # Mem0 长期记忆配置（可选，获取地址：https://app.mem0.ai）
 MEM0_API_KEY=m0-your-api-key-here
+
+# Vision 多模态模型配置（用于图片解析，可选；未设置则回退到主 LLM 配置）
+VISION_MODEL_NAME=gpt-4o
+VISION_API_KEY=
+VISION_BASE_URL=
+VISION_TEMPERATURE=0.3
+VISION_MAX_TOKENS=2048
+
+# AB Test Baseline 配置（同模型无包装，用于对比评估）
+BASELINE_LLM_API_KEY=your_baseline_api_key_here
+BASELINE_LLM_BASE_URL=https://api.example.com/v1
+BASELINE_LLM_MODEL_NAME=gpt-4o
 ```
 
 ### 记忆系统配置
@@ -600,7 +718,7 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 ```
 
 **存储方式**：
-- **内存**（默认）：无需配置，保留时间60分钟
+- **内存**（默认）：无需配置，保留时间 60 分钟（ttl_seconds=3600，memory/redis 均生效，周期性过期清理）
 - **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
 - 存储容量：累积消息，写入时熵驱动压缩
 
@@ -727,7 +845,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 | **阻塞下线程** | embedding 推理 / SQLite / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
 | **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
 | **LLM 限流** | 全局信号量（`LLM_MAX_CONCURRENCY`，默认 16），高并发排队而非触发 429 | `mediZJ/core/llm_client.py` |
-| **熔断器** | 进程级共享，跨请求累计 LLM 失败（连续 5 次断开 30s） | `mediZJ/swarm/swarm_coordinator.py` |
+| **熔断器** | 进程级共享，跨请求累计 LLM 失败（连续 5 次断开 30s） | `mediZJ/core/circuit_breaker.py` |
 | **存储串行化** | Milvus Lite 客户端调用加锁（知识库 `@_serialized` 装饰器、会话向量 RLock + 原子 delete/insert） | `milvus_kb.py`、`session_vector_store.py` |
 | **总超时** | 单次问答 `REQUEST_TIMEOUT`（默认 300s），超时友好返回 504 | `mediZJ/api/services/chat_service.py` |
 
@@ -752,6 +870,8 @@ uv run python scripts/stress_chat.py --tiers 10,30,50 --timeout 400
 
 ### 压测基线（50 并发，真实 LLM）
 
+> **注**：以下基线为历史数据。压测结果依赖上游 LLM 配额与时延，当前 README 修订时未复测，仅供参考。
+
 | 指标 | 结果 |
 | ------ | ------ |
 | 成功率 | 50/50 = 100%（无 429/5xx） |
@@ -771,7 +891,7 @@ uv run python scripts/stress_chat.py --tiers 10,30,50 --timeout 400
 | 原则 | MediZJ 实现 | 位置 |
 |------|-----------|------|
 | **约束驱动** | YAML 定义 Agent 能力边界，运行时验证 Skill 调用和输出 | `mediZJ/constraints/` |
-| **自动修复** | 缺少免责声明自动添加，高危症状自动提醒就医 | `mediZJ/validation/` |
+| **自动修复** | 高危症状自动添加就医警告；免责声明统一由前端在对话末尾展示 | `mediZJ/validation/` |
 | **熵管理** | 记忆自动去重和压缩，防止系统膨胀（详见下方） | `mediZJ/memory/entropy_manager.py` |
 
 ### 熵管理全流程
@@ -932,21 +1052,23 @@ python -m mediZJ.eval.runner --score-abtest
 
 ### 设计理念
 
-- **集中管理**: 21 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
+- **集中管理**: 23 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
 - **Jinja2 模板**: 支持变量渲染（`{{ variable }}`）、条件分支（`{% if %}`）、循环（`{% for %}`）
 - **代码解耦**: Python 代码不再包含 prompt 字符串，修改 prompt 无需改动业务逻辑
 - **统一入口**: `PromptLoader` 类提供 `load()`（静态）和 `render()`（带变量）两个方法
+- **统一中文语言规则**: `_language_rule.j2` 作为公共片段，所有 Agent 输出强制使用中文
 
 ### 模板目录结构
 
 ```
 prompt/
-├── mediZJ/agents/                # Agent 系统提示词（4 个）
-├── mediZJ/swarm/                 # Swarm 协调提示词（6 个）
-├── mediZJ/research/              # 研究模块提示词（2 个）
-├── mediZJ/memory/                # 记忆相关提示词（3 个）
-├── agent_loop/            # Agent Loop 控制消息（2 个）
-└── validation/            # 输出验证模板（4 个）
+├── agents/                      # Agent 系统提示词（4 个）
+├── swarm/                       # Swarm 协调提示词（8 个）
+├── research/                    # 研究模块提示词（2 个）
+├── memory/                      # 记忆相关提示词（4 个，含 intent_gate）
+├── agent_loop/                  # Agent Loop 控制消息（2 个）
+├── validation/                  # 输出验证模板（2 个）
+└── _language_rule.j2            # 统一中文语言规则
 ```
 
 ### 使用方式
@@ -966,11 +1088,13 @@ user_msg = PromptLoader.render(
     historical_cases=[{"summary": "...", "score": 0.95}]
 )
 
-# 带条件分支的模板
-disclaimer = PromptLoader.render(
-    "validation/swarm_disclaimer.j2",
-    timeout_occurred=True,
-    completed_agents_count=1
+# 带变量渲染其它模板（如质量评估）
+quality_eval = PromptLoader.render(
+    "memory/quality_eval.j2",
+    existing_personal="年龄：28岁",
+    existing_facts=[],
+    current_question="头疼怎么办？",
+    current_answer="建议就医..."
 )
 ```
 
@@ -978,15 +1102,23 @@ disclaimer = PromptLoader.render(
 
 | 模板 | 变量 | 说明 |
 | --- | --- | --- |
-| `mediZJ/agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
-| `mediZJ/swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
-| `mediZJ/swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
-| `mediZJ/research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
-| `mediZJ/research/query_planning.j2` | `question` | 查询拆解 |
-| `mediZJ/memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
-| `mediZJ/memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
+| `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
+| `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
+| `swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
+| `swarm/lead_clarify.j2` | —（静态） | LeadAgent 澄清系统提示词 |
+| `swarm/lead_clarify_user.j2` | `question`, `context` | 澄清阶段用户输入 |
+| `swarm/chat_reply.j2` | —（静态） | 闲聊直答系统提示词 |
+| `swarm/chat_reply_user.j2` | `question`, `context` | 闲聊直答用户输入 |
+| `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
+| `research/query_planning.j2` | `question` | 查询拆解 |
+| `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
+| `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
+| `memory/intent_gate.j2` | `question` | 意图识别门控 |
 | `agent_loop/tool_limit.j2` | `max_tool_calls` | 工具调用上限 |
-| `mediZJ/validation/swarm_disclaimer.j2` | `timeout_occurred`, `completed_agents_count` | Swarm 免责声明 |
+| `agent_loop/force_answer.j2` | —（静态） | 强制收尾 |
+| `validation/high_risk_warning.j2` | —（静态） | 高危症状警告 |
+| `validation/truncation_notice.j2` | —（静态） | 截断提示 |
+| `_language_rule.j2` | —（静态） | 统一中文语言规则 |
 
 ---
 
@@ -994,9 +1126,9 @@ disclaimer = PromptLoader.render(
 
 - **向量数据库**: Milvus Lite（本地文件，无需服务器）
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
-- **数据存储**: `mediZJ/knowledge/data/documents/` (txt 文档)
+- **数据存储**: `mediZJ/knowledge/data/documents/` (txt 文档，当前 94 个)
 - **初始化**: `python mediZJ/knowledge/scripts/import_hardcoded_data.py`（--clean 清空后重导）
-- **文档生成**: `mediZJ/knowledge/scripts/gen_part*.py` 可批量生成新文档（生活方式/症状/ICD-10编码/临床指南共 84+ 份）
+- **文档生成**: `mediZJ/knowledge/scripts/gen_part*.py` 可批量生成新文档（生活方式/症状/ICD-10编码/临床指南）
 
 ### 知识库管理功能
 
@@ -1141,7 +1273,7 @@ search-knowledge / clinical-guideline / deep-research
     │  返回 answer（含引用编号 [N]）+ 结构化 references 数组
     │  references: [{index, doc_id, source, disease, type, filename, score, snippet, content}]
     ▼
-AgentLoop
+ToolExecutor（lgraph/tool_executor.py）
     │  工具执行后自动收集 references，按 doc_id 去重，附入 Worker 最终 result
     ▼
 SwarmCoordinator
@@ -1210,9 +1342,13 @@ SQLite (messages.citations) / JSON 事件文件
 用户问题
    ↓
 SwarmCoordinator
-   ├─ 检索长短期记忆，构建增强上下文
+   ├─ 意图分类（intent_classify 节点）→ others 走闲聊直答；medical 走澄清
    │
-   ├─ LeadAgent.clarify()  ← 信息澄清：注入用户档案+对话历史，避免重复提问
+   ├─ LeadAgent 澄清（clarify_decide ⇄ clarify_ask 多轮 interrupt）
+   │    ├─ LLM 调用 question_for_user 发问卷 → interrupt 挂起 → Command(resume) 恢复
+   │    └─ LLM 自决追问（最多 3 轮）→ 收集 completed collected_info
+   │
+   ├─ 记忆检索（retrieve_memories，先澄清再检索）
    │
    ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 注入完整上下文后分解
    │
@@ -1275,14 +1411,33 @@ SwarmCoordinator
 
 ```plaintext
 =======================================================================
-        【 统一工作流：clarify → decompose → route → synthesize 】
+        【 统一工作流：clarify → retrieve → decompose → route → synthesize 】
 =======================================================================
 
                [ 用户原始输入 (User Input) ]
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ 阶段 0：记忆检索 (SwarmCoordinator)                                     │
+│ 阶段 0：意图识别 (intent_classify 节点)                                  │
+│ IntentClassifier 判断意图：                                              │
+│   - others（寒暄/无关）→ chat_reply 闲聊直答（内部检索近期历史）         │
+│   - medical → 进入澄清流程                                               │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼ (medical)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 1：信息澄清 (clarify_decide ⇄ clarify_ask 多轮 interrupt)          │
+│ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
+│ 每轮注入: 用户档案 + 近期对话 + 历史相似案例 + 已收集答案                │
+│ clarify_decide：LLM 判定是否需问卷 → 调 question_for_user 发问卷        │
+│ clarify_ask：interrupt() 挂起 → SSE 推问卷 → 用户提交 →                  │
+│              Command(resume) 恢复 → 回到 clarify_decide                  │
+│ LLM 自决继续追问（最多 3 轮），完成后打包 collected_info                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼ (携带 collected_info)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 阶段 1.5：记忆检索 (retrieve_memories，先澄清再检索)                     │
 │ 统一检索三层记忆，构建增强上下文：                                       │
 │   - 短期记忆：当前会话最近 10 条消息                                     │
 │   - 长期记忆：Mem0 相似历史案例（最多 3 条）                             │
@@ -1290,15 +1445,6 @@ SwarmCoordinator
 └─────────────────────────────────────────────────────────────────────────┘
                             │
                             ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 阶段 1：信息澄清 (LeadAgent.clarify)                                    │
-│ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
-│ 注入: 用户档案 + 近期对话 + 历史相似案例                                │
-│ LLM 主动调用 question_for_user 工具，向前端抛出问卷事件。               │
-│ 收集完毕后，将用户填写的背景数据打包成 collected_info                   │
-└─────────────────────────────────────────────────────────────────────────┘
-                            │
-                            ▼ (携带 collected_info)
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 2：评估与分解 (LeadAgent.assess_and_decompose)                     │
 │ Prompt: lead_system.j2 + assessment_user.j2                             │

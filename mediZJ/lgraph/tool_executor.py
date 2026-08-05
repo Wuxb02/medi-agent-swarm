@@ -5,7 +5,6 @@ LangGraph 工具执行节点
 不同于 LangGraph 内置 ToolNode（仅支持同步工具），这里：
 - 逐一异步执行工具（保持与当前行为一致的串行执行）
 - 集成 activate_skill 状态更新（设置 active_skill）
-- 集成 question_for_user 问卷中断（设置 questionnaire_pending，由 AgentSubGraph 的条件路由触发 interrupt）
 - 集成 ConstraintValidator 约束验证
 - 收集知识库 references（doc_id 去重）
 - 按当前逻辑计入/不计入 tool_call_count
@@ -37,7 +36,7 @@ except ImportError:
 # ---- Tool Call 数据结构（轻量内部表示） ----
 
 # 不消耗 Worker 工具调用配额的系统交互工具（激活技能 / 前端问卷）
-_NON_COUNTED_TOOLS = frozenset({"activate_skill", "question_for_user"})
+_NON_COUNTED_TOOLS = frozenset({"activate_skill"})
 
 class _ToolCall:
     """LLM 返回的单个工具调用"""
@@ -98,7 +97,6 @@ def make_tool_execution_node(
     tool_registry: ToolRegistry,
     validator: Optional[Any] = None,
     on_tool_step: Optional[Callable] = None,
-    on_questionnaire: Optional[Callable] = None,
 ):
     """
     创建工具执行节点函数
@@ -109,13 +107,11 @@ def make_tool_execution_node(
     - tool_call_count 计数（activate_skill 不计入）
     - agent.execute_tool() → ToolRegistry.execute()
     - 收集 references（doc_id 去重）
-    - 问卷检测 (needs_user_input → questionnaire_pending)
 
     Args:
         tool_registry: 工具注册中心
         validator: ConstraintValidator 实例（可选）
         on_tool_step: 工具步骤回调（可选，用于流式事件）
-        on_questionnaire: 问卷事件回调（可选，用于流式事件）
 
     Returns:
         async node function: (state: AgentState) -> dict
@@ -143,7 +139,6 @@ def make_tool_execution_node(
             for i, ref in enumerate(state.get("references", []))
         }
         active_skill = state.get("active_skill")
-        questionnaire_pending = None
         tool_results = []
 
         for tc in tool_calls:
@@ -195,32 +190,8 @@ def make_tool_execution_node(
 
                     logger.info(f"Skill 激活: {skill_name} → {len(tool_names)} 个工具可见")
             elif tc.name not in _NON_COUNTED_TOOLS:
-                # activate_skill / question_for_user 不计入 tool_call_count
+                # activate_skill 不计入 tool_call_count
                 tool_call_count += 1
-
-            # ---- question_for_user 问卷检测 ----
-            questionnaire_requested = (
-                isinstance(result, dict)
-                and result.get("needs_user_input")
-                and tc.name == "question_for_user"
-            )
-            if questionnaire_requested:
-                questionnaire_pending = {
-                    "id": result.get("questionnaire_id", ""),
-                    "data": result.get("questionnaire_data", {}),
-                    "_questions_ref": result.get("_questions_ref", []),
-                    # 问卷工具调用 id：用于在暂停节点生成与 assistant.tool_calls
-                    # 配对的 tool 消息，避免消息历史出现未配对的 tool_calls
-                    "tool_call_id": tc.id,
-                }
-                logger.info(f"问卷待处理: {questionnaire_pending['id']}")
-
-                # 问卷回调（流式事件）
-                if on_questionnaire:
-                    on_questionnaire(
-                        questionnaire_id=questionnaire_pending["id"],
-                        questionnaire_data=questionnaire_pending["data"],
-                    )
 
             # 工具步骤回调（流式事件）
             if on_tool_step:
@@ -233,15 +204,13 @@ def make_tool_execution_node(
                     success=("error" not in result_str.lower()),
                 )
 
-            # 问卷请求不生成 tool 消息：暂停节点恢复后会用真实 tool_call_id
-            # 生成配对消息（question_for_user 是前端交互，无真实工具执行结果）
-            if not questionnaire_requested:
-                tool_results.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
-                })
+            # 生成与 assistant.tool_calls 配对的 tool 消息
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": tc.name,
+                "content": json.dumps(result, ensure_ascii=False, default=str),
+            })
 
         # 整理引用列表
         reference_list = sorted(collected_refs.values(), key=lambda r: r.get("index", 0))
@@ -253,7 +222,6 @@ def make_tool_execution_node(
             "tool_call_count": tool_call_count,
             "active_skill": active_skill,
             "references": reference_list,
-            "questionnaire_pending": questionnaire_pending,
         }
 
     return tool_execution_node

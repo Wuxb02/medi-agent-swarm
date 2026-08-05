@@ -93,9 +93,20 @@ async def test_stream_timeout_returns_friendly_error(monkeypatch):
         def __init__(self, **kwargs):
             self.ltm_save_task = None
 
-        async def process(self, question, context, session_id):
+        def build_graph(self, event_callback=None, hitl_enabled=False):
+            return object()
+
+        def build_initial_state(self, question, context, session_id, start_time):
+            return {"question": question, "session_id": session_id}
+
+        async def run_graph(self, graph, initial_state, config, resume=None):
             await asyncio.sleep(10)
-            return {"answer": "ok", "session_id": session_id, "suggestions": []}
+            return {"answer": "ok", "session_id": initial_state["session_id"],
+                    "suggestions": []}
+
+        def compose_result(self, question, result_state, start_time, session_id):
+            result_state["_ltm_save_task"] = None
+            return result_state
 
     monkeypatch.setattr(cs, "SwarmCoordinator", SlowCoordinator)
     monkeypatch.setattr(cs, "_persist_session_turn", lambda *args, **kwargs: None)
@@ -117,3 +128,69 @@ async def test_stream_timeout_returns_friendly_error(monkeypatch):
     assert len(error_events) == 1
     assert error_events[0]["error"]
     assert "请求处理超时" in error_events[0]["error"]
+
+
+async def test_multi_round_questionnaire_resume(monkeypatch):
+    """多轮问卷：图经历两次 interrupt，两次 answer 入队后恢复，最终 done（不卡死）"""
+
+    class MultiRoundCoordinator:
+        """run_graph 首次与首次 resume 返回挂起态，第二次 resume 返回完整结果"""
+
+        def __init__(self, **kwargs):
+            self.ltm_save_task = None
+            self._resume_count = 0
+
+        def build_graph(self, event_callback=None, hitl_enabled=False):
+            return object()
+
+        def build_initial_state(self, question, context, session_id, start_time):
+            return {"question": question, "session_id": session_id}
+
+        async def run_graph(self, graph, initial_state, config, resume=None):
+            if resume is None or self._resume_count < 2:
+                self._resume_count += 1
+                return {"_interrupted": True}
+            return {
+                "answer": "ok",
+                "session_id": initial_state["session_id"],
+                "suggestions": [],
+                "final_answer": "最终回答",
+                "usage": {},
+                "agents_involved": ["lead_agent"],
+                "swarm_enabled": False,
+            }
+
+        def compose_result(self, question, result_state, start_time, session_id):
+            result_state["_ltm_save_task"] = None
+            return result_state
+
+    monkeypatch.setattr(cs, "SwarmCoordinator", MultiRoundCoordinator)
+    monkeypatch.setattr(cs, "_persist_session_turn", lambda *args, **kwargs: None)
+
+    # 启动流消费任务，手动喂两次答案
+    from mediZJ.api.services.session_runtime import put_answer
+
+    async def _feed_answers(session_id):
+        # 等 SSE 进入挂起态后依次放入两份答案
+        await asyncio.sleep(0.1)
+        put_answer(session_id, {"q0": "35"})
+        await asyncio.sleep(0.1)
+        put_answer(session_id, {"q0": "头痛一天"})
+
+    feed_task = asyncio.create_task(_feed_answers("s-multi-round"))
+
+    chunks = []
+    async for chunk in cs.chat_stream(
+        ChatRequest(question="q", session_id="s-multi-round"),
+        _FakeRequest(),
+    ):
+        chunks.append(chunk)
+
+    await feed_task
+
+    events = [json.loads(c)["event"] for c in chunks]
+    # 必须走到 done（未卡死）
+    assert "done" in events
+    done_data = json.loads(chunks[-1])["data"]
+    assert done_data["answer"] == "ok"
+

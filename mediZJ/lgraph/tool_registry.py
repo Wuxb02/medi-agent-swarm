@@ -33,6 +33,7 @@ class VisibleTool:
     parameters: List[SkillParameter]        # 参数定义
     visible_in: List[str]                   # 可见性分组
     skill_instructions: Optional[str] = None  # SKILL.md body（仅 Skill 工具有）
+    allowed_agents: Optional[List[str]] = None  # 允许调用的 Agent ID 列表（None 表示不限制）
 
     def to_openai_schema(self) -> Dict[str, Any]:
         """转换为 OpenAI function calling 格式"""
@@ -132,8 +133,13 @@ class ToolRegistry:
             )
 
     def register_base_tool(self, name: str, func: Callable, description: str,
-                           parameters: Optional[List[SkillParameter]] = None):
-        """注册始终可见的基础工具（visible_in=["*"]）"""
+                           parameters: Optional[List[SkillParameter]] = None,
+                           allowed_agents: Optional[List[str]] = None):
+        """注册始终可见的基础工具（visible_in=["*"]）
+
+        Args:
+            allowed_agents: 允许调用的 Agent ID 列表（None 表示所有 Agent 可见）
+        """
         if parameters is None:
             parameters = self._infer_parameters(func)
 
@@ -143,22 +149,25 @@ class ToolRegistry:
             description=description,
             parameters=parameters,
             visible_in=["*"],
+            allowed_agents=allowed_agents,
         )
         self.register(tool)
 
     # ===== 可见性过滤 =====
 
-    def get_visible_tools(self, active_skill: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_visible_tools(self, active_skill: Optional[str] = None,
+                          agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        根据当前激活的 Skill 过滤可见工具
+        根据当前激活的 Skill 与调用者身份过滤可见工具
 
         规则：
-        - visible_in = ["*"] → 始终可见
+        - visible_in = ["*"] → 始终可见；若设置了 allowed_agents，还需 agent_id 在其内
         - visible_in 包含 active_skill → 可见
         - 其他 → 不可见
 
         Args:
             active_skill: 当前激活的 Skill 名称（None 表示未激活）
+            agent_id: 调用者 Agent ID（用于基础工具权限收口，如 question_for_user 仅 LeadAgent）
 
         Returns:
             OpenAI function calling 格式的工具列表
@@ -166,13 +175,15 @@ class ToolRegistry:
         visible = []
         for tool in self._tools.values():
             if "*" in tool.visible_in:
-                visible.append(tool.to_openai_schema())
+                if (tool.allowed_agents is None
+                        or agent_id in tool.allowed_agents):
+                    visible.append(tool.to_openai_schema())
             elif active_skill and active_skill in tool.visible_in:
                 visible.append(tool.to_openai_schema())
 
         logger.debug(
             f"[ToolRegistry] visible tools: {len(visible)} "
-            f"(total={len(self._tools)}, active_skill={active_skill})"
+            f"(total={len(self._tools)}, active_skill={active_skill}, agent_id={agent_id})"
         )
         return visible
 

@@ -123,13 +123,17 @@ export const useChatStore = defineStore('chat', () => {
             }
           },
           onAgentQuestionnaire(data) {
+            if (isDone) return
             const msg = messages.value.find((m) => m.id === assistantMsg.id)
             if (msg) {
               const d = data.data || data
+              // 同 id 问卷已渲染则不覆盖（防 resume 重放重复事件）；新 id 自然覆盖旧问卷
+              if (msg.questionnaire?.questionnaire_id === (d.questionnaire_id as string)) return
               msg.questionnaire = {
                 questionnaire_id: d.questionnaire_id as string,
                 questions: (d.questionnaire_data?.questions || []) as never[],
               }
+              msg.questionnaireError = undefined
             }
           },
           onAgentQuestionnaireCancelled(data) {
@@ -339,8 +343,9 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function submitAnswers(questionnaireId: string, answers: Record<string, unknown>) {
+    const msg = messages.value.find((m) => m.questionnaire?.questionnaire_id === questionnaireId)
     try {
-      await fetch('/api/chat/answer', {
+      const resp = await fetch('/api/chat/answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -349,14 +354,24 @@ export const useChatStore = defineStore('chat', () => {
           session_id: sessionId.value,
         }),
       })
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`)
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e)
+      // 失败时保留问卷卡片并置错误态，供用户重试（避免后端一直等答案、SSE 挂起导致卡死）
+      if (msg) {
+        msg.questionnaireError = `提交答案失败：${message}，请重试`
+      }
       error.value = `提交答案失败：${message}`
+      return
     }
 
-    const msg = messages.value.find((m) => m.questionnaire?.questionnaire_id === questionnaireId)
-    if (msg) {
-      msg.questionnaire = undefined
+    // 仅成功时清空卡片；keyed 查找防 Q2 到达后 Q1 迟到 clear 误删
+    const fresh = messages.value.find((m) => m.questionnaire?.questionnaire_id === questionnaireId)
+    if (fresh) {
+      fresh.questionnaire = undefined
+      fresh.questionnaireError = undefined
     }
   }
 

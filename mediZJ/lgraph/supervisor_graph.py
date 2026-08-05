@@ -10,6 +10,7 @@ SupervisorGraph — 替代 SwarmCoordinator.process() 的 LangGraph 主图
 采用 Map-Reduce 模式：Send API 并行扇出 Worker，synthesize_results 汇总。
 """
 import asyncio
+import re
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
@@ -24,6 +25,7 @@ from mediZJ.lgraph.agent_subgraph import build_agent_subgraph
 from mediZJ.lgraph.tool_registry import ToolRegistry
 from mediZJ.swarm.events import Event, EventType
 from mediZJ.swarm.intent_classifier import IntentClassifier
+from mediZJ.swarm.lead_agent import _QUESTION_TOOL_SCHEMA
 
 # Trace
 try:
@@ -38,32 +40,27 @@ async def retrieve_memories_with_intent_gate(
     coordinator,
     session_id: str,
     question: str,
-    intent_classifier: Optional[IntentClassifier] = None,
+    intent: str = "medical",
 ) -> Dict[str, Any]:
-    """并行检索短期记忆，并按意图门控 Mem0 长期记忆检索。
+    """检索短期记忆，并按意图门控 Mem0 长期记忆检索。
 
-    意图为 others（寒暄/致谢/无关话题）时跳过长期记忆检索，
-    短期记忆（当前会话历史）始终保留。任何异常降级为空列表，不阻断链路。
+    意图分类在独立的 intent_classify 节点完成，此处仅消费其结果：
+    仅 medical（澄清后）路径到达本节点，长期记忆始终检索；
+    保留 intent 门控逻辑以兼容外部调用（others 跳过 Mem0）。
+    任何异常降级为空列表，不阻断链路。
     """
-    classifier = intent_classifier or IntentClassifier()
-
-    # 短期记忆检索 与 意图判断并行（意图判断用于决定是否检索 Mem0）
+    # 短期记忆检索
     recent_task = asyncio.create_task(
         coordinator.short_term_memory.get_recent_messages(
             session_id=session_id, limit=10,
         )
     )
-    intent_task = asyncio.create_task(classifier.classify(question))
 
     recent_history = await recent_task
-    intent_result = await intent_task
 
     similar_memories: List[Dict[str, Any]] = []
-    if intent_result.skip_long_term:
-        logger.info(
-            f"[SupervisorGraph] 意图={intent_result.intent}({intent_result.source}), "
-            f"跳过长期记忆检索"
-        )
+    if intent == "others":
+        logger.info(f"[SupervisorGraph] 意图=others，跳过长期记忆检索")
     else:
         try:
             similar_memories = (
@@ -78,27 +75,37 @@ async def retrieve_memories_with_intent_gate(
     return {
         "recent_history": recent_history,
         "similar_memories": similar_memories,
-        "intent": intent_result.intent,
-        "intent_confidence": intent_result.confidence,
-        "intent_source": intent_result.source,
-        "intent_reason": intent_result.reason,
-        "skip_long_term_retrieval": intent_result.skip_long_term,
+        "skip_long_term_retrieval": intent == "others",
+    }
+
+
+async def classify_intent(coordinator, question: str) -> Dict[str, Any]:
+    """独立意图分类：others（寒暄/致谢/无关）→ 闲聊直答；medical → 澄清流程。"""
+    classifier = getattr(coordinator, "intent_classifier", None) or IntentClassifier()
+    result = await classifier.classify(question)
+    return {
+        "intent": result.intent,
+        "intent_confidence": result.confidence,
+        "intent_source": result.source,
+        "intent_reason": result.reason,
+        "skip_long_term_retrieval": result.skip_long_term,
         # others 意图：直接聊天回应，跳过任务分解
-        "chat_mode": intent_result.skip_long_term,
+        "chat_mode": result.skip_long_term,
     }
 
 
 def route_by_intent(state: Dict[str, Any]) -> str:
-    """根据意图路由：others（寒暄/无关话题）→ 闲聊直答；medical → 正常流程。"""
+    """根据意图路由：others（寒暄/无关话题）→ 闲聊直答；medical → 澄清流程。"""
     if state.get("chat_mode") or state.get("intent") == "others":
         return "chat_reply"
-    return "clarify"
+    return "clarify_decide"
 
 
 def build_supervisor_graph(
     coordinator,                    # SwarmCoordinator 实例（持有所有 Agent、记忆管理器等）
     tool_registry: ToolRegistry,    # 共享的 ToolRegistry
     event_callback: Optional[Callable] = None,
+    hitl_enabled: bool = False,
 ) -> StateGraph:
     """
     构建主 SupervisorGraph
@@ -107,6 +114,9 @@ def build_supervisor_graph(
         coordinator: SwarmCoordinator 实例
         tool_registry: 工具注册中心
         event_callback: 事件回调（用于流式 SSE 推送）
+        hitl_enabled: 是否启用 HITL 问卷（流式路径 True）。True 时挂载 checkpointer
+                      以支持 _clarify 节点内的动态 interrupt()；False 时图无 interrupt、
+                      不挂载 checkpointer（按需引入 checkpoint）。
 
     Returns:
         编译后的 CompiledStateGraph
@@ -126,16 +136,9 @@ def build_supervisor_graph(
 
     # ===== 节点函数 =====
 
-    intent_classifier = getattr(coordinator, "intent_classifier", None) or IntentClassifier()
-
-    async def _retrieve_memories(state: SupervisorState) -> dict:
-        """节点: 并行检索短期记忆，并按意图门控长期记忆（替代 coordinator._retrieve_memories）"""
-        result = await retrieve_memories_with_intent_gate(
-            coordinator=coordinator,
-            session_id=state["session_id"],
-            question=state["question"],
-            intent_classifier=intent_classifier,
-        )
+    async def _intent_classify(state: SupervisorState) -> dict:
+        """节点: 独立意图分类（others → 闲聊直答；medical → 澄清流程）"""
+        result = await classify_intent(coordinator, state["question"])
 
         if event_callback:
             event_callback(Event(
@@ -149,6 +152,18 @@ def build_supervisor_graph(
                     "skip_long_term_retrieval": result["skip_long_term_retrieval"],
                 },
             ))
+
+        logger.info(f"[SupervisorGraph] 意图识别: {result['intent']} ({result['intent_source']})")
+        return result
+
+    async def _retrieve_memories(state: SupervisorState) -> dict:
+        """节点: 检索短期记忆 + 长期记忆（位于 clarify 之后、任务分解之前）"""
+        result = await retrieve_memories_with_intent_gate(
+            coordinator=coordinator,
+            session_id=state["session_id"],
+            question=state["question"],
+            intent=state.get("intent", "medical"),
+        )
 
         # 刷新 Worker 档案
         coordinator._refresh_worker_profiles()
@@ -164,43 +179,168 @@ def build_supervisor_graph(
 
         return result
 
-    async def _clarify(state: SupervisorState) -> dict:
-        """节点: 信息澄清阶段（替代 coordinator._do_clarify）
+    # clarify 最大轮数（LLM 自决 + 硬上限）
+    _CLARIFY_MAX_ROUNDS = 3
 
-        使用 LangGraph interrupt() 替代 asyncio.Future 问卷阻塞。
+    async def _clarify_decide(state: SupervisorState) -> dict:
+        """节点: 澄清决策——LLM 判断是否需要（继续）发问卷
+
+        每轮用已收集答案（clarify_answers）喂回 LLM；判定需澄清则生成
+        新问卷 payload 存 clarify_pending 并 goto clarify_ask 挂起。
+        达到硬上限 _CLARIFY_MAX_ROUNDS 时不再调用 LLM，直接汇总完成。
+
+        非流式模式（hitl_enabled=False）无 checkpointer，直接跳过澄清。
         """
         if not coordinator.questionnaire_manager:
             logger.debug("QuestionnaireManager 未配置，跳过澄清阶段")
             return {"clarify_complete": True, "collected_info": ""}
 
-        # 构建增强上下文
-        enhanced_context = {
-            "personal_profile": state.get("personal_profile", ""),
-            "recent_history": state.get("recent_history", []),
-            "historical_cases": state.get("similar_memories", []),
+        if not hitl_enabled:
+            logger.debug("非流式模式（无 HITL），跳过澄清阶段")
+            return {"clarify_complete": True, "collected_info": ""}
+
+        current_round = state.get("clarify_round", 0)
+
+        # 硬上限：先查再调 LLM，保证第 MAX_ROUNDS+1 次 LLM 不会被调用
+        if current_round >= _CLARIFY_MAX_ROUNDS:
+            logger.info(f"[SupervisorGraph] clarify 达到最大轮数 {_CLARIFY_MAX_ROUNDS}，结束澄清")
+            return {
+                "clarify_complete": True,
+                "collected_info": _merge_clarify_info(
+                    state.get("clarify_rounds", [])
+                ),
+            }
+
+        # 构建上下文（含已收集答案，供 LLM 判断是否还需追问）
+        from mediZJ.core.prompt_loader import PromptLoader as _PL
+        from mediZJ.core.tools.questionnaire import (
+            parse_questionnaire,
+            _build_questionnaire_data,
+        )
+
+        context_text = _build_clarify_context(state)
+        # 用"问题文本: 答案"可读格式回传已收集信息（避免 q0/q1 内部 key 无法关联问题）
+        collected_text = _format_collected_answers(state.get("clarify_rounds", []))
+        if collected_text:
+            context_text += f"\n\n## 已收集信息\n{collected_text}"
+
+        messages = [
+            {"role": "system", "content": lead_agent._get_clarify_system_prompt()},
+            {"role": "user", "content": _PL.render(
+                "swarm/lead_clarify_user.j2",
+                question=state["question"],
+                context=context_text,
+            )},
+        ]
+        try:
+            response = await lead_agent.llm_client.chat_with_tools(
+                messages=messages,
+                tools=[_QUESTION_TOOL_SCHEMA],
+                tool_choice="auto",
+                temperature=0.3,
+            )
+        except Exception as e:
+            logger.error(f"LeadAgent clarify LLM error: {e}")
+            return {"clarify_complete": True, "collected_info": ""}
+
+        if not response.has_tool_calls():
+            logger.info("[SupervisorGraph] clarify: 无需额外信息，结束澄清")
+            return {
+                "clarify_complete": True,
+                "collected_info": _merge_clarify_info(
+                    state.get("clarify_rounds", [])
+                ),
+            }
+
+        tool_call = response.tool_calls[0]
+        if tool_call.name != "question_for_user":
+            logger.warning(f"LeadAgent clarify: 未预期的工具调用 {tool_call.name}")
+            return {
+                "clarify_complete": True,
+                "collected_info": _merge_clarify_info(
+                    state.get("clarify_rounds", [])
+                ),
+            }
+
+        questionnaire_xml = tool_call.arguments.get("questionnaire", "")
+        try:
+            questions = parse_questionnaire(questionnaire_xml)
+        except Exception as e:
+            logger.error(f"LeadAgent clarify: 问卷解析失败: {e}")
+            return {
+                "clarify_complete": True,
+                "collected_info": _merge_clarify_info(
+                    state.get("clarify_rounds", [])
+                ),
+            }
+
+        questionnaire_id = str(uuid.uuid4())
+        questionnaire_data = _build_questionnaire_data(questions)
+
+        logger.info(
+            f"[SupervisorGraph] 发送问卷 {questionnaire_id} "
+            f"(round {current_round + 1})，共 {len(questions)} 个问题"
+        )
+
+        # 发射 AGENT_QUESTIONNAIRE 事件（结构与前端依赖一致）
+        if event_callback:
+            event_callback(Event(
+                type=EventType.AGENT_QUESTIONNAIRE,
+                source_agent=lead_agent.agent_id,
+                data={
+                    "questionnaire_id": questionnaire_id,
+                    "questionnaire_data": questionnaire_data,
+                },
+            ))
+
+        # 存 payload 到 state，由 clarify_ask 节点 interrupt 挂起
+        return {
+            "clarify_pending": {
+                "type": "questionnaire",
+                "questionnaire_id": questionnaire_id,
+                "questionnaire_data": questionnaire_data,
+                "source_agent": lead_agent.agent_id,
+                "_questions_ref": questions,
+            },
+            "clarify_complete": False,
         }
 
-        # Trace: STAGE span
-        _ctx = traced_span(SpanType.STAGE, name="clarify") if TRACE_AVAILABLE else None
-        if _ctx:
-            _ctx.__enter__()
+    async def _clarify_ask(state: SupervisorState) -> dict:
+        """节点: 澄清挂起点——唯一的 interrupt()；resume 返回用户 answers
 
-        try:
-            clarify_result = await lead_agent.clarify(
-                question=state["question"],
-                context=enhanced_context,
-                session_id=state["session_id"],
-                event_callback=event_callback,
-            )
-        finally:
-            if _ctx:
-                _ctx.__exit__(None, None, None)
+        resume 时该节点重跑（无 LLM/无事件发射），interrupt() 直接返回本轮答案。
+        """
+        pending = state.get("clarify_pending", {})
+        if not pending:
+            logger.warning("clarify_ask 被调用但无 pending 问卷，直接结束")
+            return {"clarify_complete": True, "collected_info": ""}
 
+        user_answer = interrupt(pending)
+
+        answers = user_answer or {}
+        current_round = state.get("clarify_round", 0)
+        round_no = current_round + 1
+
+        # 日志用问题文本格式化（避免展示 q0/q1 内部 key）
+        from mediZJ.core.tools.questionnaire import format_answers_for_llm
+        questions_ref = pending.get("_questions_ref", [])
+        readable = format_answers_for_llm(questions_ref, answers) or "（空回答）"
+        logger.info(f"[SupervisorGraph] 收到第 {round_no} 轮问卷回答: {readable}")
+
+        # 累积答案：本轮 answers 合并进 clarify_answers；记录到 clarify_rounds
+        merged = dict(state.get("clarify_answers", {}))
+        merged.update(answers)
+
+        prev_rounds = state.get("clarify_rounds", []) or []
         return {
-            "clarify_complete": True,
-            "collected_info": clarify_result.get("collected_info", ""),
-            "clarify_answers": clarify_result.get("raw_answers", {}),
-            "clarify_timeout_skipped": clarify_result.get("timeout_skipped", False),
+            "clarify_round": round_no,
+            "clarify_answers": merged,
+            "clarify_rounds": prev_rounds + [{
+                "round": round_no,
+                "payload": pending,
+                "answers": answers,
+            }],
+            "clarify_pending": None,
         }
 
     async def _assess_decompose(state: SupervisorState) -> dict:
@@ -294,7 +434,6 @@ def build_supervisor_graph(
                 on_tool_step=agent.loop.on_tool_step,
                 on_thinking_done=agent.loop.on_thinking_done,
                 on_content_token=agent.loop.on_content_token,
-                on_questionnaire=agent.loop.on_questionnaire,
             )
 
             result = await subgraph.ainvoke({
@@ -364,9 +503,18 @@ def build_supervisor_graph(
 
     async def _chat_reply_node(state: SupervisorState) -> dict:
         """节点: 闲聊模式——others 意图时 LeadAgent 直接聊天回应，跳过任务分解"""
+        # retrieve_memories 位于 clarify 之后，闲聊分支未执行；此处自检索近期历史
+        recent_history: List[Dict[str, Any]] = []
+        try:
+            recent_history = await coordinator.short_term_memory.get_recent_messages(
+                session_id=state["session_id"], limit=10,
+            )
+        except BaseException as exc:
+            logger.warning(f"闲聊分支短期记忆检索失败: {exc}")
+
         enhanced_context = {
             "personal_profile": state.get("personal_profile", ""),
-            "recent_history": state.get("recent_history", []),
+            "recent_history": recent_history,
         }
 
         _ctx = traced_span(SpanType.STAGE, name="chat_reply") if TRACE_AVAILABLE else None
@@ -466,7 +614,6 @@ def build_supervisor_graph(
                 on_tool_step=agent.loop.on_tool_step,
                 on_thinking_done=agent.loop.on_thinking_done,
                 on_content_token=agent.loop.on_content_token,
-                on_questionnaire=agent.loop.on_questionnaire,
             )
 
             # Swarm 90s 超时
@@ -715,6 +862,12 @@ def build_supervisor_graph(
 
     # ===== 条件路由函数 =====
 
+    def _route_clarify(state: SupervisorState) -> str:
+        """澄清路由：有 pending 问卷 → clarify_ask 挂起；否则 → 检索记忆"""
+        if state.get("clarify_pending"):
+            return "clarify_ask"
+        return "retrieve_memories"
+
     def _route_by_subtask_count(state: SupervisorState) -> str:
         """根据子任务数量路由"""
         subtasks = state.get("subtasks", [])
@@ -755,9 +908,11 @@ def build_supervisor_graph(
     builder = StateGraph(SupervisorState)
 
     # 注册节点
-    builder.add_node("retrieve_memories", _retrieve_memories)
+    builder.add_node("intent_classify", _intent_classify)
     builder.add_node("chat_reply", _chat_reply_node)
-    builder.add_node("clarify", _clarify)
+    builder.add_node("clarify_decide", _clarify_decide)
+    builder.add_node("clarify_ask", _clarify_ask)
+    builder.add_node("retrieve_memories", _retrieve_memories)
     builder.add_node("assess_decompose", _assess_decompose)
     builder.add_node("single_agent", _single_agent_node)
     builder.add_node("send_workers", _send_workers_node)
@@ -766,20 +921,33 @@ def build_supervisor_graph(
     builder.add_node("finalize", _finalize)
 
     # 边连接
-    builder.add_edge(START, "retrieve_memories")
+    builder.add_edge(START, "intent_classify")
 
-    # 意图路由：others（寒暄/无关话题）→ 闲聊直答；医疗 → 澄清 → 任务分解
+    # 意图路由：others（寒暄/无关话题）→ 闲聊直答；医疗 → 澄清 → 检索 → 分解
     builder.add_conditional_edges(
-        "retrieve_memories",
+        "intent_classify",
         route_by_intent,
         {
             "chat_reply": "chat_reply",
-            "clarify": "clarify",
+            "clarify_decide": "clarify_decide",
         }
     )
 
+    # clarify 多轮循环：decide → (有问卷) ask → decide；无问卷 → 检索记忆
+    builder.add_conditional_edges(
+        "clarify_decide",
+        _route_clarify,
+        {
+            "clarify_ask": "clarify_ask",
+            "retrieve_memories": "retrieve_memories",
+        }
+    )
+    builder.add_edge("clarify_ask", "clarify_decide")
+
     builder.add_edge("chat_reply", "finalize")
-    builder.add_edge("clarify", "assess_decompose")
+
+    # 先澄清完成 → 再检索记忆 → 最后任务分解
+    builder.add_edge("retrieve_memories", "assess_decompose")
 
     # 条件路由：single / swarm / fallback
     builder.add_conditional_edges(
@@ -807,13 +975,98 @@ def build_supervisor_graph(
     builder.add_edge("synthesize_results", "finalize")
     builder.add_edge("finalize", END)
 
-    # 编译
-    return builder.compile(
-        checkpointer=MemorySaver(),
-    )
+    # 编译：仅当启用 HITL（流式问卷）时才引入 checkpointer —— 按需引入 checkpoint
+    if hitl_enabled:
+        return builder.compile(
+            checkpointer=MemorySaver(),
+        )
+    return builder.compile()
 
 
 # ===== 辅助函数 =====
+
+def _build_clarify_context(state: SupervisorState) -> str:
+    """构建 clarify 决策阶段的上下文文本（个人档案/近期历史/历史案例）"""
+    parts = []
+    if state.get("personal_profile"):
+        parts.append(f"## 用户档案\n{state['personal_profile']}")
+    if state.get("recent_history"):
+        parts.append(f"近期对话: {len(state['recent_history'])} 条消息")
+    if state.get("similar_memories"):
+        parts.append(f"历史相似案例: {len(state['similar_memories'])} 个")
+    return "\n\n".join(parts) if parts else "无"
+
+
+def _format_collected_answers(rounds: List[Dict[str, Any]]) -> str:
+    """将已收集的问卷答案格式化为 LLM 可读文本（"问题文本: 答案"）
+
+    用每轮 payload 中保存的 _questions_ref（Question 对象，含 header）还原
+    问题文本，避免以 q0/q1 等内部 key 输出导致 LLM 无法关联问题而重复提问。
+    """
+    from mediZJ.core.tools.questionnaire import format_answers_for_llm
+
+    if not rounds:
+        return ""
+    parts = []
+    for r in rounds:
+        questions = (r.get("payload") or {}).get("_questions_ref", [])
+        answers = r.get("answers", {})
+        formatted = format_answers_for_llm(questions, answers)
+        if formatted:
+            parts.append(formatted)
+    return "\n".join(parts)
+
+
+def _merge_clarify_info(rounds: List[Dict[str, Any]]) -> str:
+    """汇总所有澄清轮次答案为 collected_info 文本（供 assess_decompose 注入）"""
+    from mediZJ.core.tools.questionnaire import format_answers_for_llm
+
+    parts = []
+    for r in rounds:
+        questions = (r.get("payload") or {}).get("_questions_ref", [])
+        answers = r.get("answers", {})
+        formatted = format_answers_for_llm(questions, answers)
+        if formatted:
+            parts.append(formatted)
+    return "\n".join(parts)
+
+
+def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[int, int]]):
+    """将 SharedContext 中各 Worker 贡献文本中的旧引用编号替换为新编号
+
+    与 SwarmCoordinator._apply_renumber_map 行为一致。
+    """
+    citation_pattern = re.compile(r'\[(\d+(?:[,\-]\d+)*)\]')
+
+    for agent_id, mapping in renumber_map.items():
+        if not mapping:
+            continue
+        contribs = shared_ctx.agent_contributions.get(agent_id, [])
+        for contrib in contribs:
+            if not isinstance(contrib.result, dict):
+                continue
+            answer = contrib.result.get("answer", "")
+            if not answer:
+                continue
+
+            def replace_ref(match):
+                nums_str = match.group(1)
+                parts = re.split(r'([,\-])', nums_str)
+                new_parts = []
+                for part in parts:
+                    if part in (',', '-'):
+                        new_parts.append(part)
+                    else:
+                        try:
+                            old_num = int(part)
+                            new_num = mapping.get(old_num, old_num)
+                            new_parts.append(str(new_num))
+                        except ValueError:
+                            new_parts.append(part)
+                return '[' + ''.join(new_parts) + ']'
+
+            contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
+
 
 def _inject_worker_callbacks(agent, agent_id: str, event_callback: Callable):
     """为 Worker Agent 注入流式回调"""
@@ -852,22 +1105,11 @@ def _inject_worker_callbacks(agent, agent_id: str, event_callback: Callable):
             data={"token": token},
         ))
 
-    def _on_questionnaire(questionnaire_id, questionnaire_data):
-        event_callback(Event(
-            type=EventType.AGENT_QUESTIONNAIRE,
-            source_agent=agent_id,
-            data={
-                "questionnaire_id": questionnaire_id,
-                "questionnaire_data": questionnaire_data,
-            },
-        ))
-
     if hasattr(agent, 'set_on_thinking'):
         agent.set_on_thinking(_on_thinking)
         agent.set_on_tool_step(_on_tool_step)
         agent.set_on_thinking_done(_on_thinking_done)
         agent.set_on_content_token(_on_content_token)
-        agent.set_on_questionnaire(_on_questionnaire)
 
 
 def _cleanup_worker_callbacks(agent):
@@ -877,4 +1119,3 @@ def _cleanup_worker_callbacks(agent):
         agent.set_on_tool_step(None)
         agent.set_on_thinking_done(None)
         agent.set_on_content_token(None)
-        agent.set_on_questionnaire(None)

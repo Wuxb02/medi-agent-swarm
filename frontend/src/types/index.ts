@@ -181,6 +181,7 @@ export interface ChatMessage {
   thinkingBlocks?: ThinkingBlock[]
   delegations?: TaskDelegation[]
   questionnaire?: QuestionnaireData
+  questionnaireError?: string
   citations?: Citation[]
   metadata?: {
     swarmEnabled: boolean

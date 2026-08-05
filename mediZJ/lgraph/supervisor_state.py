@@ -72,10 +72,14 @@ class SupervisorState(TypedDict, total=False):
     performance_metrics: Dict[str, Any]
 
     # === Human-in-the-Loop 控制 ===
-    clarify_round: int              # 当前澄清轮次（最多 2 轮）
+    clarify_round: int              # 当前澄清轮次（0 起，最多 3 轮）
     clarify_complete: bool
     clarify_answers: Dict[str, Any]
     clarify_timeout_skipped: bool
+    # 各轮澄清记录 {round, payload, answers}（跨轮累积）
+    clarify_rounds: Annotated[List[Dict[str, Any]], operator.add]
+    # 待挂起的问卷 payload（clarify_ask 节点的 interrupt 载荷）
+    clarify_pending: Optional[Dict[str, Any]]
 
     # === 内部追踪 ===
     _swarm_finalized: bool           # Swarm 路径标记，避免 _finalize 重复处理

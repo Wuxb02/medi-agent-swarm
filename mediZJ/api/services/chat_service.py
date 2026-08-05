@@ -12,6 +12,7 @@ from starlette.requests import Request as StarletteRequest
 from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
 from mediZJ.swarm.events import Event
 from mediZJ.api.models.chat import ChatRequest, ChatResponse, Citation
+from mediZJ.api.services.session_runtime import SessionRuntime
 from mediZJ.core.questionnaire_manager import QuestionnaireManager
 from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
 from mediZJ.memory.session_db import SessionDB
@@ -196,7 +197,6 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         ),
         timeout=_REQUEST_TIMEOUT,
     )
-
     # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
     ltm_task = result.get('_ltm_save_task')
     if ltm_task and not ltm_task.done():
@@ -296,22 +296,46 @@ async def _chat_stream_impl(
         question = await ImageAnalyzer().analyze(chat_req.images, chat_req.question)
 
     # 2. 创建协调器 + 启动处理
+    from mediZJ.api.services.session_runtime import (
+        store_runtime, release_runtime, get_answer_queue, clear_answer_queue,
+    )
+
     coordinator = SwarmCoordinator(
         event_callback=lambda event: bridge.queue.put_nowait(event),
         questionnaire_manager=manager,
         user_id=chat_req.user_id
     )
 
-    process_task = asyncio.create_task(
-        asyncio.wait_for(
-            coordinator.process(
-                question=question,
-                context=chat_req.context,
-                session_id=session_id
-            ),
+    # 流式路径启用 HITL：构建带 checkpointer 的图，供 clarify interrupt 挂起/恢复
+    start_time = datetime.now()
+    graph = coordinator.build_graph(
+        event_callback=lambda event: bridge.queue.put_nowait(event),
+        hitl_enabled=True,
+    )
+    initial_state = coordinator.build_initial_state(
+        question, chat_req.context, session_id, start_time,
+    )
+    config = {"configurable": {"thread_id": session_id}}
+    store_runtime(SessionRuntime(
+        coordinator=coordinator,
+        graph=graph,
+        config=config,
+        initial_state=initial_state,
+        session_id=session_id,
+    ))
+
+    async def _run_pipeline(resume: Any = None):
+        """执行图：正常执行返回结果；clarify interrupt 挂起返回 {"_interrupted": True}。
+
+        超时仅包裹图执行阶段：interrupt 挂起时任务已返回，等待用户答案期间
+        无活跃超时（用户不回答则一直等待）。
+        """
+        return await asyncio.wait_for(
+            coordinator.run_graph(graph, initial_state, config, resume=resume),
             timeout=_REQUEST_TIMEOUT,
         )
-    )
+
+    process_task = asyncio.create_task(_run_pipeline())
 
     # 2.5 启动客户端断开检测任务
     async def _wait_for_disconnect():
@@ -399,36 +423,100 @@ async def _chat_stream_impl(
 
     result = None
     disconnected = False
+    # 状态机内已发送 error 事件并结束（无需再走正常完成路径）
+    errored = False
 
-    # 主事件循环：高效并发等待 queue.get / process_task / disconnect_task
-    while not process_task.done() and not disconnect_task.done():
-        get_event = asyncio.ensure_future(bridge.queue.get())
-        done, _ = await asyncio.wait(
-            [get_event, process_task, disconnect_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if disconnect_task in done:
-            get_event.cancel()
+    def _is_interrupted(task_result: Any) -> bool:
+        """判断图执行结果是否为 interrupt 挂起态"""
+        return isinstance(task_result, dict) and task_result.get("_interrupted")
+
+    # 统一状态机：phase="run" 消费事件；phase="wait_answer" 等用户问卷答案后 resume。
+    # 图可能经历 0/1/多次 interrupt，resume 后正常完成则退出循环进入排空/收尾。
+    phase = "run"
+    answer_queue = get_answer_queue(session_id)
+
+    while True:
+        if disconnect_task.done():
             disconnected = True
             break
-        if process_task in done:
-            get_event.cancel()
-            break
 
-        # 处理从队列取到的事件
-        event = get_event.result()
-        _drain_one(event)
+        if phase == "run":
+            if process_task.done():
+                # 图执行结束：interrupt 挂起 → 等待答案；正常完成 → 排空收尾
+                try:
+                    task_result = process_task.result()
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"Chat processing timeout ({_REQUEST_TIMEOUT:.0f}s), session={session_id}"
+                    )
+                    yield _json_line("error", {
+                        "error": f"请求处理超时（{_REQUEST_TIMEOUT:.0f}s），请稍后重试或简化问题"
+                    })
+                    errored = True
+                    break
+                except Exception as e:
+                    logger.error(f"Chat processing error: {e}")
+                    yield _json_line("error", {"error": str(e)})
+                    errored = True
+                    break
 
-        # 定期刷新 thinking 缓冲（时间驱动）
-        if _think_buf and _time.monotonic() - _last_think_flush >= THINK_FLUSH_INTERVAL:
-            _flush_think_buffer(force=True)
+                if _is_interrupted(task_result):
+                    phase = "wait_answer"
+                    continue
+                break
 
-        # yield 所有待发送事件
-        for evt_name, evt_data in _pending_yields:
-            json_line = _json_line(evt_name, evt_data)
-            collected_events.append({"event": evt_name, "data": evt_data})
-            yield json_line
-        _pending_yields.clear()
+            # 消费图事件 / 等待 process / disconnect
+            get_event = asyncio.ensure_future(bridge.queue.get())
+            done, _ = await asyncio.wait(
+                [get_event, process_task, disconnect_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                get_event.cancel()
+                disconnected = True
+                break
+            if process_task in done:
+                get_event.cancel()
+                continue  # 回顶部复查 done（interrupt 挂起 / 完成）
+
+            event = get_event.result()
+            _drain_one(event)
+
+            if _think_buf and _time.monotonic() - _last_think_flush >= THINK_FLUSH_INTERVAL:
+                _flush_think_buffer(force=True)
+
+            for evt_name, evt_data in _pending_yields:
+                json_line = _json_line(evt_name, evt_data)
+                collected_events.append({"event": evt_name, "data": evt_data})
+                yield json_line
+            _pending_yields.clear()
+
+        else:  # phase == "wait_answer"
+            logger.info(f"Clarify interrupt pending for session={session_id}, awaiting answer")
+            answer_task = asyncio.ensure_future(answer_queue.get())
+            done, _ = await asyncio.wait(
+                [answer_task, disconnect_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                answer_task.cancel()
+                disconnected = True
+                break
+
+            answers = answer_task.result()
+            logger.info(f"Resuming graph with user answer for session={session_id}")
+
+            # 取回同一 runtime 的 graph/config，复用 checkpointer 完成恢复
+            from mediZJ.api.services.session_runtime import get_runtime
+            runtime = get_runtime(session_id)
+            if runtime is None:
+                logger.warning(f"SessionRuntime 已清理 (session={session_id})，丢弃答案")
+                break
+
+            process_task = asyncio.create_task(_run_pipeline(resume=answers))
+            phase = "run"  # 可能再次 interrupt → 再次进入 wait_answer
+
+    clear_answer_queue(session_id)
 
     # 4. 排空队列中残留的事件（process 完成但队列未空）
     if not disconnected:
@@ -457,6 +545,15 @@ async def _chat_stream_impl(
             logger.info(f"Processing cancelled for session={session_id}")
         except Exception as e:
             logger.error(f"Error after cancel for session={session_id}: {e}")
+        clear_answer_queue(session_id)
+        release_runtime(session_id)
+        remove_manager(session_id)
+        return
+
+    # 5.5 状态机内已发送 error 事件（超时/异常）：清理后返回，不再走正常完成路径
+    if errored:
+        clear_answer_queue(session_id)
+        release_runtime(session_id)
         remove_manager(session_id)
         return
 
@@ -471,11 +568,28 @@ async def _chat_stream_impl(
         yield _json_line("error", {
             "error": f"请求处理超时（{_REQUEST_TIMEOUT:.0f}s），请稍后重试或简化问题"
         })
+        clear_answer_queue(session_id)
+        release_runtime(session_id)
+        remove_manager(session_id)
         return
     except Exception as e:
         logger.error(f"Chat processing error: {e}")
         yield _json_line("error", {"error": str(e)})
+        clear_answer_queue(session_id)
+        release_runtime(session_id)
+        remove_manager(session_id)
         return
+
+    # 防御：若 result 仍是 interrupt 挂起态（异常路径），清理后结束
+    if isinstance(result, dict) and result.get("_interrupted"):
+        logger.warning(f"Interrupt 未恢复即结束，清理 session={session_id}")
+        clear_answer_queue(session_id)
+        release_runtime(session_id)
+        remove_manager(session_id)
+        return
+
+    # 组装对外 result（含 LTM fire-and-forget，与 coordinator.process() 一致）
+    result = coordinator.compose_result(question, result, start_time, session_id)
 
     # 6. 发送建议
     suggestions = result.get("suggestions", [])
@@ -525,7 +639,9 @@ async def _chat_stream_impl(
     except Exception as e:
         logger.warning(f"Failed to save session events: {e}")
 
-    # 9. 清理问卷管理器
+    # 9. 清理问卷管理器 + 会话运行期 + 答案队列
+    clear_answer_queue(session_id)
+    release_runtime(session_id)
     remove_manager(session_id)
 
     # 10. 清理 trace 回调（确保不留残留引用；正常流程 flush 已清理）

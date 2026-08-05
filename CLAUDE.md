@@ -11,9 +11,10 @@ MediZJ Agent Swarm — 基于 Skill + Tool 双层架构的多智能体医疗助�
 ```bash
 # 环境安装
 conda create -n medix-swarm python=3.12 -y && conda activate medix-swarm
-pip install -r requirements.txt
-# 或使用 uv:
+# 依赖安装（推荐 uv，lockfile 锁定）：
 uv sync
+# 或 pip（依赖定义在 pyproject.toml，仓库不维护 requirements.txt）：
+pip install -e .
 
 # 配置环境变量
 cp .env.example .env  # 编辑填入 LLM_API_KEY, LLM_BASE_URL, LLM_MODEL_NAME 等
@@ -34,12 +35,12 @@ python mediZJ/main.py -v       # 详细日志模式
 uv run python mediZJ/api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
-# 运行测试（231 个单元测试 + 20 个集成测试）
+# 运行测试（349 个单元测试 + 20 个集成测试）
 # 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
 # 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
 pytest tests/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
 pytest tests/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
-pytest tests/ --run-integration                        # 全部测试
+pytest tests/ --run-integration                        # 全部测试（349 个）
 pytest tests/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
@@ -64,9 +65,14 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 ```text
 用户输入 → mediZJ/main.py / mediZJ/api_main.py → SwarmCoordinator
   │
-  ├─ 检索长短期记忆，构建增强上下文
+  ├─ 意图识别（intent_classify 节点）
+  │    ├─ others（寒暄/无关）→ chat_reply 闲聊直答（LeadAgent 直答并记录短期记忆）
+  │    └─ medical → 进入澄清流程
   │
   ├─ LeadAgent.clarify()  ← 信息澄清：通过结构化问卷收集背景信息
+  │    （clarify_decide ⇄ clarify_ask 多轮 interrupt，LLM 自决最多 3 轮）
+  │
+  ├─ 检索长短期记忆，构建增强上下文（retrieve_memories，先澄清再检索）
   │
   ├─ LeadAgent.assess_and_decompose()  ← 判断复杂度并分解
   │
@@ -89,23 +95,33 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 | --- | --- |
 | `mediZJ/core/llm_client.py` | OpenAI 兼容的异步 LLM 客户端，支持流式、function calling |
 | `mediZJ/core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证、自动修复、动态工具刷新、问卷暂停/恢复 |
+| `mediZJ/core/circuit_breaker.py` | 进程级熔断器，跨请求累计 LLM 失败自动断开 |
+| `mediZJ/core/stream_token_router.py` | 流式 token 路由 |
 | `mediZJ/core/skill_registry.py` | 双层注册：Skill（能力包）+ Tool（底层函数），compat_mode 自动检测 |
 | `mediZJ/core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能，提取 SKILL.md 正文作为指令 |
 | `mediZJ/core/skill_models.py` | `SkillDefinition` 数据模型 |
 | `mediZJ/core/prompt_loader.py` | Jinja2 模板加载器，从 `mediZJ/prompt/` 目录加载模板 |
-| `mediZJ/core/questionnaire_manager.py` | asyncio.Future 问卷暂停/恢复管理器 |
+| `mediZJ/core/questionnaire_manager.py` | 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担） |
 | `mediZJ/core/tools/activate_skill.py` | `activate_skill` 工具工厂 |
 | `mediZJ/core/tools/questionnaire.py` | `question_for_user` 工具（XML 问卷解析） |
 | `mediZJ/agents/base_agent.py` | Agent 抽象基类，集成 SkillRegistry + AgentLoop |
 | `mediZJ/agents/skill_registry_mixin.py` | Worker Agent 共享的技能自动注册 Mixin |
-| `mediZJ/swarm/swarm_coordinator.py` | 顶层协调器：记忆检索 + 路由分发 + 并行调度（90s 超时） |
-| `mediZJ/swarm/lead_agent.py` | 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
+| `mediZJ/swarm/swarm_coordinator.py` | 顶层协调器：意图分类 + 记忆检索 + 路由分发 + 并行调度（单次问答总超时由 `REQUEST_TIMEOUT` 控制） |
+| `mediZJ/swarm/intent_classifier.py` | 意图识别门控（medical / others，失败降级 medical） |
+| `mediZJ/swarm/lead_agent.py` | 闲聊直答 + 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
 | `mediZJ/swarm/shared_context.py` | 共享黑板系统（SubTask/Contribution 生命周期管理） |
-| `mediZJ/swarm/events.py` | 事件驱动通信（13 种事件类型，含 AGENT_QUESTIONNAIRE） |
+| `mediZJ/swarm/events.py` | 事件驱动通信（16 种事件类型，含 AGENT_QUESTIONNAIRE） |
+| `mediZJ/lgraph/supervisor_graph.py` | SupervisorGraph 主图：intent_classify → clarify ⇄ ask → retrieve → decompose → route → synthesize |
+| `mediZJ/lgraph/agent_subgraph.py` | AgentSubGraph：Worker Think-Act-Observe 子图 |
+| `mediZJ/lgraph/tool_registry.py` | 工具注册中心（allowed_agents 权限收口） |
+| `mediZJ/lgraph/tool_executor.py` | 工具执行节点（约束验证 + references 收集） |
+| `mediZJ/api/auth.py` | 免密登录认证（SQLite 随机会话令牌 + Cookie） |
+| `mediZJ/api/services/session_runtime.py` | 会话级运行期：缓存 graph + MemorySaver，支持 interrupt 恢复 |
+| `mediZJ/api/services/image_analyzer.py` | Vision 多模态图片解析（OCR 文本注入子任务） |
 | `mediZJ/memory/short_term.py` | 短期记忆（单例，写时增量压缩，支持内存/Redis） |
 | `mediZJ/memory/long_term.py` | 长期记忆（Mem0 云服务，经 LLM 质量门控过滤） |
 | `mediZJ/memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
-| `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages 表） |
+| `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages + profiles 表） |
 | `mediZJ/memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
 | `mediZJ/memory/personal_profile.py` | 个人健康档案（SQLite `profiles` 表，md 文本整体入库） |
 | `mediZJ/memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
@@ -113,7 +129,8 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 | `mediZJ/knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
 | `mediZJ/research/deep_research_workflow.py` | 多步骤研究流水线 |
 | `mediZJ/constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
-| `mediZJ/validation/auto_fixer.py` | 自动修复违规输出（添加免责声明、警告等） |
+| `mediZJ/validation/auto_fixer.py` | 自动修复违规输出（高危警告、截断等） |
+| `mediZJ/trace/` | 全链路追踪：Span 模型、收集器、聚合分析、SQLite 持久化 |
 
 ### 关键设计模式
 
@@ -121,7 +138,7 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 - **Mixin 模式**：`SkillRegistryMixin` 为所有 Worker Agent 提供共享的技能注册
 - **共享黑板**：`SharedContext` 作为去中心化通信介质，Worker 自主认领任务
 - **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentLoop
-- **事件驱动**：`Event` 系统 + `on_event_callback` 用于 SSE 流式推送
+- **事件驱动**：`Event` 系统 + `event_callback`（supervisor_graph 节点内回调 / SharedContext.on_event_callback）用于 SSE 流式推送
 
 ### Skill + Tool 双层架构
 
@@ -151,7 +168,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 **后端链路**：
 - 三个 RAG Skill（`search-knowledge` / `clinical-guideline` / `deep-research`）统一返回结构化 `references` 数组：`[{index, doc_id, source, disease, type, filename, score, snippet, content}]`
-- `AgentLoop` 工具执行后自动收集 references，按 `doc_id` 去重，附入 Worker 最终 result
+- `ToolExecutor`（`mediZJ/lgraph/tool_executor.py`）工具执行后自动收集 references，按 `doc_id` 去重，附入 Worker 最终 result
 - `SwarmCoordinator`：单 Agent 直接透传；Swarm 模式跨 Worker 收集 → 去重 → 重编号 → 替换贡献文本旧编号
 - `synthesis.j2` 指示 LeadAgent 保留引用编号
 - SS done / JSON 事件文件 / non-stream ChatResponse 三路径携带 `citations`
@@ -165,7 +182,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 ### Prompt 管理
 
-所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，18 个 `.j2` 模板分 6 个子目录：
+所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，23 个 `.j2` 模板分 6 个子目录 + 根级 `_language_rule.j2`（统一中文语言规则）：
 
 ```python
 from mediZJ.core.prompt_loader import PromptLoader
@@ -196,8 +213,13 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 环境变量（`.env`）：
 - `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL_NAME` — OpenAI 兼容 LLM 配置
 - `LLM_TEMPERATURE`（默认 0.7）、`LLM_MAX_TOKENS`（默认 8192）
+- `LLM_MAX_CONCURRENCY`（默认 16）— LLM 全局并发信号量
+- `LLM_TIMEOUT`（默认 60s）、`REQUEST_TIMEOUT`（默认 300s）— 单次 LLM 请求与问答总超时
 - `EMBEDDING_MODEL_NAME`（默认 `BAAI/bge-small-zh-v1.5`）
 - `MEM0_API_KEY` — 可选，Mem0 长期记忆服务
+- `MEDIZJ_ADMIN_USERNAME` / `AUTH_SESSION_DAYS` / `AUTH_COOKIE_SECURE` — 免密登录配置
+- `VISION_MODEL_NAME` / `VISION_API_KEY` / `VISION_BASE_URL` — 可选，图片解析 Vision 模型（未设置回退主 LLM）
+- `BASELINE_LLM_API_KEY` / `BASELINE_LLM_BASE_URL` / `BASELINE_LLM_MODEL_NAME` — AB 测试 Baseline 配置
 
 约束定义（YAML）：
 - `mediZJ/constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为
@@ -210,18 +232,18 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 ```text
 frontend/
 ├── src/
-│   ├── api/            # HTTP 请求层（axios 实例 + 各模块 API 函数）
+│   ├── api/            # HTTP 请求层（axios 实例 + 各模块 API 函数：auth, chat, dashboard, image, knowledge, personal, session, trace）
 │   ├── components/     # Vue 组件
 │   │   ├── agents/     # Agent Timeline 等
-│   │   ├── chat/       # 聊天相关（ChatMessage, ChatInput, ThinkingBlock 等）
+│   │   ├── chat/       # 聊天相关（ChatMessage, ChatInput, ThinkingBlock, QuestionnaireCard, CitationPopover, SuggestionChips, DisclaimerBanner 等）
 │   │   ├── layout/     # 布局（AppLayout, AppSidebar, AppHeader）
 │   │   └── trace/      # 追踪（TraceTree, TraceWaterfall, SpanDetail 等）
 │   ├── composables/    # 可组合函数（useSSE, useMarkdown）
-│   ├── router/         # Vue Router 配置
-│   ├── stores/         # Pinia Store（chat, dashboard, knowledge, personal, trace）
+│   ├── router/         # Vue Router 配置（含免密登录守卫）
+│   ├── stores/         # Pinia Store（chat, auth, dashboard, knowledge, personal, trace）
 │   ├── types/          # TypeScript 类型定义（含 SSE 事件类型体系）
 │   ├── utils/          # 工具函数（eventAggregator, formatToolResult）
-│   └── views/          # 页面视图（ChatView, DashboardView, KnowledgeView 等）
+│   └── views/          # 页面视图（ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView）
 ├── eslint.config.mjs   # ESLint flat config
 ├── .prettierrc         # Prettier 配置
 ├── vitest.config.ts    # Vitest 测试配置
@@ -245,6 +267,7 @@ frontend/
 - **View 层**：瘦组件，仅负责模板渲染与事件转发。所有状态和业务逻辑通过 Store 委派。
 - **Store 层**（Pinia setup syntax）：管理各领域状态，封装 API 调用、loading/error 状态、CRUD 操作。
   - `chat.ts` — 聊天流式消息、SSE 事件、历史加载
+  - `auth.ts` — 免密登录状态、会话令牌恢复
   - `dashboard.ts` — Dashboard 统计数据
   - `knowledge.ts` — 知识库搜索/文档管理
   - `personal.ts` — 个人健康档案 CRUD

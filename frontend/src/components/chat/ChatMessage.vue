@@ -448,6 +448,7 @@ watch(
             <QuestionnaireCard
               v-if="message.questionnaire"
               :questionnaire="message.questionnaire"
+              :error="message.questionnaireError"
               @submit="
                 (answers) =>
                   chatStore.submitAnswers(message.questionnaire?.questionnaire_id || '', answers)
