@@ -49,10 +49,10 @@ async def retrieve_memories_with_intent_gate(
     保留 intent 门控逻辑以兼容外部调用（others 跳过 Mem0）。
     任何异常降级为空列表，不阻断链路。
     """
-    # 短期记忆检索
+    # 短期记忆检索（完整历史）
     recent_task = asyncio.create_task(
         coordinator.short_term_memory.get_recent_messages(
-            session_id=session_id, limit=10,
+            session_id=session_id, limit=None,
         )
     )
 
@@ -503,11 +503,11 @@ def build_supervisor_graph(
 
     async def _chat_reply_node(state: SupervisorState) -> dict:
         """节点: 闲聊模式——others 意图时 LeadAgent 直接聊天回应，跳过任务分解"""
-        # retrieve_memories 位于 clarify 之后，闲聊分支未执行；此处自检索近期历史
+        # retrieve_memories 位于 clarify 之后，闲聊分支未执行；此处自检索完整历史
         recent_history: List[Dict[str, Any]] = []
         try:
             recent_history = await coordinator.short_term_memory.get_recent_messages(
-                session_id=state["session_id"], limit=10,
+                session_id=state["session_id"], limit=None,
             )
         except BaseException as exc:
             logger.warning(f"闲聊分支短期记忆检索失败: {exc}")

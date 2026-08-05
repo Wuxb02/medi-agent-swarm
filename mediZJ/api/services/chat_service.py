@@ -70,6 +70,20 @@ def _get_session_lock(session_id: str) -> asyncio.Lock:
     return lock
 
 
+async def _restore_short_term(session_id: str, user_id: str) -> None:
+    """续聊时从 SQLite 恢复全部历史到短期记忆（幂等，空才回填）
+
+    服务重启或 TTL 过期后短期记忆清空，LeadAgent 拿不到历史上下文；
+    从权威源 SQLite 重建完整消息历史，供 _retrieve_memories 节点消费。
+    """
+    from mediZJ.memory.short_term import ShortTermMemory
+    messages = await asyncio.to_thread(
+        _session_db.get_recent_turns, session_id, user_id or "default", None
+    )
+    if messages:
+        await ShortTermMemory().restore_session(session_id, messages)
+
+
 def _cleanup_one(session_id: str):
     """清理单个 session 的管理器"""
     _manager_last_activity.pop(session_id, None)
@@ -179,6 +193,9 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
     """非流式问答（持锁后的实际处理）"""
     manager = get_manager(session_id)
 
+    # 续聊恢复：从 SQLite 回填全部历史到短期记忆（幂等，空才回填）
+    await _restore_short_term(session_id, request.user_id or "default")
+
     # 图片分析：先用 Vision 模型将图片转为文字描述，再注入上下文
     question = request.question
     if request.images:
@@ -271,6 +288,9 @@ async def _chat_stream_impl(
 
     # 1.5 创建会话的问卷管理器
     manager = get_manager(session_id)
+
+    # 1.55 续聊恢复：从 SQLite 回填全部历史到短期记忆（幂等，空才回填）
+    await _restore_short_term(session_id, chat_req.user_id or "default")
 
     # 1.6 注册 Trace 实时推送回调（span 完成时入队 EventBridge）
     if _TRACE_AVAIL:

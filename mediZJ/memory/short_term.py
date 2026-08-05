@@ -44,8 +44,10 @@ class ConversationHistory:
         })
         self.last_updated = datetime.now()
 
-    def get_recent_messages(self, limit: int = 50) -> List[Dict[str, str]]:
-        """获取最近的消息"""
+    def get_recent_messages(self, limit: Optional[int] = 50) -> List[Dict[str, str]]:
+        """获取最近的消息（limit 为 None 时返回全部）"""
+        if limit is None:
+            return list(self.messages)
         return self.messages[-limit:]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -329,17 +331,71 @@ class ShortTermMemory:
             return self._load_from_redis(session_id)
         return None
 
+    async def restore_session(
+        self,
+        session_id: str,
+        messages: List[Dict[str, str]],
+    ) -> bool:
+        """从 SQLite 回填会话历史到短期记忆（批量、幂等）
+
+        用于"最近会话恢复"：服务重启或 TTL 过期后短期记忆清空，续聊时
+        从权威源 SQLite 重建完整消息历史，供 _retrieve_memories 消费。
+
+        实现要点：
+        - 空 messages / Redis 后端（本就持久）直接跳过。
+        - 单次 per-session 锁覆盖整批，与 add_message 互斥防交错丢消息。
+        - 已有消息则视为已恢复，返回 False 不覆盖（同会话连续提问幂等）。
+        - 回填后按现有压缩策略处理：熵为 high 时压缩较旧消息（含 LLM 摘要），
+          低熵保持完整，全量上下文始终可用。
+        - 保留 SQLite 原始 timestamp，刷新 last_updated 使 TTL 重新计时。
+
+        Args:
+            session_id: 会话 ID
+            messages: 消息列表（按时间正序），每条含 role/content/timestamp
+
+        Returns:
+            True 表示本次执行了回填；False 表示跳过（空/Redis/已有消息）
+        """
+        if not messages:
+            return False
+        if self.storage_type == "redis" and self.redis_client:
+            return False  # Redis 模式本就持久，防御性跳过
+
+        async with self._get_session_lock(session_id):
+            history = self.get_session(session_id)
+            if history is not None and history.messages:
+                return False  # 已有消息，视为已恢复
+
+            if history is None:
+                history = self.create_session(session_id)
+
+            history.messages = messages
+            history.last_updated = datetime.now()
+
+            # 回填后按现有压缩策略处理：熵为 high 时压缩较旧消息（含 LLM 摘要），
+            # 低熵保持完整。在锁内执行，与 add_message 的增量压缩一致，互斥安全。
+            if self.entropy_manager:
+                await self._maybe_compress_incremental(history)
+
+            if self.storage_type == "redis" and self.redis_client:
+                self._save_to_redis(history)
+
+        logger.info(
+            f"[MemoryRestore] session={session_id} 回填 {len(messages)} 条消息"
+        )
+        return True
+
     async def get_recent_messages(
         self,
         session_id: str,
-        limit: int = 50
+        limit: Optional[int] = 50
     ) -> List[Dict[str, str]]:
         """
         获取最近的消息（读取时不做压缩，压缩已在写入时完成）
 
         Args:
             session_id: 会话ID
-            limit: 最大消息数
+            limit: 最大消息数；None 时返回全部消息
 
         Returns:
             消息列表

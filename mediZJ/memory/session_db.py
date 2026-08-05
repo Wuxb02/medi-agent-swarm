@@ -639,6 +639,58 @@ class SessionDB:
 
         return self._execute(_do_count)
 
+    def get_recent_turns(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+        limit: Optional[int] = 10,
+    ) -> List[Dict[str, Any]]:
+        """获取最近 N 轮消息（按时间正序返回），用于会话恢复回填短期记忆
+
+        limit 为 None 时返回全部消息。仅反序列化 images 列
+        （恢复上下文只需要 role/content/timestamp），避免反序列化大 JSON 字段。
+        """
+
+        def _do_get(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+            if user_id is None:
+                owner_ok = conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone() is not None
+            else:
+                owner_ok = conn.execute(
+                    "SELECT 1 FROM sessions WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
+                ).fetchone() is not None
+            if not owner_ok:
+                return []
+
+            sql = """
+                SELECT * FROM messages
+                WHERE session_id = ?
+                ORDER BY turn_index DESC, id DESC
+            """
+            params: tuple = (session_id,)
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (session_id, limit * 2)
+
+            rows = conn.execute(sql, params).fetchall()
+
+            messages = []
+            for mr in reversed(rows):  # 逆序回正：旧 → 新
+                msg = dict(mr)
+                images = msg.get("images")
+                if images and isinstance(images, str):
+                    try:
+                        msg["images"] = json.loads(images)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                messages.append(msg)
+            return messages
+
+        return self._execute(_do_get)
+
     def list_sessions(
         self,
         limit: int = 50,
