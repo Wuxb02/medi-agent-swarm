@@ -122,15 +122,15 @@ def build_supervisor_graph(
         编译后的 CompiledStateGraph
     """
     lead_agent = coordinator.lead_agent
-    consultation_agent = coordinator.consultation_agent
-    diagnostic_agent = coordinator.diagnostic_agent
-    research_agent = coordinator.research_agent
+    consultation_worker = coordinator.get_worker("consultation_agent")
+    diagnostic_worker = coordinator.get_worker("diagnostic_agent")
+    research_worker = coordinator.get_worker("research_agent")
 
-    def _get_agent_by_id(agent_id: str):
+    def _get_worker_by_id(agent_id: str):
         mapping = {
-            "consultation_agent": consultation_agent,
-            "diagnostic_agent": diagnostic_agent,
-            "research_agent": research_agent,
+            "consultation_agent": consultation_worker,
+            "diagnostic_agent": diagnostic_worker,
+            "research_agent": research_worker,
         }
         return mapping.get(agent_id)
 
@@ -407,16 +407,16 @@ def build_supervisor_graph(
             task = subtasks[0]
 
         agent_id = task.get("assigned_agent", "consultation_agent")
-        agent = _get_agent_by_id(agent_id)
-        if agent is None:
-            agent = consultation_agent
-            agent_id = agent.agent_id
+        worker = _get_worker_by_id(agent_id)
+        if worker is None:
+            worker = consultation_worker
+            agent_id = worker.agent_id
 
         sub_session_id = f"{state['session_id']}:{agent_id}:{task.get('id', 'single')}"
 
         # 注入流式回调
         if event_callback:
-            _inject_worker_callbacks(agent, agent_id, event_callback)
+            _inject_worker_callbacks(worker, agent_id, event_callback)
 
         # Trace: AGENT span
         _ctx = traced_span(SpanType.AGENT, name=agent_id) if TRACE_AVAILABLE else None
@@ -426,14 +426,14 @@ def build_supervisor_graph(
         try:
             # 构建并执行 AgentSubGraph
             subgraph = build_agent_subgraph(
-                agent=agent,
+                worker=worker,
                 tool_registry=tool_registry,
-                max_iterations=agent.config.get('max_iterations', 10),
+                max_iterations=worker.config.get('max_iterations', 10),
                 max_tool_calls=2,
-                on_thinking=agent.loop.on_thinking,
-                on_tool_step=agent.loop.on_tool_step,
-                on_thinking_done=agent.loop.on_thinking_done,
-                on_content_token=agent.loop.on_content_token,
+                on_thinking=worker.on_thinking,
+                on_tool_step=worker.on_tool_step,
+                on_thinking_done=worker.on_thinking_done,
+                on_content_token=worker.on_content_token,
             )
 
             result = await subgraph.ainvoke({
@@ -444,14 +444,14 @@ def build_supervisor_graph(
                 "subtask_type": task.get("type", ""),
                 "subtask_description": task.get("description", ""),
                 "question": state["question"],  # 含图片分析文本的完整问题
-                "max_iterations": agent.config.get('max_iterations', 10),
+                "max_iterations": worker.config.get('max_iterations', 10),
                 "max_tool_calls": 2,
             })
         finally:
             if _ctx:
                 _ctx.__exit__(None, None, None)
             if event_callback:
-                _cleanup_worker_callbacks(agent)
+                _cleanup_worker_callbacks(worker)
 
         final_answer = result.get("final_answer", "")
         token_usage = result.get("usage", {})
@@ -580,17 +580,17 @@ def build_supervisor_graph(
     async def _worker_executor_node(state: Dict) -> dict:
         """Send 目标节点: 每个 Worker 独立执行 AgentSubGraph（Map 阶段）"""
         agent_id = state.get("agent_id", "consultation_agent")
-        agent = _get_agent_by_id(agent_id)
-        if agent is None:
-            agent = consultation_agent
-            agent_id = agent.agent_id
+        worker = _get_worker_by_id(agent_id)
+        if worker is None:
+            worker = consultation_worker
+            agent_id = worker.agent_id
 
         subtask = state.get("subtask", {})
         sub_session_id = state.get("sub_session_id", "")
 
         # 注入流式回调
         if event_callback:
-            _inject_worker_callbacks(agent, agent_id, event_callback)
+            _inject_worker_callbacks(worker, agent_id, event_callback)
 
             # 发射 AGENT_START
             event_callback(Event(
@@ -606,14 +606,14 @@ def build_supervisor_graph(
 
         try:
             subgraph = build_agent_subgraph(
-                agent=agent,
+                worker=worker,
                 tool_registry=tool_registry,
-                max_iterations=agent.config.get('max_iterations', 10),
+                max_iterations=worker.config.get('max_iterations', 10),
                 max_tool_calls=2,
-                on_thinking=agent.loop.on_thinking,
-                on_tool_step=agent.loop.on_tool_step,
-                on_thinking_done=agent.loop.on_thinking_done,
-                on_content_token=agent.loop.on_content_token,
+                on_thinking=worker.on_thinking,
+                on_tool_step=worker.on_tool_step,
+                on_thinking_done=worker.on_thinking_done,
+                on_content_token=worker.on_content_token,
             )
 
             # Swarm 90s 超时
@@ -626,7 +626,7 @@ def build_supervisor_graph(
                     "subtask_type": subtask.get("type", ""),
                     "subtask_description": subtask.get("description", ""),
                     "question": state["question"],  # 含图片分析文本的完整问题
-                    "max_iterations": agent.config.get('max_iterations', 10),
+                    "max_iterations": worker.config.get('max_iterations', 10),
                     "max_tool_calls": 2,
                 }),
                 timeout=90.0,
@@ -648,7 +648,7 @@ def build_supervisor_graph(
             if _ctx:
                 _ctx.__exit__(None, None, None)
             if event_callback:
-                _cleanup_worker_callbacks(agent)
+                _cleanup_worker_callbacks(worker)
 
         # 发射 AGENT_COMPLETE
         if event_callback:
@@ -1068,8 +1068,8 @@ def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[in
             contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
 
 
-def _inject_worker_callbacks(agent, agent_id: str, event_callback: Callable):
-    """为 Worker Agent 注入流式回调"""
+def _inject_worker_callbacks(worker, agent_id: str, event_callback: Callable):
+    """为 Worker 注入流式回调"""
     def _on_thinking(content, iteration):
         event_callback(Event(
             type=EventType.AGENT_THINKING,
@@ -1105,17 +1105,15 @@ def _inject_worker_callbacks(agent, agent_id: str, event_callback: Callable):
             data={"token": token},
         ))
 
-    if hasattr(agent, 'set_on_thinking'):
-        agent.set_on_thinking(_on_thinking)
-        agent.set_on_tool_step(_on_tool_step)
-        agent.set_on_thinking_done(_on_thinking_done)
-        agent.set_on_content_token(_on_content_token)
+    worker.set_on_thinking(_on_thinking)
+    worker.set_on_tool_step(_on_tool_step)
+    worker.set_on_thinking_done(_on_thinking_done)
+    worker.set_on_content_token(_on_content_token)
 
 
-def _cleanup_worker_callbacks(agent):
-    """清理 Worker Agent 的流式回调"""
-    if hasattr(agent, 'set_on_thinking'):
-        agent.set_on_thinking(None)
-        agent.set_on_tool_step(None)
-        agent.set_on_thinking_done(None)
-        agent.set_on_content_token(None)
+def _cleanup_worker_callbacks(worker):
+    """清理 Worker 的流式回调"""
+    worker.set_on_thinking(None)
+    worker.set_on_tool_step(None)
+    worker.set_on_thinking_done(None)
+    worker.set_on_content_token(None)

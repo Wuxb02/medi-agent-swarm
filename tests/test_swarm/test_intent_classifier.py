@@ -207,10 +207,8 @@ class TestChatModeRouting:
         coordinator._refresh_worker_profiles = lambda *args, **kwargs: None
         coordinator._save_long_term_memory = AsyncMock(return_value=None)
 
-        # mock Worker Agents（build_supervisor_graph 构造时会访问）
-        coordinator.consultation_agent = MagicMock()
-        coordinator.diagnostic_agent = MagicMock()
-        coordinator.research_agent = MagicMock()
+        # mock Worker（build_supervisor_graph 构造时会访问 get_worker）
+        coordinator.get_worker = lambda agent_id: MagicMock()
 
         # mock LeadAgent：chat_reply 返回固定文本，assess_and_decompose 返回单任务
         coordinator.lead_agent = type("LA", (), {

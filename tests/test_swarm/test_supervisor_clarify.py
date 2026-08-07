@@ -18,20 +18,19 @@ from mediZJ.swarm.intent_classifier import IntentResult
 
 
 def _make_worker(agent_id: str):
-    """构造 mock Worker Agent：带 loop.short_term_memory + llm_client（子图执行依赖）"""
+    """构造 mock Worker：带 short_term_memory + llm_client（子图执行依赖）"""
     worker = MagicMock()
     worker.agent_id = agent_id
     worker.config = {"max_iterations": 3, "temperature": 0.7}
-    worker.loop = MagicMock()
-    worker.loop.short_term_memory = type("STM", (), {
+    worker.short_term_memory = type("STM", (), {
         "get_history": AsyncMock(return_value=[]),
         "add_message": AsyncMock(return_value=None),
     })()
-    worker.loop.user_context = None
-    worker.loop.on_thinking = None
-    worker.loop.on_tool_step = None
-    worker.loop.on_thinking_done = None
-    worker.loop.on_content_token = None
+    worker.user_context = None
+    worker.on_thinking = None
+    worker.on_tool_step = None
+    worker.on_thinking_done = None
+    worker.on_content_token = None
 
     # LLM：流式/非流式均返回最终回答（无工具调用）
     from mediZJ.core.llm_client import LLMResponse
@@ -74,10 +73,13 @@ def _make_coordinator(questionnaire_manager, lead_llm_response):
     coordinator.format_references_section = MagicMock(return_value="")
     coordinator.extract_suggestions = MagicMock(return_value=[])
 
-    # Worker Agents（build_supervisor_graph 构造时访问）
-    coordinator.consultation_agent = _make_worker("consultation_agent")
-    coordinator.diagnostic_agent = _make_worker("diagnostic_agent")
-    coordinator.research_agent = _make_worker("research_agent")
+    # Worker（build_supervisor_graph 通过 get_worker 访问）
+    _workers = {
+        "consultation_agent": _make_worker("consultation_agent"),
+        "diagnostic_agent": _make_worker("diagnostic_agent"),
+        "research_agent": _make_worker("research_agent"),
+    }
+    coordinator.get_worker = lambda agent_id: _workers.get(agent_id)
 
     # LeadAgent：澄清 LLM 响应可控（支持 side_effect 序列实现多轮）
     llm_client = MagicMock()

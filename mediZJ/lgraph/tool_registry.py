@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from mediZJ.core.skill_registry import SkillParameter
-from mediZJ.core.skill_models import SkillDefinition
 
 
 @dataclass

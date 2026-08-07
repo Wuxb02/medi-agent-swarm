@@ -20,11 +20,9 @@ from loguru import logger
 
 from mediZJ.core import LLMClient
 from mediZJ.core.prompt_loader import PromptLoader
-from mediZJ.swarm.shared_context import SharedContext, SubTask, TaskStatus
 from mediZJ.swarm.lead_agent import LeadAgent
-from mediZJ.swarm.events import Event, EventType
 from mediZJ.swarm.intent_classifier import IntentClassifier
-from mediZJ.agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
+from mediZJ.lgraph.worker import create_worker, Worker
 from mediZJ.memory import (
     SessionSummaryManager,
     SessionSummary,
@@ -33,19 +31,10 @@ from mediZJ.memory import (
     PersonalProfile,
 )
 
-# Trace 惰性导入
-try:
-    from mediZJ.trace.context import traced_span
-    from mediZJ.trace.models import SpanType, AgentAttributes
-    _TRACE = True
-except ImportError:
-    _TRACE = False
-
 # LangGraph 依赖
 try:
     from mediZJ.lgraph.tool_registry import ToolRegistry
     from mediZJ.core.skill_loader import discover_skills
-    from mediZJ.core.skill_models import SkillDefinition
     _LANGGRAPH_AVAILABLE = True
 except ImportError as e:
     _LANGGRAPH_AVAILABLE = False
@@ -79,21 +68,16 @@ class SwarmCoordinator:
         self.event_callback = event_callback
         self.questionnaire_manager = questionnaire_manager
 
-        # 初始化 Agent
+        # 初始化 LeadAgent 与三个 Worker
         self.lead_agent = LeadAgent(
             llm_client=self.llm_client,
             questionnaire_manager=self.questionnaire_manager,
         )
-        self.consultation_agent = ConsultationAgent()
-        self.diagnostic_agent = DiagnosticAgent()
-        self.research_agent = ResearchAgent()
-
-        # Worker 池
-        self.worker_pool: List[Any] = [
-            self.consultation_agent,
-            self.diagnostic_agent,
-            self.research_agent
-        ]
+        self._workers: Dict[str, Worker] = {
+            "consultation_agent": create_worker("consultation_agent", self.llm_client),
+            "diagnostic_agent": create_worker("diagnostic_agent", self.llm_client),
+            "research_agent": create_worker("research_agent", self.llm_client),
+        }
 
         # 记忆管理器
         self.session_manager = SessionSummaryManager()
@@ -109,29 +93,20 @@ class SwarmCoordinator:
         self._tool_registry = None
         self._init_langgraph_registry()
 
-        # 将短期记忆和用户档案注入到所有 Worker Agent 的 Loop
-        # 注意：LeadAgent 不继承 BaseAgent，没有 loop 属性，不需要注入
+        # 将短期记忆和用户档案注入到所有 Worker
+        # 注意：LeadAgent 不继承 Worker，没有 short_term_memory 属性，不需要注入
         personal_text = self.personal_profile.to_text()
-        for worker in self.worker_pool:
-            if hasattr(worker, 'loop'):
-                worker.loop.short_term_memory = self.short_term_memory
-                if personal_text != "暂无":
-                    worker.loop.user_context = personal_text
-                # 注入问卷管理器（用于交互式提问）
-                if self.questionnaire_manager:
-                    worker.loop.questionnaire_manager = self.questionnaire_manager
+        for worker in self._workers.values():
+            worker.short_term_memory = self.short_term_memory
+            if personal_text != "暂无":
+                worker.user_context = personal_text
 
-        logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
+        logger.info(f"SwarmCoordinator initialized with {len(self._workers)} workers")
         logger.info(f"Memory system: short_term={self.short_term_memory.storage_type}, long_term={'enabled' if self.long_term_memory.enabled else 'disabled'}")
 
-    def _get_agent_by_id(self, agent_id: str):
-        """根据 agent_id 返回对应的 Agent 实例"""
-        mapping = {
-            "consultation_agent": self.consultation_agent,
-            "diagnostic_agent": self.diagnostic_agent,
-            "research_agent": self.research_agent
-        }
-        return mapping.get(agent_id)
+    def get_worker(self, agent_id: str) -> Optional[Worker]:
+        """根据 agent_id 返回对应的 Worker 实例"""
+        return self._workers.get(agent_id)
 
     # ===== LangGraph ToolRegistry =====
 
@@ -363,12 +338,11 @@ class SwarmCoordinator:
     # ===== 记忆检索（供 SupervisorGraph 节点复用）=====
 
     def _refresh_worker_profiles(self):
-        """刷新所有 Worker Agent 的用户档案"""
+        """刷新所有 Worker 的用户档案"""
         personal_text = self.personal_profile.to_text()
         if personal_text != "暂无":
-            for worker in self.worker_pool:
-                if hasattr(worker, 'loop'):
-                    worker.loop.user_context = personal_text
+            for worker in self._workers.values():
+                worker.user_context = personal_text
 
     # ===== 记忆评估与保存 =====
 

@@ -76,36 +76,32 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
   │
   ├─ LeadAgent.assess_and_decompose()  ← 判断复杂度并分解
   │
-  ├─ 1 个子任务 → Agent 通过 process_subtask() 执行（隔离子会话）→ 最终回答
+  ├─ 1 个子任务 → Worker 通过 AgentSubGraph 执行（隔离子会话）→ 最终回答
   │
   └─ ≥2 个子任务 → Swarm 模式
        ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
-       ├─ Worker 通过 process_subtask() 自主认领并行执行
-       │    ├─ ConsultationAgent (健康咨询)
-       │    ├─ DiagnosticAgent (症状诊断)
-       │    └─ ResearchAgent (医学研究)
+       ├─ Worker 通过 Send API 并行认领执行（AgentSubGraph）
+       │    ├─ consultation_agent (健康咨询)
+       │    ├─ diagnostic_agent (症状诊断)
+       │    └─ research_agent (医学研究)
        └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
 
-每个 Worker Agent 内部运行 `AgentLoop`（Think-Act-Observe 循环），每次最多执行 2 次工具调用。所有 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），无历史上下文。
+每个 Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，内部运行 `AgentSubGraph`（LangGraph 状态图：Think-Act-Observe 循环），每次最多执行 2 次工具调用。所有 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），无历史上下文。
 
 ### 核心模块
 
 | 模块 | 职责 |
 | --- | --- |
 | `mediZJ/core/llm_client.py` | OpenAI 兼容的异步 LLM 客户端，支持流式、function calling |
-| `mediZJ/core/agent_loop.py` | 核心执行引擎：Think-Act-Observe 循环，集成约束验证、自动修复、动态工具刷新、问卷暂停/恢复 |
 | `mediZJ/core/circuit_breaker.py` | 进程级熔断器，跨请求累计 LLM 失败自动断开 |
 | `mediZJ/core/stream_token_router.py` | 流式 token 路由 |
-| `mediZJ/core/skill_registry.py` | 双层注册：Skill（能力包）+ Tool（底层函数），compat_mode 自动检测 |
+| `mediZJ/core/skill_registry.py` | `SkillParameter` 参数数据模型（SkillRegistry 类已被 ToolRegistry 取代） |
 | `mediZJ/core/skill_loader.py` | 从 `.claude/skills/` 动态发现技能，提取 SKILL.md 正文作为指令 |
-| `mediZJ/core/skill_models.py` | `SkillDefinition` 数据模型 |
 | `mediZJ/core/prompt_loader.py` | Jinja2 模板加载器，从 `mediZJ/prompt/` 目录加载模板 |
 | `mediZJ/core/questionnaire_manager.py` | 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担） |
-| `mediZJ/core/tools/activate_skill.py` | `activate_skill` 工具工厂 |
 | `mediZJ/core/tools/questionnaire.py` | `question_for_user` 工具（XML 问卷解析） |
-| `mediZJ/agents/base_agent.py` | Agent 抽象基类，集成 SkillRegistry + AgentLoop |
-| `mediZJ/agents/skill_registry_mixin.py` | Worker Agent 共享的技能自动注册 Mixin |
+| `mediZJ/lgraph/worker.py` | 轻量 Worker 规格：承载 AgentSubGraph 执行的系统提示词、用户输入格式化、结果后处理、Skill 工具执行 |
 | `mediZJ/swarm/swarm_coordinator.py` | 顶层协调器：意图分类 + 记忆检索 + 路由分发 + 并行调度（单次问答总超时由 `REQUEST_TIMEOUT` 控制） |
 | `mediZJ/swarm/intent_classifier.py` | 意图识别门控（medical / others，失败降级 medical） |
 | `mediZJ/swarm/lead_agent.py` | 闲聊直答 + 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
@@ -135,9 +131,9 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 ### 关键设计模式
 
 - **单例模式**：`MedicalKnowledgeBase`、`ShortTermMemory`、`SessionDB`、`SessionVectorStore`（`__new__` 实现）
-- **Mixin 模式**：`SkillRegistryMixin` 为所有 Worker Agent 提供共享的技能注册
+- **轻量 Worker 规格**：`Worker`（`mediZJ/lgraph/worker.py`）承载三个 Worker（consultation/diagnostic/research）的全部执行配置与回调，替代旧 Agent 类
 - **共享黑板**：`SharedContext` 作为去中心化通信介质，Worker 自主认领任务
-- **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentLoop
+- **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentSubGraph
 - **事件驱动**：`Event` 系统 + `event_callback`（supervisor_graph 节点内回调 / SharedContext.on_event_callback）用于 SSE 流式推送
 
 ### Skill + Tool 双层架构
@@ -182,7 +178,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 ### Prompt 管理
 
-所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，23 个 `.j2` 模板分 6 个子目录 + 根级 `_language_rule.j2`（统一中文语言规则）：
+所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，22 个 `.j2` 模板分 6 个子目录 + 根级 `_language_rule.j2`（统一中文语言规则）：
 
 ```python
 from mediZJ.core.prompt_loader import PromptLoader
@@ -203,7 +199,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 | 层级 | 存储 | 用途 |
 | --- | --- | --- |
 | 短期记忆 | 内存（默认）/Redis | 会话级对话历史，写时增量压缩，仅供 LeadAgent 参考 |
-| 个人档案 | `sessions.db` 的 `profiles` 表（content/pending 两列存 md 文本） | 患者信息（年龄/性别/病史/过敏史），AgentLoop 注入为 system message |
+| 个人档案 | `sessions.db` 的 `profiles` 表（content/pending 两列存 md 文本） | 患者信息（年龄/性别/病史/过敏史），由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message |
 | 长期记忆 | Mem0 云服务 | 跨会话可复用医学事实，经 LLM 质量门控（score < 5 跳过） |
 
 未设置 `MEM0_API_KEY` 时优雅降级，仅使用短期记忆和个人档案。

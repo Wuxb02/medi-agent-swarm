@@ -1,6 +1,6 @@
 # MediZJ多智能体医疗助手
 
-基于 Skill + Tool 双层架构的多智能体协作医疗助手系统，融合 Agent Loop、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
+基于 Skill + Tool 双层架构的多智能体协作医疗助手系统，融合 LangGraph Agent 子图、Agent Swarm、记忆管理、Milvus 知识库和 Web 前端界面。
 ![alt text](mediZJ/assets/image.png)
 
 ## 📋 项目概述
@@ -13,8 +13,8 @@
 - **📡 流式响应**: 实时推送 Agent 执行过程，可视化 Agent 参与情况 ✅
 - **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），基于 LangGraph interrupt/Command 挂起恢复，支持 **LLM 自决多轮追问**（硬上限 3 轮），实现"先问后诊" ✅
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
-- **🤖 Agent Loop**: LLM 驱动的 Skill 调用循环，Agent 自主规划、调用 Skills 并完成任务 ✅
-- **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `process_subtask()` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
+- **🤖 LangGraph Agent 子图**: LLM 驱动的 Skill 调用循环（AgentSubGraph），Worker 自主规划、调用 Skills 并完成任务 ✅
+- **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
 - **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（SQLite profiles 表）+ **LLM 质量门控 + 信息分类存储** ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
@@ -70,8 +70,8 @@
 
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（retrieve 阶段取最近 10 条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
-   - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `process_subtask()` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
-   - 个人档案：SQLite `profiles` 表（Markdown 文本整体入库），通过 AgentLoop 注入为 system message，所有 Agent 共享
+   - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `AgentSubGraph` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
+   - 个人档案：SQLite `profiles` 表（Markdown 文本整体入库），由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message
    - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
@@ -159,7 +159,7 @@ Command(resume=answers) 恢复图 → clarify_ask 返回答案 ──┘（回�
     ▼
 LeadAgent.assess_and_decompose(问题 + collected_info)
     │
-    └─ 按子任务数量路由 → Worker 执行（统一走 process_subtask + 隔离子会话）
+    └─ 按子任务数量路由 → Worker 执行（统一走 AgentSubGraph + 隔离子会话）
 ```
 
 ### 核心组件
@@ -373,27 +373,17 @@ medix-agent-swarm/
 │   │   │   ├── knowledge_service.py     # 知识库服务
 │   │   │   └── session_service.py       # 会话服务
 │   │   └── dependencies.py             # 依赖注入
-│   ├── agents/                          # Agent 实现
-│   │   ├── base_agent.py                # Agent 基类
-│   │   ├── consultation_agent.py        # 健康咨询 Agent
-│   │   ├── diagnostic_agent.py          # 症状诊断 Agent
-│   │   ├── research_agent.py            # 医学研究 Agent
-│   │   └── skill_registry_mixin.py      # Skill 注册混入
 │   ├── core/                            # 核心引擎
-│   │   ├── agent_loop.py                # Agent Loop（集成约束验证，动态工具刷新，用户档案注入）
 │   │   ├── llm_client.py                # LLM 客户端（全局并发信号量 + 共享连接池）
 │   │   ├── circuit_breaker.py           # 进程级熔断器（连续失败断开）
 │   │   ├── stream_token_router.py       # 流式 token 路由
 │   │   ├── prompt_loader.py             # Jinja2 Prompt 模板加载器
 │   │   ├── skill_loader.py              # 动态加载 Skills（支持多函数加载、指令提取）
-│   │   ├── skill_registry.py            # Skill 注册表（双层注册、compat_mode 自动检测）
-│   │   ├── skill_models.py              # SkillDefinition 数据模型
+│   │   ├── skill_registry.py            # SkillParameter 参数数据模型（SkillRegistry 类已由 ToolRegistry 取代）
 │   │   ├── questionnaire_manager.py     # 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担）
-│   │   ├── tools/                       # 统一基础工具目录
-│   │   │   ├── __init__.py              # 统一导出
-│   │   │   ├── activate_skill.py        # activate_skill 工具工厂
-│   │   │   └── questionnaire.py         # question_for_user 工具（XML 解析 + 格式化）
-│   │   └── state_manager.py             # 状态管理
+│   │   └── tools/                       # 统一基础工具目录
+│   │       ├── __init__.py              # 统一导出
+│   │       └── questionnaire.py         # question_for_user 工具（XML 解析 + 格式化）
 │   ├── prompt/                          # Prompt 模板（Jinja2，集中管理）
 │   │   ├── agents/                      # Agent 系统提示词
 │   │   │   ├── consultation_system.j2
@@ -417,9 +407,8 @@ medix-agent-swarm/
 │   │   │   ├── compression_user.j2
 │   │   │   ├── quality_eval.j2          # 质量评估 + 信息分类
 │   │   │   └── intent_gate.j2           # 意图识别门控
-│   │   ├── agent_loop/                  # Agent Loop 控制消息
-│   │   │   ├── tool_limit.j2
-│   │   │   └── force_answer.j2
+│   │   ├── lgraph/                      # LangGraph 子图控制消息
+│   │   │   └── force_answer.j2          # 强制收尾
 │   │   ├── validation/                  # 输出验证模板
 │   │   │   ├── high_risk_warning.j2
 │   │   │   └── truncation_notice.j2
@@ -437,7 +426,8 @@ medix-agent-swarm/
 │   │   ├── supervisor_state.py          # 主图状态（含 clarify_rounds / clarify_pending）
 │   │   ├── agent_state.py               # Worker 子图状态
 │   │   ├── tool_registry.py             # 工具注册中心（allowed_agents 权限收口）
-│   │   └── tool_executor.py             # 工具执行节点（约束验证 + references 收集）
+│   │   ├── tool_executor.py             # 工具执行节点（约束验证 + references 收集）
+│   │   └── worker.py                    # 轻量 Worker 规格（系统提示词/用户输入格式化/后处理/Skill 工具执行）
 │   ├── trace/                           # Agent 追踪系统
 │   │   ├── __init__.py                  # 模块导出
 │   │   ├── models.py                    # Span 数据模型（6 种类型 + 4 类属性）
@@ -502,8 +492,7 @@ medix-agent-swarm/
 ├── tests/                               # 测试套件（pytest 现代化）
 │   ├── conftest.py                      # 共享 fixtures（mock LLM、环境变量、临时目录）
 │   ├── helpers.py                       # 测试辅助函数
-│   ├── test_core/                       # 核心模块：llm_client, agent_loop, skill_registry, state_manager, prompt_loader, questionnaire_manager, circuit_breaker, stream_token_router
-│   ├── test_agents/                     # Agent：能力标签、工具注册
+│   ├── test_core/                       # 核心模块：llm_client, skill_registry（SkillParameter）, prompt_loader, questionnaire_manager, circuit_breaker, stream_token_router
 │   ├── test_swarm/                      # Swarm：events, shared_context, intent_classifier, tool_executor, supervisor_clarify
 │   ├── test_memory/                     # 记忆：short_term（含并发安全）, entropy_manager, personal_profile（用户隔离）
 │   ├── test_api/                        # API 层：chat_service 并发互斥、auth 登录
@@ -540,7 +529,7 @@ medix-agent-swarm/
 **架构说明**：
 - ✅ **Web + CLI 双入口**：`mediZJ/api_main.py`（Web）/ `mediZJ/main.py`（CLI）
 - ✅ **统一配置**：使用项目根目录 `.env` 文件管理环境变量
-- ✅ **统一 Agent 委派**：单 Agent / Swarm / 降级均走 `process_subtask()` + 子会话隔离，路由自动决定
+- ✅ **统一 Agent 委派**：单 Agent / Swarm / 降级均走 `AgentSubGraph` + 子会话隔离，路由自动决定
 
 ## 🤖 Skills 和 Agent 清单
 
@@ -561,19 +550,21 @@ medix-agent-swarm/
 | `search_similar_cases` | 搜索相似案例 | 长期记忆 | 跨会话经验 |
 | `render_markdown_html` | Markdown/HTML 互转 | 工具内置 | 文档渲染 |
 
-### 3个专业 Agent（自主选择 Skills）
+### 3个专业 Worker（自主选择 Skills）
 
-#### 1. ConsultationAgent（健康咨询）
+Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，三个角色通过 agent_id 区分，内部均运行 AgentSubGraph。
+
+#### 1. consultation_agent（健康咨询）
 - **能力**: 通用健康咨询和生活方式指导
 - **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `search_knowledge`, `recommend_lifestyle`
 
-#### 2. DiagnosticAgent（症状诊断）
+#### 2. diagnostic_agent（症状诊断）
 - **能力**: 症状分析、风险评估和鉴别诊断
 - **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `assess_risk`, `analyze_symptoms`, `disease_code`
 
-#### 3. ResearchAgent（医学研究）
+#### 3. research_agent（医学研究）
 - **能力**: 循证医学证据和权威指南检索
 - **注册 Skills**: 全部10个（自主选择合适的 Skills）
 - **常用 Skills**: `clinical_guideline`, `deep_research`
@@ -812,16 +803,16 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
    - 相关记忆嵌入子任务 description → 传递给 Worker
    ↓
 5. Worker Agent 执行（统一子会话隔离）
-   - 所有模式（单 Agent / Swarm / 降级）均走 process_subtask()
+   - 所有模式（单 Agent / Swarm / 降级）均走 AgentSubGraph
    - 每个 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），历史互不干扰
    - Worker 不加载短期记忆，只接收任务指令和用户档案
-   - 个人档案：通过 AgentLoop 自动注入为 system message（所有 Agent 共享）
+   - 个人档案：由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message（所有 Worker 共享）
    - 执行完毕后：最终回答合并回主会话，子会话清除
    ↓
 6. 对话结束 → LLM 质量评估 + 信息分类
    ├─ 个人信息 → profiles 表
    ├─ 可复用事实 → Mem0
-   └─ 短期记忆 → Agent Loop 中自动保存
+   └─ 短期记忆 → AgentSubGraph 执行中自动保存
 ```
 
 **注意事项**：
@@ -982,7 +973,7 @@ LLM 不可用或调用失败时，自动降级为截断模式：将 user + assis
 核心流程：
 
 ```
-AgentLoop.run()
+Agent 执行（AgentSubGraph）写入短期记忆
   → ShortTermMemory.add_message(session_id, "user", content)
     → messages.append(new_message)
     → _maybe_compress_incremental(history)
@@ -1048,11 +1039,11 @@ python -m mediZJ.eval.runner --score-abtest
 
 ### 动态”卡带式” System Prompt
 
-系统提示词采用 KV cache 友好的三层结构（基础角色 + 技能目录 → 用户档案 → Skill 指令通过 tool result 返回）。system prompt 前缀在 Agent Loop 中保持稳定，Skill 指令不修改 system prompt，而是通过 `activate_skill` 的工具返回值传递给 LLM。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
+系统提示词采用 KV cache 友好的三层结构（基础角色 + 技能目录 → 用户档案 → Skill 指令通过 tool result 返回）。system prompt 前缀在 AgentSubGraph 中保持稳定，Skill 指令不修改 system prompt，而是通过 `activate_skill` 的工具返回值传递给 LLM。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
 
 ### 设计理念
 
-- **集中管理**: 23 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
+- **集中管理**: 22 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
 - **Jinja2 模板**: 支持变量渲染（`{{ variable }}`）、条件分支（`{% if %}`）、循环（`{% for %}`）
 - **代码解耦**: Python 代码不再包含 prompt 字符串，修改 prompt 无需改动业务逻辑
 - **统一入口**: `PromptLoader` 类提供 `load()`（静态）和 `render()`（带变量）两个方法
@@ -1066,7 +1057,7 @@ prompt/
 ├── swarm/                       # Swarm 协调提示词（8 个）
 ├── research/                    # 研究模块提示词（2 个）
 ├── memory/                      # 记忆相关提示词（4 个，含 intent_gate）
-├── agent_loop/                  # Agent Loop 控制消息（2 个）
+├── lgraph/                      # LangGraph 子图控制消息（1 个）
 ├── validation/                  # 输出验证模板（2 个）
 └── _language_rule.j2            # 统一中文语言规则
 ```
@@ -1114,8 +1105,7 @@ quality_eval = PromptLoader.render(
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
 | `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
 | `memory/intent_gate.j2` | `question` | 意图识别门控 |
-| `agent_loop/tool_limit.j2` | `max_tool_calls` | 工具调用上限 |
-| `agent_loop/force_answer.j2` | —（静态） | 强制收尾 |
+| `lgraph/force_answer.j2` | —（静态） | 强制收尾 |
 | `validation/high_risk_warning.j2` | —（静态） | 高危症状警告 |
 | `validation/truncation_notice.j2` | —（静态） | 截断提示 |
 | `_language_rule.j2` | —（静态） | 统一中文语言规则 |
@@ -1321,7 +1311,7 @@ SQLite (messages.citations) / JSON 事件文件
 
 ## 🤝 技术架构
 
-### Agent Loop (Think-Act-Observe)
+### Agent SubGraph (Think-Act-Observe)
 
 ```
 ┌─────────┐     ┌────────┐     ┌──────────┐
@@ -1352,10 +1342,10 @@ SwarmCoordinator
    │
    ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 注入完整上下文后分解
    │
-   ├─ 按子任务数量路由（统一走 process_subtask + 隔离子会话）：
-   │    ├─ 0个 → 降级到 ConsultationAgent
+   ├─ 按子任务数量路由（统一走 AgentSubGraph + 隔离子会话）：
+   │    ├─ 0个 → 降级到 consultation_agent
    │    ├─ 1个 → 直接路由到指定 Worker
-   │    └─ ≥2个 → SharedContext 分发，3个 Worker 并行认领执行
+   │    └─ ≥2个 → SharedContext 分发，3个 Worker 并行认领执行（Send API Map-Reduce）
    │
    └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
 ```
@@ -1395,17 +1385,17 @@ SwarmCoordinator
        │                  │
        ▼                  ▼
 ┌──────────────┐  ┌───────────────────┐
-│ AgentLoop    │  │ LeadAgent         │
+│ AgentSubGraph │  │ LeadAgent         │
 │ 注入为       │  │ 筛选相关案例      │
 │ system msg   │  │ 嵌入 description  │
-│ (所有Agent)  │  │ (传给 Worker)     │
+│ (所有Worker) │  │ (传给 Worker)     │
 │ 仅已确认信息 │  │ 仅已确认信息      │
 └──────────────┘  └───────────────────┘
 ```
 ---
 ## 工作流
 
-系统只有**一个统一工作流**，单 Agent 与 Swarm 的区别仅在于 LeadAgent 分解出的子任务数量不同——Worker 内部走完全相同的 `AgentLoop` 和 `process_subtask()` 子会话隔离机制。
+系统只有**一个统一工作流**，单 Agent 与 Swarm 的区别仅在于 LeadAgent 分解出的子任务数量不同——Worker 内部走完全相同的 `AgentSubGraph` 和隔离子会话机制。
 
 ### 统一工作流（路由决定并发度）
 
@@ -1459,15 +1449,15 @@ SwarmCoordinator
    0 个子任务         1 个子任务         ≥2 个子任务
    ┌─────────┐      ┌──────────┐      ┌──────────────┐
    │ 降级到   │      │ 单 Agent │      │  Swarm 模式  │
-   │ Consult  │      │ 直接路由 │      │ 并行协作     │
+   │ consult  │      │ 直接路由 │      │ 并行协作     │
    │ Agent    │      │ 到指定   │      │              │
    │          │      │ Worker   │      │              │
    └────┬─────┘      └────┬─────┘      └──────┬───────┘
         │                 │                   │
         ▼                 ▼                   ▼
-   process_subtask   process_subtask    ┌─────────────────────┐
+   AgentSubGraph    AgentSubGraph      ┌─────────────────────┐
    (隔离子会话)      (隔离子会话)       │ SharedContext 分发   │
-        │                 │             │ 并行 process_subtask│
+        │                 │             │ 并行 AgentSubGraph │
         │                 │             │ (隔离子会话)        │
         │                 │             └──────────┬──────────┘
         │                 │                        │
@@ -1494,14 +1484,14 @@ SwarmCoordinator
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Agent Loop 内部机制（所有 Worker 共享）
+### Agent SubGraph 内部机制（所有 Worker 共享）
 
 ```plaintext
 =======================================================================
-        【 Agent Loop：Prompt 拼接与循环机制（KV cache 友好）】
+        【 Agent SubGraph：Prompt 拼接与循环机制（KV cache 友好）】
 =======================================================================
 
-[ 每次迭代开始：初始化 Messages (AgentLoop._initialize_messages) ]
+[ 每次迭代开始：初始化 Messages (prepare_messages 节点) ]
       │
       ▼
 ┌──────────────────────── Role: System (KV cache 稳定前缀) ─────────────────┐
@@ -1519,7 +1509,7 @@ SwarmCoordinator
       ▼
 ┌───────────────────────── Role: User (动态) ─────────────────────────────┐
 │  4. 当前输入 (User Input): 用户本次提问或派发的子任务内容               │
-│     （Worker 通过 process_subtask() 执行，隔离子会话，无历史上下文）    │
+│     （Worker 通过 AgentSubGraph 执行，隔离子会话，无历史上下文）        │
 └─────────────────────────────────────────────────────────────────────────┘
       │
       ▼
@@ -1577,16 +1567,16 @@ TRACE (root)           ← 请求级，记录 session_id、mode、agents_involve
 | `TRACE` | `TraceAttributes`（session_id, mode, question_summary, agents_involved, total_tokens） | `SwarmCoordinator` 请求边界 |
 | `STAGE` | name 区分阶段 | `SwarmCoordinator` clarify / decompose / synthesize |
 | `AGENT` | `AgentAttributes`（agent_id, subtask_id, iteration_count, tool_call_count, total_tokens） | `SwarmCoordinator._execute_single_agent_traced` |
-| `ITERATION` | name 标记迭代序号 | `AgentLoop` 每轮循环 |
+| `ITERATION` | name 标记迭代序号 | `AgentSubGraph` 每轮循环 |
 | `LLM` | `LLMAttributes`（model, prompt_tokens, completion_tokens, finish_reason） | `llm_client` |
-| `TOOL` | `ToolAttributes`（tool_name, arguments, result_summary, success） | `AgentLoop` 工具调用 |
+| `TOOL` | `ToolAttributes`（tool_name, arguments, result_summary, success） | AgentSubGraph 工具执行 |
 
 ### 数据采集
 
 通过 `traced_span` 上下文管理器非侵入式采集，基于 Python `contextvars` 实现异步安全的上下文传播：
 
 ```python
-# AgentLoop 中：每个 ITERATION 自动创建 span
+# AgentSubGraph 中：每个 ITERATION 自动创建 span
 with traced_span(SpanType.ITERATION, name=f"iteration_{state.iteration}"):
     # LLM 调用 → 内部自动创建 LLM span
     # 工具调用 → 内部自动创建 TOOL span

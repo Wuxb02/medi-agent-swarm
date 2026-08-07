@@ -39,9 +39,7 @@ def isolated_coordinator():
 
         coordinator = SwarmCoordinator()
         # 同步到所有 Worker 的 user_context
-        for worker in coordinator.worker_pool:
-            if hasattr(worker, 'loop'):
-                worker.loop.user_context = coordinator.personal_profile.to_text()
+        coordinator._refresh_worker_profiles()
         yield coordinator
     finally:
         # 恢复原始内容

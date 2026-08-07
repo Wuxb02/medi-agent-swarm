@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`mediZJ/` contains the Python application. Orchestration lives in `core/`, agents in `agents/`, LangGraph workflows in `lgraph/`, API routes and services in `api/`, persistence in `memory/`, retrieval in `knowledge/`, and Jinja prompts in `prompt/`. Backend tests mirror these areas under `tests/`. The Vue 3 client is in `frontend/src/`, organized into `components/`, `views/`, `stores/`, `composables/`, `api/`, `router/`, `types/`, and `utils/`; colocated frontend tests use `__tests__/`. Documentation belongs in `docs/`, while utilities live in `scripts/`.
+`mediZJ/` contains the Python application. Orchestration lives in `core/`, Swarm coordination in `swarm/`, LangGraph workflows in `lgraph/` (including the lightweight `Worker` spec that replaces the former `agents/` package), API routes and services in `api/`, persistence in `memory/`, retrieval in `knowledge/`, and Jinja prompts in `prompt/`. Backend tests mirror these areas under `tests/`. The Vue 3 client is in `frontend/src/`, organized into `components/`, `views/`, `stores/`, `composables/`, `api/`, `router/`, `types/`, and `utils/`; colocated frontend tests use `__tests__/`. Documentation belongs in `docs/`, while utilities live in `scripts/`.
 
 ## Build, Test, and Development Commands
 

@@ -21,7 +21,7 @@ from langchain_core.messages import convert_to_openai_messages
 
 from mediZJ.lgraph.agent_state import AgentState
 from mediZJ.lgraph.tool_registry import ToolRegistry
-from mediZJ.lgraph.tool_executor import make_tool_execution_node, _extract_tool_calls
+from mediZJ.lgraph.tool_executor import make_tool_execution_node
 from mediZJ.core.llm_client import LLMResponse
 from mediZJ.core.prompt_loader import PromptLoader
 
@@ -35,7 +35,7 @@ except ImportError:
 
 
 def build_agent_subgraph(
-    agent,                          # BaseAgent 实例（持有 LLMClient, SkillRegistry 等）
+    worker,                         # Worker 实例（持有 LLMClient、流式回调等）
     tool_registry: ToolRegistry,
     max_iterations: int = 10,
     max_tool_calls: int = 2,
@@ -45,10 +45,10 @@ def build_agent_subgraph(
     on_content_token: Optional[Callable] = None,
 ) -> StateGraph:
     """
-    为给定 Agent 构建 LangGraph 子图
+    为给定 Worker 构建 LangGraph 子图
 
     Args:
-        agent: BaseAgent 实例
+        worker: Worker 实例（替代旧 BaseAgent）
         tool_registry: 工具注册中心
         max_iterations: 最大迭代次数
         max_tool_calls: 最大工具调用次数（activate_skill 不计入）
@@ -83,12 +83,12 @@ def build_agent_subgraph(
         messages = []
 
         # 系统提示词（稳定版本，不含 Skill 指令，用于 KV cache 前缀）
-        system_prompt = agent.get_base_system_prompt_stable()
+        system_prompt = worker.get_base_system_prompt_stable()
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
         # 用户档案
-        user_context = getattr(agent.loop, 'user_context', None) if hasattr(agent, 'loop') else None
+        user_context = worker.user_context
         if user_context:
             messages.append({"role": "system", "content": f"## 用户档案\n{user_context}"})
 
@@ -99,9 +99,8 @@ def build_agent_subgraph(
 
         if (effective_id
                 and ":" not in effective_id
-                and hasattr(agent, 'loop')
-                and agent.loop.short_term_memory):
-            history = await agent.loop.short_term_memory.get_history(effective_id, limit=5)
+                and worker.short_term_memory):
+            history = await worker.short_term_memory.get_history(effective_id, limit=5)
             if history:
                 logger.info(f"加载 {len(history)} 条历史消息 (session={effective_id})")
                 messages.extend(history)
@@ -113,7 +112,7 @@ def build_agent_subgraph(
             question = f"## 背景信息（由系统提供）\n{original_question}\n\n## 当前任务\n{subtask_desc}"
         else:
             question = subtask_desc or original_question or ""
-        user_input = agent.format_user_input({
+        user_input = worker.format_user_input({
             "question": question,
             "subtask_id": state.get("subtask_id", ""),
             "subtask_type": state.get("subtask_type", ""),
@@ -123,10 +122,9 @@ def build_agent_subgraph(
         messages.append({"role": "user", "content": user_input})
 
         # 记录用户消息到短期记忆
-        if (hasattr(agent, 'loop')
-                and agent.loop.short_term_memory
+        if (worker.short_term_memory
                 and session_id):
-            await agent.loop.short_term_memory.add_message(
+            await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="user",
                 content=user_input,
@@ -186,11 +184,11 @@ def build_agent_subgraph(
                     ),
                 )
 
-                llm_response: LLMResponse = await agent.llm_client.chat_with_tools_stream(
+                llm_response: LLMResponse = await worker.llm_client.chat_with_tools_stream(
                     messages=messages,
                     tools=visible_tools if visible_tools else None,
                     tool_choice="auto",
-                    temperature=agent.config.get('temperature', 0.7),
+                    temperature=worker.config.get('temperature', 0.7),
                     on_content_token=router.on_content_token,
                     on_reasoning_token=router.on_reasoning_token,
                     on_tools_detected=router.on_tools_detected,
@@ -199,11 +197,11 @@ def build_agent_subgraph(
                 if not router.tools_detected:
                     router.flush_content_buffer()
             else:
-                llm_response: LLMResponse = await agent.llm_client.chat_with_tools_retry(
+                llm_response: LLMResponse = await worker.llm_client.chat_with_tools_retry(
                     messages=messages,
                     tools=visible_tools if visible_tools else None,
                     tool_choice="auto",
-                    temperature=agent.config.get('temperature', 0.7),
+                    temperature=worker.config.get('temperature', 0.7),
                 )
         except asyncio.CancelledError:
             raise
@@ -248,13 +246,12 @@ def build_agent_subgraph(
             ]
 
         # 记录到短期记忆
-        if (hasattr(agent, 'loop')
-                and agent.loop.short_term_memory
+        if (worker.short_term_memory
                 and state.get("session_id")):
             effective_id = state.get("sub_session_id") or state.get("session_id")
             stm_content = f"调用工具：{', '.join(tc.name for tc in llm_response.tool_calls)}" \
                 if llm_response.has_tool_calls() else (llm_response.content or "")
-            await agent.loop.short_term_memory.add_message(
+            await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="assistant",
                 content=stm_content[:500],
@@ -301,8 +298,7 @@ def build_agent_subgraph(
         }
 
         # 后处理
-        if hasattr(agent, 'post_process_result'):
-            result = await agent.post_process_result(result, content)
+        result = await worker.post_process_result(result, content)
 
         return {
             "final_answer": content,
@@ -315,14 +311,14 @@ def build_agent_subgraph(
         messages = state.get("messages", [])
 
         # 添加强制总结提示
-        force_prompt = PromptLoader.render("agent_loop/force_answer.j2")
+        force_prompt = PromptLoader.render("lgraph/force_answer.j2")
         messages.append({"role": "user", "content": force_prompt})
 
         try:
             # 调用 LLM（禁用 tools）
             # 将 LangChain 消息对象转换为 OpenAI API 格式
             openai_messages = convert_to_openai_messages(messages)
-            response = await agent.llm_client.chat_with_tools_retry(
+            response = await worker.llm_client.chat_with_tools_retry(
                 messages=openai_messages,
                 tools=None,
                 temperature=0.7,
@@ -334,11 +330,10 @@ def build_agent_subgraph(
             final_answer = "抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。"
 
         # 记录到短期记忆
-        if (hasattr(agent, 'loop')
-                and agent.loop.short_term_memory
+        if (worker.short_term_memory
                 and state.get("session_id")):
             effective_id = state.get("sub_session_id") or state.get("session_id")
-            await agent.loop.short_term_memory.add_message(
+            await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="assistant",
                 content=final_answer,
@@ -360,8 +355,7 @@ def build_agent_subgraph(
         }
 
         # 后处理
-        if hasattr(agent, 'post_process_result'):
-            result = await agent.post_process_result(result, final_answer)
+        result = await worker.post_process_result(result, final_answer)
 
         return {
             "final_answer": final_answer,
