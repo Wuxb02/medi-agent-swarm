@@ -32,6 +32,8 @@ class ChatResponse(BaseModel):
     answer: str
     suggestions: List[str] = []
     session_id: str
+    assistant_message_id: str = ""
+    trace_id: str = ""
     swarm_enabled: bool = False
     agents_involved: List[str] = []
     subtasks_completed: int = 0

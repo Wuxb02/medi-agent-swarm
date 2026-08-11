@@ -5,6 +5,19 @@ import threading
 from typing import Any, Dict, List, Optional
 
 
+def _loads_agents(value: Any) -> List[str]:
+    """安全解析 agents_involved 列，容忍历史脏数据/非法 JSON"""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
 class TraceAnalyzer:
     """基于 SQLite spans 表的 trace 聚合分析"""
 
@@ -191,7 +204,7 @@ class TraceAnalyzer:
         results = []
         for r in rows:
             d = dict(r)
-            d["agents_involved"] = json.loads(d["agents_involved"]) if d["agents_involved"] else []
+            d["agents_involved"] = _loads_agents(d["agents_involved"])
             results.append(d)
         return results
 

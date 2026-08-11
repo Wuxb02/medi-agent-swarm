@@ -31,6 +31,14 @@ from mediZJ.memory import (
     PersonalProfile,
 )
 
+# Trace 惰性导入
+try:
+    from mediZJ.trace.context import traced_span
+    from mediZJ.trace.models import SpanType, AgentAttributes
+    _TRACE = True
+except ImportError:
+    _TRACE = False
+
 # LangGraph 依赖
 try:
     from mediZJ.lgraph.tool_registry import ToolRegistry
@@ -67,6 +75,7 @@ class SwarmCoordinator:
         self.llm_client = llm_client or LLMClient()
         self.event_callback = event_callback
         self.questionnaire_manager = questionnaire_manager
+        self.user_id = user_id or "default"
 
         # 初始化 LeadAgent 与三个 Worker
         self.lead_agent = LeadAgent(
@@ -179,7 +188,8 @@ class SwarmCoordinator:
         self,
         question: str,
         context: Optional[Dict[str, Any]] = None,
-        session_id: Optional[str] = None
+        session_id: Optional[str] = None,
+        trace_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """处理用户问题
 
@@ -193,6 +203,8 @@ class SwarmCoordinator:
         start_time = datetime.now()
         if session_id is None:
             session_id = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+        trace_id = trace_id or str(uuid.uuid4())
+        trace_collector = self._init_trace(trace_id)
 
         logger.info(f"[LangGraph] Processing (session={session_id}): {question[:300]}{'...' if len(question) > 300 else ''}")
 
@@ -214,7 +226,17 @@ class SwarmCoordinator:
                 "error": str(e),
             }
 
-        return self.compose_result(question, result_state, start_time, session_id)
+        result = self.compose_result(question, result_state, start_time, session_id, trace_id=trace_id)
+
+        await self._flush_trace(
+            trace_collector,
+            trace_id,
+            session_id,
+            question,
+            result["mode"],
+            result,
+        )
+        return result
 
     # ===== SupervisorGraph 构建与执行（供 API 层流式路径复用）=====
 
@@ -292,14 +314,17 @@ class SwarmCoordinator:
         return result
 
     def compose_result(self, question: str, result_state: Dict[str, Any],
-                       start_time: datetime, session_id: str) -> Dict[str, Any]:
+                       start_time: datetime, session_id: str,
+                       trace_id: Optional[str] = None) -> Dict[str, Any]:
         """将 SupervisorState 结果组装为对外 result（含 LTM fire-and-forget）"""
         end_time = datetime.now()
+        trace_id = trace_id or str(uuid.uuid4())
 
         result = {
             "answer": result_state.get("final_answer", ""),
             "suggestions": result_state.get("suggestions", []),
             "session_id": session_id,
+            "trace_id": trace_id,
             "swarm_enabled": result_state.get("swarm_enabled", False),
             "agents_involved": result_state.get("agents_involved", []),
             "subtasks_completed": len(result_state.get("swarm_contributions", {})),
@@ -312,6 +337,12 @@ class SwarmCoordinator:
             "intent": result_state.get("intent"),
             "skip_long_term_retrieval": result_state.get("skip_long_term_retrieval", False),
             "_swarm_finalized": True,
+            "applied_experience_ids": (result_state.get("context") or {}).get(
+                "applied_experience_ids", []
+            ),
+            "experience_assignments": (result_state.get("context") or {}).get(
+                "experience_assignments", []
+            ),
         }
 
         # LTM fire-and-forget
@@ -335,14 +366,80 @@ class SwarmCoordinator:
         )
         return result
 
+    # ===== Trace 追踪 =====
+
+    def _init_trace(self, trace_id: str):
+        """惰性初始化 Trace 收集器"""
+        try:
+            from mediZJ.trace.collector import TraceCollector
+            from mediZJ.trace.storage import TraceSqliteStorage
+            from mediZJ.trace.context import _current_trace_id
+
+            collector = TraceCollector()
+            collector.begin_trace(trace_id)
+            if not hasattr(collector, "_storage_set") or not collector._storage_set:
+                collector.set_storage(TraceSqliteStorage())
+                collector._storage_set = True
+            _current_trace_id.set(trace_id)
+            logger.debug(f"[Trace] Started for trace={trace_id[:12]}...")
+            return collector
+        except ImportError:
+            return None
+
+    async def _flush_trace(
+        self, collector, trace_id, session_id, question, mode, result
+    ):
+        """持久化 Trace 数据"""
+        if collector is None:
+            return
+        try:
+            from mediZJ.trace.models import TraceAttributes
+            agents = result.get("agents_involved", []) if isinstance(result, dict) else []
+            usage = result.get("usage", {}) if isinstance(result, dict) else {}
+            tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
+            q = question[:200] if question else ""
+
+            root_spans = collector.get_flat_spans(trace_id)
+            for s in (root_spans or []):
+                if s.span_type.value == "trace":
+                    s.trace_attrs = TraceAttributes(
+                        session_id=session_id,
+                        user_id=getattr(self, "user_id", "default") or "default",
+                        mode=mode or "",
+                        question_summary=q,
+                        agents_involved=agents,
+                        total_tokens=tokens,
+                        applied_experience_ids=result.get(
+                            "applied_experience_ids",
+                            [],
+                        ),
+                        experience_assignments=result.get(
+                            "experience_assignments",
+                            [],
+                        ),
+                    )
+                    break
+            await collector.flush(trace_id)
+        except Exception as e:
+            logger.warning(f"[Trace] Flush failed: {e}")
+        finally:
+            try:
+                from mediZJ.trace.context import _current_trace_id
+
+                _current_trace_id.set(None)
+            except ImportError:
+                pass
+
     # ===== 记忆检索（供 SupervisorGraph 节点复用）=====
 
-    def _refresh_worker_profiles(self):
+    def _refresh_worker_profiles(self, verified_experiences: str = ""):
         """刷新所有 Worker 的用户档案"""
         personal_text = self.personal_profile.to_text()
-        if personal_text != "暂无":
-            for worker in self._workers.values():
-                worker.user_context = personal_text
+        sections = [] if personal_text == "暂无" else [personal_text]
+        if verified_experiences:
+            sections.append("已验证诊疗策略：\n" + verified_experiences)
+        for worker in self._workers.values():
+            worker.user_context = "\n\n".join(sections)
 
     # ===== 记忆评估与保存 =====
 

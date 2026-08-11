@@ -96,6 +96,12 @@ async def test_stream_timeout_returns_friendly_error(monkeypatch):
         def build_graph(self, event_callback=None, hitl_enabled=False):
             return object()
 
+        def _init_trace(self, _trace_id):
+            return object()
+
+        async def _flush_trace(self, *_args):
+            return None
+
         def build_initial_state(self, question, context, session_id, start_time):
             return {"question": question, "session_id": session_id}
 
@@ -104,7 +110,8 @@ async def test_stream_timeout_returns_friendly_error(monkeypatch):
             return {"answer": "ok", "session_id": initial_state["session_id"],
                     "suggestions": []}
 
-        def compose_result(self, question, result_state, start_time, session_id):
+        def compose_result(self, question, result_state, start_time, session_id,
+                           trace_id=None):
             result_state["_ltm_save_task"] = None
             return result_state
 
@@ -136,12 +143,20 @@ async def test_multi_round_questionnaire_resume(monkeypatch):
     class MultiRoundCoordinator:
         """run_graph 首次与首次 resume 返回挂起态，第二次 resume 返回完整结果"""
 
+        trace_flushed = False
+
         def __init__(self, **kwargs):
             self.ltm_save_task = None
             self._resume_count = 0
 
         def build_graph(self, event_callback=None, hitl_enabled=False):
             return object()
+
+        def _init_trace(self, _trace_id):
+            return object()
+
+        async def _flush_trace(self, *_args):
+            type(self).trace_flushed = True
 
         def build_initial_state(self, question, context, session_id, start_time):
             return {"question": question, "session_id": session_id}
@@ -160,7 +175,8 @@ async def test_multi_round_questionnaire_resume(monkeypatch):
                 "swarm_enabled": False,
             }
 
-        def compose_result(self, question, result_state, start_time, session_id):
+        def compose_result(self, question, result_state, start_time, session_id,
+                           trace_id=None):
             result_state["_ltm_save_task"] = None
             return result_state
 
@@ -193,4 +209,4 @@ async def test_multi_round_questionnaire_resume(monkeypatch):
     assert "done" in events
     done_data = json.loads(chunks[-1])["data"]
     assert done_data["answer"] == "ok"
-
+    assert MultiRoundCoordinator.trace_flushed is True

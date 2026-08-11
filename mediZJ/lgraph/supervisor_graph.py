@@ -165,8 +165,9 @@ def build_supervisor_graph(
             intent=state.get("intent", "medical"),
         )
 
-        # 刷新 Worker 档案
-        coordinator._refresh_worker_profiles()
+        # 刷新 Worker 档案（含已验证的应答策略）
+        verified = state.get("context", {}).get("verified_experiences", "")
+        coordinator._refresh_worker_profiles(verified)
 
         personal_text = coordinator.personal_profile.to_text()
         result["personal_profile"] = personal_text if personal_text != "暂无" else ""
@@ -369,6 +370,9 @@ def build_supervisor_graph(
             "recent_history": state.get("recent_history", []),
             "historical_cases": state.get("similar_memories", []),
             "collected_info": state.get("collected_info", ""),
+            "verified_experiences": state.get("context", {}).get(
+                "verified_experiences", ""
+            ),
         }
 
         _ctx = traced_span(SpanType.STAGE, name="assess_decompose") if TRACE_AVAILABLE else None

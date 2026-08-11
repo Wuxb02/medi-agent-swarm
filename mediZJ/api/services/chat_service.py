@@ -1,5 +1,6 @@
 """问答服务：封装 process_with_swarm + 流式事件推送"""
 import asyncio
+import inspect
 import json
 import os
 import uuid
@@ -35,7 +36,7 @@ def _get_session_vectors() -> SessionVectorStore:
 
 # Trace 惰性导入
 try:
-    from trace import TraceCollector
+    from mediZJ.trace.collector import TraceCollector
     _TRACE_AVAIL = True
 except ImportError:
     _TRACE_AVAIL = False
@@ -59,6 +60,24 @@ _REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "300"))
 # 防止短期记忆/turn_index/问卷管理器的写竞争
 _session_locks: Dict[str, asyncio.Lock] = {}
 _session_owners: Dict[str, str] = {}
+
+
+def _process_kwargs(
+    coordinator: SwarmCoordinator,
+    question: str,
+    context: Dict[str, Any],
+    session_id: str,
+    trace_id: str,
+) -> Dict[str, Any]:
+    """构建处理参数，兼容旧扩展实现与测试替身。"""
+    kwargs = {
+        "question": question,
+        "context": context,
+        "session_id": session_id,
+    }
+    if "trace_id" in inspect.signature(coordinator.process).parameters:
+        kwargs["trace_id"] = trace_id
+    return kwargs
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -192,6 +211,15 @@ async def chat_non_stream(request: ChatRequest) -> ChatResponse:
 async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> ChatResponse:
     """非流式问答（持锁后的实际处理）"""
     manager = get_manager(session_id)
+    trace_id = str(uuid.uuid4())
+    from mediZJ.evolution import EvolutionService
+
+    evolution_context = await asyncio.to_thread(
+        EvolutionService().get_runtime_context,
+        request.user_id or "default",
+        request.question,
+    )
+    runtime_context = {**(request.context or {}), **evolution_context}
 
     # 续聊恢复：从 SQLite 回填全部历史到短期记忆（幂等，空才回填）
     await _restore_short_term(session_id, request.user_id or "default")
@@ -207,11 +235,13 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         user_id=request.user_id
     )
     result = await asyncio.wait_for(
-        coordinator.process(
-            question=question,
-            context=request.context,
-            session_id=session_id
-        ),
+        coordinator.process(**_process_kwargs(
+            coordinator,
+            question,
+            runtime_context,
+            session_id,
+            trace_id,
+        )),
         timeout=_REQUEST_TIMEOUT,
     )
     # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
@@ -226,11 +256,12 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
 
     # 持久化到 SQLite + Milvus（同步驱动，下线程避免阻塞事件循环）
     persist_session_id = result.get("session_id", session_id)
+    persisted = {}
     if persist_session_id:
         try:
-            await asyncio.to_thread(
+            persisted = await asyncio.to_thread(
                 _persist_session_turn, persist_session_id, request, result, []
-            )
+            ) or {}
         except Exception as e:
             logger.warning(f"Failed to persist non-stream session turn: {e}")
 
@@ -241,6 +272,8 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         answer=result.get("answer", ""),
         suggestions=result.get("suggestions", []),
         session_id=result.get("session_id", ""),
+        assistant_message_id=persisted.get("assistant_message_id", ""),
+        trace_id=result.get("trace_id", trace_id),
         swarm_enabled=result.get("swarm_enabled", False),
         agents_involved=result.get("agents_involved", []),
         subtasks_completed=result.get("subtasks_completed", 0),
@@ -278,9 +311,18 @@ async def _chat_stream_impl(
 ) -> AsyncGenerator[str, None]:
     """流式问答（持锁后的实际处理）"""
     bridge = EventBridge()
+    trace_id = str(uuid.uuid4())
+    from mediZJ.evolution import EvolutionService
+
+    evolution_context = await asyncio.to_thread(
+        EvolutionService().get_runtime_context,
+        chat_req.user_id or "default",
+        chat_req.question,
+    )
+    runtime_context = {**(chat_req.context or {}), **evolution_context}
 
     # 1. 发送 start
-    start_event = {"session_id": session_id}
+    start_event = {"session_id": session_id, "trace_id": trace_id}
     yield _json_line("start", start_event)
 
     # 收集所有事件用于持久化
@@ -293,6 +335,7 @@ async def _chat_stream_impl(
     await _restore_short_term(session_id, chat_req.user_id or "default")
 
     # 1.6 注册 Trace 实时推送回调（span 完成时入队 EventBridge）
+    trace_collector = None
     if _TRACE_AVAIL:
         collector = TraceCollector()
 
@@ -307,7 +350,7 @@ async def _chat_stream_impl(
                       "duration_ms": span.timing.duration_ms, "status": span.status.value}
             ))
 
-        collector.add_span_callback(session_id, _on_span_complete)
+        collector.add_span_callback(trace_id, _on_span_complete)
 
     # 图片分析：先用 Vision 模型将图片转为文字描述，再注入上下文
     question = chat_req.question
@@ -325,6 +368,25 @@ async def _chat_stream_impl(
         questionnaire_manager=manager,
         user_id=chat_req.user_id
     )
+    if _TRACE_AVAIL:
+        trace_collector = coordinator._init_trace(trace_id)
+
+    trace_finished = False
+
+    async def _finish_trace(trace_result: Optional[Dict[str, Any]] = None):
+        nonlocal trace_finished
+        if trace_finished or trace_collector is None:
+            return
+        trace_finished = True
+        payload = trace_result or {}
+        await coordinator._flush_trace(
+            trace_collector,
+            trace_id,
+            session_id,
+            question,
+            payload.get("mode", "error"),
+            payload,
+        )
 
     # 流式路径启用 HITL：构建带 checkpointer 的图，供 clarify interrupt 挂起/恢复
     start_time = datetime.now()
@@ -333,7 +395,7 @@ async def _chat_stream_impl(
         hitl_enabled=True,
     )
     initial_state = coordinator.build_initial_state(
-        question, chat_req.context, session_id, start_time,
+        question, runtime_context, session_id, start_time,
     )
     config = {"configurable": {"thread_id": session_id}}
     store_runtime(SessionRuntime(
@@ -555,6 +617,13 @@ async def _chat_stream_impl(
             yield json_line
         _pending_yields.clear()
 
+    if not disconnected:
+        disconnect_task.cancel()
+        try:
+            await disconnect_task
+        except asyncio.CancelledError:
+            pass
+
     # 5. 处理断开情况
     if disconnected:
         logger.info(f"Client disconnected for session={session_id}, cancelling processing")
@@ -568,6 +637,7 @@ async def _chat_stream_impl(
         clear_answer_queue(session_id)
         release_runtime(session_id)
         remove_manager(session_id)
+        await _finish_trace()
         return
 
     # 5.5 状态机内已发送 error 事件（超时/异常）：清理后返回，不再走正常完成路径
@@ -575,10 +645,10 @@ async def _chat_stream_impl(
         clear_answer_queue(session_id)
         release_runtime(session_id)
         remove_manager(session_id)
+        await _finish_trace()
         return
 
     # 6. 正常完成：等待 process_task 结果
-    disconnect_task.cancel()
     try:
         result = process_task.result()
     except asyncio.TimeoutError:
@@ -591,6 +661,7 @@ async def _chat_stream_impl(
         clear_answer_queue(session_id)
         release_runtime(session_id)
         remove_manager(session_id)
+        await _finish_trace()
         return
     except Exception as e:
         logger.error(f"Chat processing error: {e}")
@@ -598,6 +669,7 @@ async def _chat_stream_impl(
         clear_answer_queue(session_id)
         release_runtime(session_id)
         remove_manager(session_id)
+        await _finish_trace()
         return
 
     # 防御：若 result 仍是 interrupt 挂起态（异常路径），清理后结束
@@ -606,10 +678,12 @@ async def _chat_stream_impl(
         clear_answer_queue(session_id)
         release_runtime(session_id)
         remove_manager(session_id)
+        await _finish_trace()
         return
 
     # 组装对外 result（含 LTM fire-and-forget，与 coordinator.process() 一致）
-    result = coordinator.compose_result(question, result, start_time, session_id)
+    result = coordinator.compose_result(question, result, start_time, session_id, trace_id=trace_id)
+    await _finish_trace(result)
 
     # 6. 发送建议
     suggestions = result.get("suggestions", [])
@@ -620,16 +694,19 @@ async def _chat_stream_impl(
 
     # 6.5 持久化到 SQLite + Milvus（在 done 之前，确保前端 loadSessions 能查到）
     # 同步驱动，下线程避免阻塞事件循环
+    persisted = {}
     try:
-        await asyncio.to_thread(
+        persisted = await asyncio.to_thread(
             _persist_session_turn, session_id, chat_req, result, collected_events
-        )
+        ) or {}
     except Exception as e:
         logger.warning(f"Failed to persist session turn: {e}")
 
     # 7. 发送 done（最后一个事件）
     done_data = {
         "session_id": result.get("session_id", session_id),
+        "assistant_message_id": persisted.get("assistant_message_id", ""),
+        "trace_id": result.get("trace_id", trace_id),
         "total_time": result.get("total_time", 0.0),
         "swarm_metadata": result.get("swarm_metadata", {}),
         "swarm_enabled": result.get("swarm_enabled", False),
@@ -666,7 +743,7 @@ async def _chat_stream_impl(
 
     # 10. 清理 trace 回调（确保不留残留引用；正常流程 flush 已清理）
     if _TRACE_AVAIL:
-        collector.remove_span_callback(session_id, _on_span_complete)
+        collector.remove_span_callback(trace_id, _on_span_complete)
 
 
 def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -789,7 +866,7 @@ def _persist_session_turn(
     ]
     filtered_events = _merge_thinking_events(filtered_events)
 
-    _session_db.save_turn(
+    saved = _session_db.save_turn(
         session_id=session_id,
         turn_index=turn_index,
         user_msg={
@@ -813,9 +890,27 @@ def _persist_session_turn(
             "information_coverage": result.get("performance_metrics", {}).get("information_coverage", 0),
             "redundancy": result.get("performance_metrics", {}).get("redundancy", 0),
             "citations": result.get("citations", []),
+            "trace_id": result.get("trace_id", ""),
         },
         user_id=request.user_id or "default",
     )
+
+    try:
+        from mediZJ.evolution import EvolutionService
+
+        evolution = EvolutionService()
+        assistant_message_id = int(saved["assistant_message_id"])
+        evolution.storage.record_exposures(
+            assistant_message_id,
+            request.user_id or "default",
+            result.get("experience_assignments", []),
+        )
+        evolution.maybe_enqueue_sample(
+            assistant_message_id,
+            request.user_id or "default",
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to enqueue evolution evaluation: {exc}")
 
     # 索引到 Milvus（每次更新摘要，用于语义搜索）
     try:
@@ -841,3 +936,5 @@ def _persist_session_turn(
             )
     except Exception as e:
         logger.warning(f"Failed to index session to Milvus: {e}")
+
+    return saved

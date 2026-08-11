@@ -125,6 +125,7 @@ class SessionDB:
                 subtasks_completed INTEGER DEFAULT 0,
                 mode               TEXT,
                 citations          TEXT,
+                trace_id           TEXT,
                     -- 知识库引用列表 JSON [{index, doc_id, source, ...}]
                 FOREIGN KEY (session_id)
                     REFERENCES sessions(session_id) ON DELETE CASCADE
@@ -200,6 +201,7 @@ class SessionDB:
             ("sessions", "redundancy", "REAL DEFAULT 0"),
             ("messages", "citations", "TEXT"),
             ("messages", "images", "TEXT"),
+            ("messages", "trace_id", "TEXT"),
         ]
         for table, col, col_type in migrations:
             try:
@@ -529,14 +531,14 @@ class SessionDB:
             agents_involved = assistant_msg.get("agents_involved")
             citations = assistant_msg.get("citations")
 
-            conn.execute(
+            assistant_cursor = conn.execute(
                 """
                 INSERT INTO messages
                     (session_id, turn_index, role, content, timestamp,
                      agent_events, suggestions,
                      agents_involved, total_time, total_tokens,
-                     subtasks_completed, mode, citations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     subtasks_completed, mode, citations, trace_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -556,13 +558,19 @@ class SessionDB:
                     assistant_msg.get("mode"),
                     json.dumps(citations, ensure_ascii=False, default=str)
                     if citations else None,
+                    assistant_msg.get("trace_id"),
                 ),
             )
+            return {
+                "assistant_message_id": str(assistant_cursor.lastrowid),
+                "turn_index": turn_index,
+            }
 
-        self._execute(_do_save)
+        saved = self._execute(_do_save)
         logger.debug(
             f"Saved turn {turn_index} for session {session_id}"
         )
+        return saved
 
     def get_session(
         self,

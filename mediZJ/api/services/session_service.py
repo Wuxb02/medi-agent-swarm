@@ -98,16 +98,23 @@ def get_session_detail(
 
 
 def delete_session(session_id: str, user_id: Optional[str] = None) -> bool:
-    """删除会话（SQLite + Milvus + 旧文件全部清理）"""
-    deleted = False
+    """删除会话，并保持自进化经验与评审数据一致。"""
+    from mediZJ.evolution.storage import EvolutionStorage
 
-    # 1. 删除 SQLite 记录
+    cleanup_errors: List[str] = []
+
+    # 1. 在同一 SQLite 事务中清理对话与自进化数据。
     try:
-        deleted = _db.delete_session(session_id, user_id=user_id) or deleted
+        evolution_storage = EvolutionStorage(_db.db_path)
+        deletion = evolution_storage.delete_session_data(
+            session_id,
+            user_id=user_id,
+        )
     except Exception as e:
         logger.warning(f"Failed to delete from SQLite: {e}")
+        return False
 
-    if not deleted:
+    if deletion is None:
         return False
 
     # 2. 删除 Milvus 向量记录
@@ -115,15 +122,16 @@ def delete_session(session_id: str, user_id: Optional[str] = None) -> bool:
         _get_session_vectors().delete_session(session_id)
     except Exception as e:
         logger.warning(f"Failed to delete from Milvus: {e}")
+        cleanup_errors.append("会话向量清理失败")
 
     # 3. 删除旧版 .md 文件
     for filepath in _iter_summary_files():
         if session_id in filepath and filepath.endswith(".md"):
             try:
                 os.remove(filepath)
-                deleted = True
             except OSError as e:
                 logger.warning(f"Failed to delete {filepath}: {e}")
+                cleanup_errors.append("旧版会话摘要清理失败")
 
     # 4. 删除旧版 events JSON
     events_json = os.path.join(SUMMARY_DIR, f"session_{session_id}.json")
@@ -132,15 +140,18 @@ def delete_session(session_id: str, user_id: Optional[str] = None) -> bool:
             os.remove(events_json)
         except OSError as e:
             logger.warning(f"Failed to delete {events_json}: {e}")
+            cleanup_errors.append("旧版会话事件清理失败")
 
-    # 5. 删除关联的 Trace 数据
+    # 5. 记录数据库外部清理结果，不保留患者内容。
     try:
-        from mediZJ.trace.storage import TraceSqliteStorage
-        TraceSqliteStorage().delete_trace(session_id)
+        evolution_storage.complete_session_cleanup(
+            deletion["session_id_hash"],
+            cleanup_errors,
+        )
     except Exception as e:
-        logger.warning(f"Failed to delete trace data: {e}")
+        logger.warning(f"Failed to update deletion audit: {e}")
 
-    return deleted
+    return True
 
 
 # ─── SQLite → SessionDetail 构建 ───────────────────────────
@@ -169,9 +180,11 @@ def _build_detail_from_db(session_data: Dict[str, Any]) -> SessionDetail:
             }
         elif role == "assistant":
             assistant_msg = {
+                "assistant_message_id": str(msg.get("id", "")),
                 "role": "assistant",
                 "content": msg.get("content", ""),
                 "timestamp": msg.get("timestamp", ""),
+                "trace_id": msg.get("trace_id", ""),
             }
             # 附加 agent_events 等字段
             for field in (

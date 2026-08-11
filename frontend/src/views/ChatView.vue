@@ -88,7 +88,9 @@ watch(
           v-for="(msg, index) in chatStore.messages"
           :key="msg.id"
           :message="msg"
-          :show-disclaimer="index === chatStore.messages.length - 1"
+          :show-disclaimer="
+            msg.role === 'assistant' && index === chatStore.messages.length - 1 && !msg.isStreaming
+          "
         />
       </div>
     </div>

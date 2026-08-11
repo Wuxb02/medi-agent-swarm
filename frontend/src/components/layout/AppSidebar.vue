@@ -29,6 +29,12 @@ const navItems = [
     icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z',
   },
   { path: '/traces', label: '轨迹', icon: 'M13 10V3L4 14h7v7l9-11h-7z' },
+  {
+    path: '/evolution',
+    label: '自进化',
+    adminOnly: true,
+    icon: 'M4 4v6h6M20 20v-6h-6M5 19a9 9 0 0014-7M19 5A9 9 0 005 12',
+  },
 ]
 
 const sessions = ref<SessionItem[]>([])
@@ -229,6 +235,7 @@ watch(
     <nav class="px-3 space-y-1">
       <router-link
         v-for="item in navItems"
+        v-show="!item.adminOnly || auth.isAdmin"
         :key="item.path"
         :to="item.path"
         class="flex items-center gap-3 px-3 py-2.5 text-sm rounded-lg transition"

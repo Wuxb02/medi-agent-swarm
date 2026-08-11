@@ -47,6 +47,8 @@ class TraceAttributes:
     subtasks_created: int = 0
     subtasks_completed: int = 0
     timeout_occurred: bool = False
+    applied_experience_ids: List[str] = field(default_factory=list)
+    experience_assignments: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

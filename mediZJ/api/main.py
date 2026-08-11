@@ -11,6 +11,7 @@ from mediZJ.api.routers import (
     auth,
     chat,
     dashboard,
+    evolution,
     knowledge,
     personal,
     sessions,
@@ -84,6 +85,23 @@ app.include_router(sessions.router)
 app.include_router(dashboard.router)
 app.include_router(personal.router)
 app.include_router(traces.router)
+app.include_router(evolution.router)
+
+
+@app.on_event("startup")
+async def start_evolution_worker():
+    """启动不阻塞主对话的自进化评审工作器。"""
+    from mediZJ.evolution import EvolutionService
+
+    await EvolutionService().start()
+
+
+@app.on_event("shutdown")
+async def stop_evolution_worker():
+    """平滑停止自进化评审工作器。"""
+    from mediZJ.evolution import EvolutionService
+
+    await EvolutionService().stop()
 
 # 上传目录通过鉴权路由提供，避免患者图片公开暴露
 _uploads_path = _PROJECT_ROOT / "mediZJ" / "data" / "uploads"

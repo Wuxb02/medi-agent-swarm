@@ -15,6 +15,19 @@ _DEFAULT_DB_PATH = os.path.join(
 )
 
 
+def _loads_agents(value: Any) -> List[str]:
+    """安全解析 agents_involved 列，容忍历史脏数据/非法 JSON"""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
 def _safe_asdict(obj):
     """安全转换为 dict，兼容 dataclass 和非 dataclass 对象"""
     if obj is None:
@@ -299,7 +312,7 @@ class TraceSqliteStorage:
             results = []
             for r in rows:
                 d = dict(r)
-                d["agents_involved"] = json.loads(d["agents_involved"]) if d["agents_involved"] else []
+                d["agents_involved"] = _loads_agents(d["agents_involved"])
                 results.append(d)
             return results
         return self._execute(_do_list)

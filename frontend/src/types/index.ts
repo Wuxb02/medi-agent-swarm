@@ -33,6 +33,7 @@ export interface SSEMessage {
 
 export interface StartData {
   session_id: string
+  trace_id?: string
 }
 
 export interface TaskDecomposedData {
@@ -127,6 +128,8 @@ export interface AgentQuestionnaireData {
 
 export interface DoneData {
   answer: string
+  assistant_message_id?: string
+  trace_id?: string
   citations?: Citation[]
   swarm_enabled?: boolean
   agents_involved?: string[]
@@ -176,6 +179,8 @@ export interface ChatMessage {
   images?: string[]
   timestamp: string
   isStreaming?: boolean
+  assistantMessageId?: string
+  traceId?: string
   suggestions?: string[]
   agentEvents?: AgentEvent[]
   thinkingBlocks?: ThinkingBlock[]
@@ -304,6 +309,8 @@ export interface SessionTurn {
     total_time?: number
     total_tokens?: number
     subtasks_completed?: number
+    assistant_message_id?: string
+    trace_id?: string
   }
 }
 

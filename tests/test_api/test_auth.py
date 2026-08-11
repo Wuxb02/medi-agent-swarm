@@ -137,3 +137,33 @@ def test_regular_user_cannot_mutate_knowledge(db, monkeypatch):
         client.post("/api/auth/login", json={"username": "normal_user"})
         response = client.delete("/api/knowledge/documents/not-found")
         assert response.status_code == 403
+
+
+def test_evolution_operations_require_admin(db, monkeypatch):
+    """自进化观测和治理接口仅管理员可访问。"""
+
+    from fastapi.testclient import TestClient
+
+    import mediZJ.api.auth as auth_module
+    from mediZJ.api.main import app
+    from mediZJ.evolution.service import EvolutionService
+    from mediZJ.evolution.storage import EvolutionStorage
+
+    EvolutionStorage.reset()
+    EvolutionService.reset()
+    storage = EvolutionStorage(db.db_path)
+    EvolutionService(storage=storage)
+    monkeypatch.setattr(auth_module, "_auth_service", AuthService(db))
+
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "normal_user"})
+        assert client.get("/api/evolution/overview").status_code == 403
+        assert client.get("/api/evolution/jobs").status_code == 403
+
+        client.post("/api/auth/logout")
+        client.post("/api/auth/login", json={"username": "admin"})
+        assert client.get("/api/evolution/overview").status_code == 200
+        assert client.get("/api/evolution/jobs").status_code == 200
+
+    EvolutionService.reset()
+    EvolutionStorage.reset()

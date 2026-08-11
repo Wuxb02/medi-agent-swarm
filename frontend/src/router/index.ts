@@ -36,6 +36,12 @@ const router = createRouter({
           name: 'Personal',
           component: () => import('../views/PersonalView.vue'),
         },
+        {
+          path: 'evolution',
+          name: 'Evolution',
+          meta: { requiresAdmin: true },
+          component: () => import('../views/EvolutionView.vue'),
+        },
       ],
     },
   ],
@@ -50,6 +56,7 @@ router.beforeEach(async (to) => {
       query: { redirect: to.fullPath },
     }
   }
+  if (to.meta.requiresAdmin && !auth.isAdmin) return { name: 'Chat' }
   return true
 })
 

@@ -154,6 +154,8 @@ export const useChatStore = defineStore('chat', () => {
             if (msg) {
               msg.content = data.answer || msg.content
               msg.citations = data.citations || []
+              msg.assistantMessageId = data.assistant_message_id
+              msg.traceId = data.trace_id
               msg.isStreaming = false
               msg.metadata = {
                 swarmEnabled: data.swarm_enabled ?? false,
@@ -266,6 +268,8 @@ export const useChatStore = defineStore('chat', () => {
               id: genId(),
               role: 'assistant',
               content: am.content as string,
+              assistantMessageId: am.assistant_message_id as string,
+              traceId: am.trace_id as string,
               timestamp: (am.timestamp as string) || new Date().toISOString(),
               isStreaming: false,
               suggestions: (am.suggestions as string[]) || [],

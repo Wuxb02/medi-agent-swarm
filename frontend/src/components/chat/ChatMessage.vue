@@ -6,13 +6,14 @@ import type { ChatMessage, ThinkingBlock } from '../../types'
 import ThinkingBlockItem from './ThinkingBlock.vue'
 import QuestionnaireCard from './QuestionnaireCard.vue'
 import CitationPopover from './CitationPopover.vue'
+import { getFeedback, submitFeedback, type FeedbackRating } from '../../api/evolution'
 
 const props = defineProps<{
   message: ChatMessage
   showDisclaimer?: boolean
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   'preview-image': [url: string]
 }>()
 
@@ -25,6 +26,56 @@ const renderedContent = computed(() => {
 })
 
 const isUser = computed(() => props.message.role === 'user')
+const feedbackRating = ref<FeedbackRating | null>(null)
+const feedbackOpen = ref(false)
+const feedbackSaving = ref(false)
+const feedbackReasons = ref<string[]>([])
+const feedbackComment = ref('')
+const reasonOptions = [
+  ['unsafe', '医学安全'],
+  ['incomplete', '回答不完整'],
+  ['incorrect', '内容不准确'],
+  ['tool_misuse', '工具使用不当'],
+  ['not_personalized', '不够个性化'],
+] as const
+
+async function loadFeedback() {
+  if (!props.message.assistantMessageId) return
+  try {
+    const feedback = await getFeedback(props.message.assistantMessageId)
+    if (feedback) {
+      feedbackRating.value = feedback.rating
+      feedbackReasons.value = feedback.reason_codes
+      feedbackComment.value = feedback.comment
+    }
+  } catch {
+    // 反馈状态不影响对话展示。
+  }
+}
+
+async function rate(rating: FeedbackRating) {
+  feedbackRating.value = rating
+  feedbackOpen.value = rating === 'dislike'
+  if (rating === 'like') await saveFeedback()
+}
+
+async function saveFeedback() {
+  if (!props.message.assistantMessageId || !feedbackRating.value || feedbackSaving.value) return
+  feedbackSaving.value = true
+  try {
+    await submitFeedback(
+      props.message.assistantMessageId,
+      feedbackRating.value,
+      feedbackReasons.value,
+      feedbackComment.value,
+    )
+    feedbackOpen.value = false
+  } finally {
+    feedbackSaving.value = false
+  }
+}
+
+watch(() => props.message.assistantMessageId, loadFeedback, { immediate: true })
 
 // 引用 Popover 状态
 const activeCitationRefs = ref<number[]>([])
@@ -475,6 +526,52 @@ watch(
                 />
               </svg>
               <span>以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。</span>
+            </div>
+
+            <div
+              v-if="message.assistantMessageId && !message.isStreaming"
+              class="mt-2 text-xs text-slate-400"
+            >
+              <div class="flex items-center gap-1">
+                <span class="mr-1">这个回答有帮助吗？</span>
+                <button
+                  class="rounded px-2 py-1 hover:bg-slate-100"
+                  :class="feedbackRating === 'like' ? 'bg-blue-50 text-blue-600' : ''"
+                  aria-label="有帮助"
+                  @click="rate('like')"
+                >
+                  ♥ 有帮助
+                </button>
+                <button
+                  class="rounded px-2 py-1 hover:bg-slate-100"
+                  :class="feedbackRating === 'dislike' ? 'bg-red-50 text-red-600' : ''"
+                  aria-label="无帮助"
+                  @click="rate('dislike')"
+                >
+                  × 需改进
+                </button>
+              </div>
+              <div v-if="feedbackOpen" class="mt-2 rounded-lg border border-slate-200 p-3">
+                <div class="mb-2 flex flex-wrap gap-2">
+                  <label v-for="option in reasonOptions" :key="option[0]" class="flex gap-1">
+                    <input v-model="feedbackReasons" type="checkbox" :value="option[0]" />
+                    {{ option[1] }}
+                  </label>
+                </div>
+                <textarea
+                  v-model="feedbackComment"
+                  maxlength="1000"
+                  class="w-full rounded border border-slate-200 p-2 text-slate-700"
+                  placeholder="可选：告诉我们具体哪里需要改进"
+                />
+                <button
+                  class="mt-2 rounded bg-blue-600 px-3 py-1.5 text-white disabled:opacity-50"
+                  :disabled="feedbackSaving"
+                  @click="saveFeedback"
+                >
+                  {{ feedbackSaving ? '提交中…' : '提交反馈' }}
+                </button>
+              </div>
             </div>
 
             <!-- 元信息 -->
