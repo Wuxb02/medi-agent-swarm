@@ -35,12 +35,12 @@ python mediZJ/main.py -v       # 详细日志模式
 uv run python mediZJ/api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
-# 运行测试（349 个单元测试 + 20 个集成测试）
+# 运行测试（328 个单元测试 + 14 个集成测试）
 # 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
 # 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
 pytest tests/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
 pytest tests/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
-pytest tests/ --run-integration                        # 全部测试（349 个）
+pytest tests/ --run-integration                        # 全部测试（342 个）
 pytest tests/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
@@ -89,6 +89,34 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 
 每个 Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，内部运行 `AgentSubGraph`（LangGraph 状态图：Think-Act-Observe 循环），每次最多执行 2 次工具调用。所有 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），无历史上下文。
 
+### 自进化闭环（对话级）
+
+回答持久化后进入异步自进化闭环，不阻塞主对话：
+
+```text
+用户反馈（like/dislike + reason_codes）/ 确定性采样（sha256(message_id) < sample_rate）
+      │
+      ▼
+EvolutionService.submit_feedback / maybe_enqueue_sample → 入队（SQLite）
+      │
+      ▼
+后台 worker 轮询认领 → ConversationJudge.evaluate()   ← LLM 医疗安全七维量表（temperature=0）
+      │        维度：medical_safety / accuracy_evidence / completeness / tool_use / routing / personalization / clarity
+      ├─► verdict: high / medium / low（安全违规或关键缺陷封顶 59/79 分）
+      ├─► attribution 归因 + recommendations 优化建议
+      └─► 原子经验（response_strategy / prompt_guidance / routing_rule / retrieval_hint / context_strategy）
+            ├─ 范围：global（脱敏后）/ private（含个人信息）
+            ├─ 风险：high 经验设置过期时间（EVOLUTION_MEDICAL_EXPIRY_DAYS）
+            └─ 发布：审批通过后按版本发布，支持回滚
+      │
+      ▼
+下次问答：EvolutionService.get_runtime_context() 按词项覆盖度匹配 →
+verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不违反医学安全时使用）
+```
+
+- 失败归因（`source_catalog.py`）映射到白名单源码位置，管理端可查看上下文片段
+- 会话删除时在同一事务内联动清理自进化数据并记录审计
+
 ### 核心模块
 
 | 模块 | 职责 |
@@ -127,6 +155,11 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 | `mediZJ/constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
 | `mediZJ/validation/auto_fixer.py` | 自动修复违规输出（高危警告、截断等） |
 | `mediZJ/trace/` | 全链路追踪：Span 模型、收集器、聚合分析、SQLite 持久化 |
+| `mediZJ/evolution/service.py` | 自进化编排：反馈入队、异步评审 worker、运行时经验检索、确定性采样与观察分流 |
+| `mediZJ/evolution/judge.py` | `ConversationJudge`：真实对话 LLM 评审器（医疗安全七维量表 + 评分封顶 + 经验脱敏/过期控制） |
+| `mediZJ/evolution/storage.py` | 自进化 SQLite 存储：反馈/评审/失败/经验/发布版本/任务的全生命周期与回滚 |
+| `mediZJ/evolution/source_catalog.py` | 失败归因的安全源码追溯目录（白名单映射 + 源码片段读取） |
+| `mediZJ/api/routers/evolution.py` | `/api/evolution` 路由：反馈、评审、经验流转、发布回滚、任务重试 |
 
 ### 关键设计模式
 
@@ -135,6 +168,7 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 - **共享黑板**：`SharedContext` 作为去中心化通信介质，Worker 自主认领任务
 - **Harness Engineering**：非侵入式约束验证 + 自动修复注入 AgentSubGraph
 - **事件驱动**：`Event` 系统 + `event_callback`（supervisor_graph 节点内回调 / SharedContext.on_event_callback）用于 SSE 流式推送
+- **自进化闭环**：`EvolutionService` 单例（`__new__` 实现）+ 后台异步评审 worker，用户反馈/确定性采样入队 → LLM 评审 → 原子经验（脱敏/过期/回滚控制）→ 运行时注入 Worker 档案与任务分解 prompt
 
 ### Skill + Tool 双层架构
 
@@ -178,7 +212,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 ### Prompt 管理
 
-所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，22 个 `.j2` 模板分 6 个子目录 + 根级 `_language_rule.j2`（统一中文语言规则）：
+所有 prompt 集中在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎，23 个 `.j2` 模板分 7 个子目录（agents / evolution / lgraph / memory / research / swarm / validation）+ 根级 `_language_rule.j2`（统一中文语言规则）：
 
 ```python
 from mediZJ.core.prompt_loader import PromptLoader
@@ -190,7 +224,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 
 每轮对话完成后自动持久化，三层回退加载（SQLite → .json → .md）。
 
-- **SQLite**（`mediZJ/memory/data/sessions.db`）：结构化消息存储，事务原子写入
+- **SQLite**（`mediZJ/memory/data/sessions.db`）：结构化消息存储，事务原子写入；`messages` 表含 `citations`、`trace_id` 列（自动迁移），`save_turn` 返回 `assistant_message_id` 供自进化反馈关联
 - **Milvus**（`mediZJ/memory/data/session_vectors.db`）：会话摘要向量索引，语义搜索
 - **初始化**：`python mediZJ/memory/scripts/init_session_db.py`
 
@@ -216,6 +250,9 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - `MEDIZJ_ADMIN_USERNAME` / `AUTH_SESSION_DAYS` / `AUTH_COOKIE_SECURE` — 免密登录配置
 - `VISION_MODEL_NAME` / `VISION_API_KEY` / `VISION_BASE_URL` — 可选，图片解析 Vision 模型（未设置回退主 LLM）
 - `BASELINE_LLM_API_KEY` / `BASELINE_LLM_BASE_URL` / `BASELINE_LLM_MODEL_NAME` — AB 测试 Baseline 配置
+- `EVOLUTION_ENABLED`（默认 true）/ `EVOLUTION_SAMPLE_RATE`（默认 0.2）/ `EVOLUTION_OBSERVATION_RATE`（默认 0.2）— 自进化开关与确定性采样率
+- `EVOLUTION_POLL_INTERVAL`（默认 2s）/ `EVOLUTION_JUDGE_TIMEOUT`（默认 120s）— 评审 worker 轮询与单次评审超时
+- `EVOLUTION_MEDICAL_EXPIRY_DAYS`（默认 180）/ `EVOLUTION_TRUSTED_SOURCES` / `EVOLUTION_TRUSTED_DOMAINS` — 高危经验过期与可信来源白名单
 
 约束定义（YAML）：
 - `mediZJ/constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为
@@ -228,7 +265,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 ```text
 frontend/
 ├── src/
-│   ├── api/            # HTTP 请求层（axios 实例 + 各模块 API 函数：auth, chat, dashboard, image, knowledge, personal, session, trace）
+│   ├── api/            # HTTP 请求层（axios 实例 + 各模块 API 函数：auth, chat, dashboard, evolution, image, knowledge, personal, session, trace）
 │   ├── components/     # Vue 组件
 │   │   ├── agents/     # Agent Timeline 等
 │   │   ├── chat/       # 聊天相关（ChatMessage, ChatInput, ThinkingBlock, QuestionnaireCard, CitationPopover, SuggestionChips, DisclaimerBanner 等）
@@ -239,7 +276,7 @@ frontend/
 │   ├── stores/         # Pinia Store（chat, auth, dashboard, knowledge, personal, trace）
 │   ├── types/          # TypeScript 类型定义（含 SSE 事件类型体系）
 │   ├── utils/          # 工具函数（eventAggregator, formatToolResult）
-│   └── views/          # 页面视图（ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView）
+│   └── views/          # 页面视图（ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView, EvolutionView）
 ├── eslint.config.mjs   # ESLint flat config
 ├── .prettierrc         # Prettier 配置
 ├── vitest.config.ts    # Vitest 测试配置

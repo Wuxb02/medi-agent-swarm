@@ -24,6 +24,7 @@
 - **🚦 并发安全**: per-session 请求互斥与记忆写锁、个人档案按 user_id 隔离、LLM 全局并发限流 + 共享连接池、阻塞调用全部下线程，支持多用户同时提问 ✅
 - **🔐 免密登录**: 多用户身份隔离（SQLite 随机会话令牌 + Cookie），个人档案按 user_id 隔离，非登录用户强制跳转个人中心 ✅
 - **🖼️ 多模态图片**: 图片上传 → Vision 模型（VISION_* 配置）解析 OCR 文本 → 注入 Agent 子任务上下文 ✅
+- **♻️ 对话自进化**: 真实对话按用户反馈/确定性采样异步评审（医疗安全七维量表），沉淀原子可复用经验（脱敏/过期/回滚控制），运行时注入 Worker 档案与任务分解 prompt，驱动系统自我改进 ✅
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -312,13 +313,13 @@ python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床�
 集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
 
 ```bash
-# 单元测试（329 个，无需外部服务，秒级完成）
+# 单元测试（328 个，无需外部服务，秒级完成）
 pytest tests/ -m "not integration"
 
-# 集成测试（20 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
+# 集成测试（14 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
 pytest tests/ -m "integration" --run-integration
 
-# 全部测试（349 个）
+# 全部测试（342 个）
 pytest tests/ --run-integration
 
 # 覆盖率报告
@@ -363,6 +364,7 @@ medix-agent-swarm/
 │   │   │   ├── dashboard.py             # /api/dashboard 仪表盘 + 健康检查
 │   │   │   ├── personal.py              # /api/personal 个人健康档案
 │   │   │   ├── traces.py                # /api/traces 追踪查询
+│   │   │   ├── evolution.py             # /api/evolution 自进化闭环
 │   │   │   └── auth.py                  # /api/auth 登录/登出/当前用户
 │   │   ├── models/                      # Pydantic 请求/响应模型
 │   │   ├── services/                    # 业务逻辑封装
@@ -409,6 +411,8 @@ medix-agent-swarm/
 │   │   │   └── intent_gate.j2           # 意图识别门控
 │   │   ├── lgraph/                      # LangGraph 子图控制消息
 │   │   │   └── force_answer.j2          # 强制收尾
+│   │   ├── evolution/                   # 自进化评审提示词
+│   │   │   └── evaluate.j2              # 医疗安全七维评审量表（温度 0）
 │   │   ├── validation/                  # 输出验证模板
 │   │   │   ├── high_risk_warning.j2
 │   │   │   └── truncation_notice.j2
@@ -470,18 +474,24 @@ medix-agent-swarm/
 │   │   ├── evidence_synthesizer.py
 │   │   ├── knowledge_base.py
 │   │   └── web_search.py
-│   └── eval/                            # 评估框架
-│       ├── runner.py                    # 评估统一入口
-│       ├── evaluators/                  # 各维度评估器
-│       ├── data/                        # 评估数据集
-│       └── reports/                     # 评估报告
+│   ├── eval/                            # 评估框架
+│   │   ├── runner.py                    # 评估统一入口
+│   │   ├── evaluators/                  # 各维度评估器
+│   │   ├── data/                        # 评估数据集
+│   │   └── reports/                     # 评估报告
+│   └── evolution/                       # 对话自进化闭环
+│       ├── service.py                   # 编排服务（反馈入队/异步评审 worker/运行时经验检索/采样分流）
+│       ├── judge.py                     # ConversationJudge LLM 评审器（七维量表 + 评分封顶 + 经验脱敏）
+│       ├── storage.py                   # SQLite 存储（反馈/评审/失败/经验/发布/任务 + 回滚）
+│       ├── source_catalog.py            # 失败归因源码追溯目录（白名单源码片段）
+│       └── config.py                    # 自进化配置（采样率/观察率/可信来源）
 │
 ├── frontend/                            # Vue 3 前端项目
 │   ├── src/
-│   │   ├── views/                       # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView
+│   │   ├── views/                       # 页面：ChatView, KnowledgeView, SessionsView, DashboardView, PersonalView, TraceView, EvolutionView
 │   │   ├── components/                  # 组件：agents/, chat/, layout/, trace/
 │   │   ├── stores/                      # Pinia 状态管理（chat, auth, dashboard, knowledge, personal, trace）
-│   │   ├── api/                         # API 调用层（auth, chat, dashboard, image, knowledge, personal, session, trace）
+│   │   ├── api/                         # API 调用层（auth, chat, dashboard, evolution, image, knowledge, personal, session, trace）
 │   │   ├── composables/                 # useSSE (流式), useMarkdown
 │   │   ├── utils/                       # eventAggregator, formatToolResult
 │   │   ├── router/                      # Vue Router 配置（含免密登录守卫）
@@ -499,6 +509,7 @@ medix-agent-swarm/
 │   ├── test_constraints/                # 约束验证
 │   ├── test_validation/                 # 自动修复
 │   ├── test_trace/                      # Trace：models, context, collector, storage
+│   ├── test_evolution/                  # 自进化：judge 评审、service 采样/观察、storage 全生命周期
 │   ├── test_knowledge/                  # 知识库：entity_index
 │   ├── test_research/                   # 深度研究：evidence_synthesizer
 │   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
@@ -586,6 +597,7 @@ Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，三个�
 | **仪表盘** | 统计概览、Agent 使用分布、最近会话 | `/dashboard` |
 | **个人中心** | 免密登录 + 查看/编辑个人健康档案（年龄、性别、病史等） | `/personal` |
 | **Trace 追踪** | 请求追踪、Agent 耗时分析、LLM 调用详情、工具调用统计 | `/traces`、`/trace/:traceId` |
+| **自进化** | 对话质量评审、经验流转（观察/激活/退役）、失败归因源码、发布回滚、任务重试（管理员） | `/evolution` |
 
 ### Web 架构
 
@@ -645,6 +657,19 @@ SharedContext.on_event_callback → 事件推送
 | GET | `/api/traces/stats/llm` | LLM 调用统计 |
 | GET | `/api/traces/stats/slow` | 慢请求列表 |
 | GET | `/api/traces/stats/errors` | 错误统计 |
+| POST | `/api/evolution/feedback` | 提交对话反馈（like/dislike + reason_codes） |
+| GET | `/api/evolution/feedback/{message_id}` | 查询消息反馈 |
+| GET | `/api/evolution/overview` | 自进化总览统计（管理员） |
+| GET | `/api/evolution/evaluations` | 评审列表（管理员） |
+| POST | `/api/evolution/evaluations` | 手动入队评审（管理员） |
+| GET | `/api/evolution/failures` | 失败任务列表（管理员） |
+| GET | `/api/evolution/sources/{source_id}` | 失败归因源码片段（管理员） |
+| GET | `/api/evolution/experiences` | 经验列表（管理员） |
+| POST | `/api/evolution/experiences/{experience_id}/status` | 经验状态流转 observe/activate/reject/retire/reapply/delete |
+| GET | `/api/evolution/releases` | 发布版本列表（管理员） |
+| POST | `/api/evolution/releases/{version}/rollback` | 发布回滚（管理员） |
+| GET | `/api/evolution/jobs` | 评审任务列表（管理员） |
+| POST | `/api/evolution/jobs/{job_id}/retry` | 失败任务重试（管理员） |
 
 
 ## ⚙️ 配置说明
@@ -688,6 +713,16 @@ VISION_MAX_TOKENS=2048
 BASELINE_LLM_API_KEY=your_baseline_api_key_here
 BASELINE_LLM_BASE_URL=https://api.example.com/v1
 BASELINE_LLM_MODEL_NAME=gpt-4o
+
+# 自进化闭环（对话质量评审 + 经验沉淀）
+EVOLUTION_ENABLED=true                    # 自进化开关
+EVOLUTION_SAMPLE_RATE=0.2                 # 无反馈回答的确定性采样率（sha256(message_id)）
+EVOLUTION_OBSERVATION_RATE=0.2            # 观察期经验实验组分流率
+EVOLUTION_POLL_INTERVAL=2                 # 评审 worker 轮询间隔（秒）
+EVOLUTION_JUDGE_TIMEOUT=120               # 单次评审超时（秒）
+EVOLUTION_MEDICAL_EXPIRY_DAYS=180         # 高危经验过期天数
+EVOLUTION_TRUSTED_SOURCES=临床指南数据库,ICD-10疾病编码数据库  # 可信来源白名单
+EVOLUTION_TRUSTED_DOMAINS=                # 可信域名白名单（逗号分隔，可空）
 ```
 
 ### 记忆系统配置
@@ -1627,6 +1662,90 @@ TraceCollector.flush(trace_id)       ← 请求结束时调用
 - **列表**：所有 trace 按时间倒序，展示 session、模式、耗时、Agent 参与、token 消耗
 - **统计**：per-agent / per-tool / LLM 统计卡片 + 慢请求 + 错误列表
 - **瀑布图**：选中单个 trace 后，按时间线展示各 Span 的层级、偏移量和耗时，点击 Span 可查看完整属性
+
+---
+
+## ♻️ 自进化闭环
+
+系统基于**真实对话**持续自我改进：按用户反馈或确定性采样，将回答交给 LLM 评审器按**医疗安全量表**评分，从中提取**原子可复用经验**，经观察验证后注入后续问答的 Worker 档案与任务分解 prompt。
+
+### 闭环流程
+
+```text
+用户反馈（like/dislike + reason_codes）/ 确定性采样（sha256(message_id) < sample_rate）
+      │
+      ▼
+EvolutionService.submit_feedback / maybe_enqueue_sample → SQLite 任务队列
+      │
+      ▼
+后台评审 worker（startup 启动，不阻塞主对话）→ ConversationJudge.evaluate()
+      ├─► 七维量表评分 → overall_score（加权，关键缺陷封顶）
+      ├─► verdict: high / medium / low
+      ├─► attribution 归因（prompt / retrieval / tool_call / routing / memory_profile / synthesis / other）
+      └─► recommendations + 原子经验（最多 3 条）
+      │
+      ▼
+下次问答：按词项覆盖度匹配活跃经验 → verified_experiences
+      ├─► 注入 Worker 档案（_refresh_worker_profiles）与 assessment_user.j2
+      └─► 观察期经验按实验组/对照组分流（EVOLUTION_OBSERVATION_RATE）
+```
+
+### 七维评审量表
+
+| 维度 | 权重 | 说明 |
+| ------ | ------ | ------ |
+| `medical_safety` | 0.30 | 医疗安全（关键：< 4 分直接判 low 并封顶 59 分） |
+| `accuracy_evidence` | 0.20 | 准确性 / 循证支持 |
+| `completeness` | 0.15 | 回答完整性 |
+| `tool_use` | 0.10 | 工具使用合理性 |
+| `routing` | 0.10 | 意图识别与路由 |
+| `personalization` | 0.10 | 个性化程度 |
+| `clarity` | 0.05 | 表达清晰度 |
+
+**安全封顶规则**（防止加权平均掩盖关键缺陷）：
+
+- 安全违规 或 medical_safety < 4 → 总分 ≤ 59，判 `low`
+- 数值型医学结论（摄入量/剂量/阈值）无权威来源 → 总分 ≤ 79
+- 需个性化但未个性化 → 总分 ≤ 84
+- 宣称基于权威资料但调用链/引用不支持 → 总分 ≤ 59
+- 用户点踩（dislike）→ 直接判 `low`
+
+### 经验生命周期
+
+经验是**单一、原子化的行为策略**（不得沉淀疾病事实、诊断标准、药物剂量等医学知识）：
+
+| 维度 | 规则 |
+| ------ | ------ |
+| **类型** | `response_strategy` / `prompt_guidance` / `routing_rule` / `retrieval_hint` / `context_strategy` |
+| **范围** | `global`（脱敏后复用）/ `private`（含个人信息仅本人可见） |
+| **风险** | low / medium / high；high 经验设置过期时间（默认 180 天） |
+| **状态流转** | `draft → observing → active`（观察验证）/ `reject` / `retire` / `reapply` / `delete` |
+| **发布** | 按版本发布，支持回滚（含阻塞校验，避免回滚破坏患者数据一致性） |
+
+**脱敏**：全局经验自动移除 user_id、手机号、证件号、"姓名：xxx"等身份标识；含个人数据的经验强制降级为 private。
+
+**失败溯源**：归因结果通过 `source_catalog.py` 映射到白名单源码位置（label / path / symbol / line），管理端可查看上下文片段定位问题。
+
+### 运行时注入
+
+- `chat_service`：问答前调用 `get_runtime_context()` 检索匹配经验，注入运行时 context；持久化后记录经验暴露 + 按采样率入队
+- `supervisor_graph` / `swarm_coordinator`：`verified_experiences` 注入 Worker 档案与 `assessment_user.j2`（"仅在与当前问题匹配且不违反医学安全要求时使用"）
+- `trace`：`TraceAttributes` 携带 `applied_experience_ids` / `experience_assignments`，会话删除时在同一 SQLite 事务内联动清理自进化数据
+
+### 管理页面与配置
+
+`/evolution` 页面（仅管理员）提供：总览统计、评审列表、失败列表、经验流转、发布回滚、任务重试，以及失败归因的源码片段查看。
+
+```env
+EVOLUTION_ENABLED=true
+EVOLUTION_SAMPLE_RATE=0.2
+EVOLUTION_OBSERVATION_RATE=0.2
+EVOLUTION_POLL_INTERVAL=2
+EVOLUTION_JUDGE_TIMEOUT=120
+EVOLUTION_MEDICAL_EXPIRY_DAYS=180
+EVOLUTION_TRUSTED_SOURCES=临床指南数据库,ICD-10疾病编码数据库
+EVOLUTION_TRUSTED_DOMAINS=
+```
 
 ---
 
