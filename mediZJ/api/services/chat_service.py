@@ -475,8 +475,10 @@ async def _chat_stream_impl(
         """处理单个事件：映射类型 → 加入待发送列表或缓冲"""
         mapped_type = _map_event_type(event.type.value)
 
-        # content_delta 不发送（答案在 done 事件中整体返回）
+        # 仅透传最终回答 token。Swarm Worker 的中间产物不得进入正文。
         if mapped_type == "agent_content_delta":
+            if event.data.get("is_final"):
+                _yield_event(mapped_type, event.to_dict())
             return
 
         # thinking 事件进入批量缓冲

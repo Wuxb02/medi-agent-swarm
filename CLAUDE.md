@@ -253,6 +253,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - `EVOLUTION_ENABLED`（默认 true）/ `EVOLUTION_SAMPLE_RATE`（默认 0.2）/ `EVOLUTION_OBSERVATION_RATE`（默认 0.2）— 自进化开关与确定性采样率
 - `EVOLUTION_POLL_INTERVAL`（默认 2s）/ `EVOLUTION_JUDGE_TIMEOUT`（默认 120s）— 评审 worker 轮询与单次评审超时
 - `EVOLUTION_MEDICAL_EXPIRY_DAYS`（默认 180）/ `EVOLUTION_TRUSTED_SOURCES` / `EVOLUTION_TRUSTED_DOMAINS` — 高危经验过期与可信来源白名单
+- `EVOLUTION_GLOBAL_MIN_SUPPORT`（默认 3）— 全局经验发布所需的至少支持用户数（distinct_users 与 support_count 双门槛）
 
 约束定义（YAML）：
 - `mediZJ/constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为

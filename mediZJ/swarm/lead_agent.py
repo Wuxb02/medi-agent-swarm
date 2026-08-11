@@ -8,15 +8,13 @@ LeadAgent：任务分解和结果汇总
 - Worker 自主认领任务并执行
 """
 import uuid
-import json
-import re
 import time
 from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
 
 from mediZJ.core.llm_client import LLMClient
 from mediZJ.core.prompt_loader import PromptLoader
-from .shared_context import SharedContext, SubTask, TaskStatus
+from .shared_context import SharedContext, SubTask
 from .events import Event, EventType
 
 
@@ -150,7 +148,7 @@ class LeadAgent:
                     event_callback(Event(
                         type=EventType.AGENT_CONTENT_DELTA,
                         source_agent=self.agent_id,
-                        data={"content": token},
+                        data={"token": token, "is_final": True},
                     ))
 
                 answer = await self.llm_client.chat_with_tools_stream(
@@ -341,7 +339,8 @@ class LeadAgent:
         self,
         question: str,
         shared_context: SharedContext,
-        timeout_occurred: bool = False
+        timeout_occurred: bool = False,
+        event_callback: Optional[Callable] = None,
     ) -> str:
         """
         汇总所有 Agent 的贡献，生成最终答案
@@ -410,16 +409,30 @@ class LeadAgent:
         )
 
         try:
-            response = await self.llm_client.chat([
-                {"role": "user", "content": synthesis_prompt}
-            ])
+            messages = [{"role": "user", "content": synthesis_prompt}]
+            if event_callback:
+                def _on_content_token(token: str) -> None:
+                    event_callback(Event(
+                        type=EventType.AGENT_CONTENT_DELTA,
+                        source_agent=self.agent_id,
+                        data={"token": token, "is_final": True},
+                    ))
+
+                response = await self.llm_client.chat_with_tools_stream(
+                    messages=messages,
+                    tools=None,
+                    on_content_token=_on_content_token,
+                )
+                response_text = response.content or ""
+            else:
+                response_text = await self.llm_client.chat(messages)
 
             # 发射 thinking_done
             if self.on_thinking_done:
                 elapsed = round(time.monotonic() - think_start, 1)
                 self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
 
-            return response
+            return response_text
 
         except Exception as e:
             logger.error(f"Synthesis error: {e}")

@@ -6,6 +6,7 @@ import pytest
 
 import mediZJ.api.services.chat_service as cs
 from mediZJ.api.models.chat import ChatRequest
+from mediZJ.swarm.events import Event, EventType
 
 
 class _ConcurrencyTracker:
@@ -210,3 +211,78 @@ async def test_multi_round_questionnaire_resume(monkeypatch):
     done_data = json.loads(chunks[-1])["data"]
     assert done_data["answer"] == "ok"
     assert MultiRoundCoordinator.trace_flushed is True
+
+
+async def test_stream_only_forwards_final_content_delta(monkeypatch):
+    """SSE 只透传最终正文 token，过滤 Worker 中间结果。"""
+
+    class StreamingCoordinator:
+        def __init__(self, event_callback=None, **kwargs):
+            del kwargs
+            self.event_callback = event_callback
+            self.ltm_save_task = None
+
+        def build_graph(self, event_callback=None, hitl_enabled=False):
+            del hitl_enabled
+            self.event_callback = event_callback
+            return object()
+
+        def _init_trace(self, _trace_id):
+            return object()
+
+        async def _flush_trace(self, *_args):
+            return None
+
+        def build_initial_state(self, question, context, session_id, start_time):
+            del context, start_time
+            return {"question": question, "session_id": session_id}
+
+        async def run_graph(self, graph, initial_state, config, resume=None):
+            del graph, config, resume
+            self.event_callback(Event(
+                type=EventType.AGENT_CONTENT_DELTA,
+                source_agent="worker_agent",
+                data={"token": "中间结果"},
+            ))
+            self.event_callback(Event(
+                type=EventType.AGENT_CONTENT_DELTA,
+                source_agent="lead_agent",
+                data={"token": "最终回答", "is_final": True},
+            ))
+            await asyncio.sleep(0)
+            return {
+                "answer": "最终回答",
+                "session_id": initial_state["session_id"],
+                "suggestions": [],
+            }
+
+        def compose_result(
+            self,
+            question,
+            result_state,
+            start_time,
+            session_id,
+            trace_id=None,
+        ):
+            del question, start_time, session_id, trace_id
+            return result_state
+
+    monkeypatch.setattr(cs, "SwarmCoordinator", StreamingCoordinator)
+    monkeypatch.setattr(cs, "_persist_session_turn", lambda *args, **kwargs: None)
+
+    chunks = [
+        chunk
+        async for chunk in cs.chat_stream(
+            ChatRequest(question="q", session_id="s-final-stream"),
+            _FakeRequest(),
+        )
+    ]
+    events = [json.loads(chunk) for chunk in chunks]
+    content_events = [
+        event for event in events
+        if event["event"] == "agent_content_delta"
+    ]
+
+    assert len(content_events) == 1
+    assert content_events[0]["data"]["data"]["token"] == "最终回答"
+    assert events[-1]["event"] == "done"

@@ -350,14 +350,19 @@ class EvolutionStorage:
             )
             """
         )
+        settings = EvolutionSettings.from_env()
         conn.execute(
             """
             UPDATE learned_experiences
             SET status = 'candidate', updated_at = ?
             WHERE scope = 'global' AND status IN ('active', 'observing')
-              AND (support_count < 3 OR distinct_users < 3)
+              AND (support_count < ? OR distinct_users < ?)
             """,
-            (datetime.now().isoformat(),),
+            (
+                datetime.now().isoformat(),
+                settings.global_min_support,
+                settings.global_min_support,
+            ),
         )
 
     @staticmethod
@@ -1827,8 +1832,14 @@ class EvolutionStorage:
             if row["support_count"] < 2 or row["average_score"] < 85:
                 raise ValueError("个人经验至少需 2 个支持案例且均分不低于 85")
             return
-        if row["support_count"] < 3 or row["distinct_users"] < 3:
-            raise ValueError("全局经验至少需 3 个不同用户的支持案例")
+        if (
+            row["support_count"] < settings.global_min_support
+            or row["distinct_users"] < settings.global_min_support
+        ):
+            raise ValueError(
+                "全局经验至少需 %d 个不同用户的支持案例"
+                % settings.global_min_support
+            )
         if row["average_score"] < 88:
             raise ValueError("全局经验平均得分不得低于 88")
 

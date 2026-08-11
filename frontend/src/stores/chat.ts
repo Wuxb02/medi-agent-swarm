@@ -4,6 +4,7 @@ import type { ChatMessage, SessionTurn } from '../types'
 import { useSSE } from '../composables/useSSE'
 import { getSessionDetail } from '../api/session'
 import { createEventAggregator } from '../utils/eventAggregator'
+import { typeRemainingText, type TypewriterController } from '../utils/typewriter'
 
 let msgIdCounter = 0
 function genId() {
@@ -16,6 +17,7 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<ChatMessage[]>([])
   const isStreaming = ref(false)
   const error = ref<string | null>(null)
+  let typewriter: TypewriterController | null = null
 
   const { connect, disconnect } = useSSE()
 
@@ -152,11 +154,9 @@ export const useChatStore = defineStore('chat', () => {
             isDone = true
             const msg = messages.value.find((m) => m.id === assistantMsg.id)
             if (msg) {
-              msg.content = data.answer || msg.content
               msg.citations = data.citations || []
               msg.assistantMessageId = data.assistant_message_id
               msg.traceId = data.trace_id
-              msg.isStreaming = false
               msg.metadata = {
                 swarmEnabled: data.swarm_enabled ?? false,
                 agentsInvolved: data.agents_involved || [],
@@ -176,10 +176,30 @@ export const useChatStore = defineStore('chat', () => {
                   b.isCollapsed = true
                 })
               }
+
+              typewriter?.cancel()
+              let typingCompleted = false
+              const nextTypewriter = typeRemainingText({
+                currentText: msg.content || '',
+                targetText: data.answer || msg.content || '',
+                onUpdate(text) {
+                  msg.content = text
+                },
+                onComplete() {
+                  typingCompleted = true
+                  msg.isStreaming = false
+                  isStreaming.value = false
+                  typewriter = null
+                },
+              })
+              typewriter = typingCompleted ? null : nextTypewriter
+            } else {
+              isStreaming.value = false
             }
-            isStreaming.value = false
           },
           onError(data) {
+            typewriter?.cancel()
+            typewriter = null
             error.value = data.error
             const msg = messages.value.find((m) => m.id === assistantMsg.id)
             if (msg) {
@@ -253,7 +273,7 @@ export const useChatStore = defineStore('chat', () => {
               id: genId(),
               role: 'user',
               content: turn.user_message.content,
-              images: (turn.user_message as Record<string, unknown>).images as string[] || [],
+              images: ((turn.user_message as Record<string, unknown>).images as string[]) || [],
               timestamp: turn.user_message.timestamp || new Date().toISOString(),
             })
           }
@@ -338,6 +358,8 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function clearChat() {
+    typewriter?.cancel()
+    typewriter = null
     messages.value = []
     sessionId.value = null
     sessionTitle.value = null

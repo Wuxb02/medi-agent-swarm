@@ -502,6 +502,40 @@ def test_global_single_case_cannot_be_published(evolution):
     assert item["status"] == "candidate"
 
 
+def test_global_support_threshold_is_configurable(evolution, monkeypatch):
+    """全局经验的最少支持用户数可通过 EVOLUTION_GLOBAL_MIN_SUPPORT 调整。"""
+    _session_db, storage, _service = evolution
+    monkeypatch.setenv("EVOLUTION_GLOBAL_MIN_SUPPORT", "2")
+    conn = storage._get_conn()
+    conn.execute(
+        """
+        INSERT INTO learned_experiences
+            (experience_id, experience_type, scope, query_pattern, content,
+             status, average_score, support_count, distinct_users,
+             created_at, updated_at)
+        VALUES ('enough', 'response_strategy', 'global', '头痛',
+                '按结构回答', 'candidate', 90, 2, 2, 'now', 'now')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO learned_experiences
+            (experience_id, experience_type, scope, query_pattern, content,
+             status, average_score, support_count, distinct_users,
+             created_at, updated_at)
+        VALUES ('one-user', 'response_strategy', 'global', '发热',
+                '按结构回答', 'candidate', 90, 3, 1, 'now', 'now')
+        """
+    )
+    conn.commit()
+
+    # 阈值降为 2 后，2 个不同用户即可进入观察
+    assert storage.set_experience_status("enough", "active", "admin") is True
+    # 3 条支持但仅 1 个不同用户仍被拒绝，distinct_users 是硬约束
+    with pytest.raises(ValueError, match="全局经验至少需 2 个不同用户"):
+        storage.set_experience_status("one-user", "active", "admin")
+
+
 def test_observing_experience_retires_after_negative_feedback(evolution):
     session_db, storage, service = evolution
     message_id = _save_answer(session_db)

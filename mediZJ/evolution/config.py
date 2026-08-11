@@ -35,6 +35,7 @@ class EvolutionSettings:
     poll_interval: float
     judge_timeout: float
     medical_expiry_days: int
+    global_min_support: int
     trusted_sources: frozenset[str]
     trusted_domains: frozenset[str]
 
@@ -66,6 +67,10 @@ class EvolutionSettings:
             medical_expiry_days=_positive_int(
                 "EVOLUTION_MEDICAL_EXPIRY_DAYS",
                 "180",
+            ),
+            global_min_support=_positive_int(
+                "EVOLUTION_GLOBAL_MIN_SUPPORT",
+                "3",
             ),
             trusted_sources=frozenset(trusted_sources),
             trusted_domains=frozenset(trusted_domains),

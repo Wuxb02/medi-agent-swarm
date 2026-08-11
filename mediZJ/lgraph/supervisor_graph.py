@@ -17,7 +17,7 @@ from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import Send, interrupt, Command
+from langgraph.types import Send, interrupt
 from langgraph.checkpoint.memory import MemorySaver
 
 from mediZJ.lgraph.supervisor_state import SupervisorState
@@ -60,7 +60,7 @@ async def retrieve_memories_with_intent_gate(
 
     similar_memories: List[Dict[str, Any]] = []
     if intent == "others":
-        logger.info(f"[SupervisorGraph] 意图=others，跳过长期记忆检索")
+        logger.info("[SupervisorGraph] 意图=others，跳过长期记忆检索")
     else:
         try:
             similar_memories = (
@@ -420,7 +420,12 @@ def build_supervisor_graph(
 
         # 注入流式回调
         if event_callback:
-            _inject_worker_callbacks(worker, agent_id, event_callback)
+            _inject_worker_callbacks(
+                worker,
+                agent_id,
+                event_callback,
+                stream_final_content=True,
+            )
 
         # Trace: AGENT span
         _ctx = traced_span(SpanType.AGENT, name=agent_id) if TRACE_AVAILABLE else None
@@ -478,7 +483,14 @@ def build_supervisor_graph(
         if citations:
             ref_section = coordinator.format_references_section(citations)
             if ref_section:
-                final_answer += "\n" + ref_section
+                reference_text = "\n" + ref_section
+                final_answer += reference_text
+                if event_callback:
+                    event_callback(Event(
+                        type=EventType.AGENT_CONTENT_DELTA,
+                        source_agent=agent_id,
+                        data={"token": reference_text, "is_final": True},
+                    ))
 
         # 子会话合并到主会话
         await coordinator.short_term_memory.add_message(
@@ -779,6 +791,7 @@ def build_supervisor_graph(
             question=state["question"],
             shared_context=shared_ctx,
             timeout_occurred=timeout_occurred,
+            event_callback=event_callback,
         )
 
         if event_callback:
@@ -789,7 +802,14 @@ def build_supervisor_graph(
         if swarm_citations:
             ref_section = coordinator.format_references_section(swarm_citations)
             if ref_section:
-                final_answer += "\n" + ref_section
+                reference_text = "\n" + ref_section
+                final_answer += reference_text
+                if event_callback:
+                    event_callback(Event(
+                        type=EventType.AGENT_CONTENT_DELTA,
+                        source_agent="lead_agent",
+                        data={"token": reference_text, "is_final": True},
+                    ))
 
         # 合并子会话到主会话
         for agent_id, contribs in contributions.items():
@@ -845,19 +865,20 @@ def build_supervisor_graph(
         usage = state.get("usage", {})
         chat_mode = state.get("chat_mode", False)
 
-        ltm_task = None
         if not chat_mode:
-            ltm_task = asyncio.ensure_future(coordinator._save_long_term_memory(
-                session_id=session_id,
-                question=state["question"],
-                answer=final_answer,
-                metadata={
-                    "mode": mode,
-                    "subtasks_count": len(state.get("subtasks", [])),
-                    "total_time": total_time,
-                    "total_tokens": usage.get("total_tokens", 0),
-                },
-            ))
+            asyncio.ensure_future(
+                coordinator._save_long_term_memory(
+                    session_id=session_id,
+                    question=state["question"],
+                    answer=final_answer,
+                    metadata={
+                        "mode": mode,
+                        "subtasks_count": len(state.get("subtasks", [])),
+                        "total_time": total_time,
+                        "total_tokens": usage.get("total_tokens", 0),
+                    },
+                )
+            )
 
         return {
             "total_time": total_time,
@@ -1072,7 +1093,12 @@ def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[in
             contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
 
 
-def _inject_worker_callbacks(worker, agent_id: str, event_callback: Callable):
+def _inject_worker_callbacks(
+    worker,
+    agent_id: str,
+    event_callback: Callable,
+    stream_final_content: bool = False,
+):
     """为 Worker 注入流式回调"""
     def _on_thinking(content, iteration):
         event_callback(Event(
@@ -1106,13 +1132,15 @@ def _inject_worker_callbacks(worker, agent_id: str, event_callback: Callable):
         event_callback(Event(
             type=EventType.AGENT_CONTENT_DELTA,
             source_agent=agent_id,
-            data={"token": token},
+            data={"token": token, "is_final": True},
         ))
 
     worker.set_on_thinking(_on_thinking)
     worker.set_on_tool_step(_on_tool_step)
     worker.set_on_thinking_done(_on_thinking_done)
-    worker.set_on_content_token(_on_content_token)
+    worker.set_on_content_token(
+        _on_content_token if stream_final_content else None
+    )
 
 
 def _cleanup_worker_callbacks(worker):
