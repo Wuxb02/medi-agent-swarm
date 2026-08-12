@@ -334,6 +334,42 @@ async def test_judge_applies_dislike_and_safety_gates():
     assert result["attribution"] == ["prompt"]
 
 
+@pytest.mark.asyncio
+async def test_judge_tolerates_malformed_structured_fields():
+    class FakeLLM:
+        model_name = "fake"
+
+        async def chat(self, *_args, **_kwargs):
+            return json.dumps(
+                {
+                    "dimension_scores": {"medical_safety": {"score": 5}},
+                    "attribution": [{"type": "retrieval"}],
+                    "experiences": [
+                        {
+                            "type": {"value": "response_strategy"},
+                            "query_pattern": "头痛",
+                            "content": "先筛查危险信号",
+                        },
+                        {
+                            "type": "response_strategy",
+                            "query_pattern": "头痛",
+                            "content": "先筛查危险信号",
+                            "risk_level": {"value": "low"},
+                        },
+                    ],
+                }
+            )
+
+    result = await ConversationJudge(FakeLLM()).evaluate(
+        {"question": "q", "content": "a", "user_id": "patient"}
+    )
+
+    assert result["dimension_scores"]["medical_safety"] == 0
+    assert result["attribution"] == ["other"]
+    assert len(result["experiences"]) == 1
+    assert result["experiences"][0]["risk_level"] == "medium"
+
+
 def test_runtime_context_only_uses_matching_active_experiences(evolution):
     _session_db, storage, service = evolution
     conn = storage._get_conn()

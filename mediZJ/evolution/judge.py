@@ -71,8 +71,10 @@ class ConversationJudge:
         )
         result = json.loads(raw)
         scores = result.get("dimension_scores", {})
+        if not isinstance(scores, dict):
+            scores = {}
         normalized = {
-            name: max(0.0, min(5.0, float(scores.get(name, 0))))
+            name: self._normalize_score(scores.get(name))
             for name in self._WEIGHTS
         }
         overall = sum(
@@ -98,9 +100,12 @@ class ConversationJudge:
             verdict = "high"
         else:
             verdict = "medium"
+        raw_attribution = result.get("attribution", [])
+        if not isinstance(raw_attribution, list):
+            raw_attribution = []
         attribution = [
-            item for item in result.get("attribution", [])
-            if item in self._ATTRIBUTIONS
+            item for item in raw_attribution
+            if isinstance(item, str) and item in self._ATTRIBUTIONS
         ] or ["other"]
         recommendations = self._normalize_recommendations(
             result.get("recommendations")
@@ -133,6 +138,17 @@ class ConversationJudge:
             if content and content not in recommendations:
                 recommendations.append(content)
         return recommendations
+
+    @staticmethod
+    def _normalize_score(value: Any) -> float:
+        """将模型输出的维度分数限制在 0～5。"""
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return 0.0
+        try:
+            score = float(value)
+        except ValueError:
+            return 0.0
+        return max(0.0, min(5.0, score))
 
     @staticmethod
     def _ensure_retrieval_experience(
@@ -205,7 +221,8 @@ class ConversationJudge:
                 continue
             experience_type = item.get("type")
             if (
-                experience_type not in self._EXPERIENCE_TYPES
+                not isinstance(experience_type, str)
+                or experience_type not in self._EXPERIENCE_TYPES
                 or not str(item.get("query_pattern", "")).strip()
                 or not str(item.get("content", "")).strip()
             ):
@@ -224,9 +241,11 @@ class ConversationJudge:
                 "search-knowledge",
                 "权威知识检索能力",
             )
+            proposed_risk_level = item.get("risk_level")
             risk_level = (
-                item.get("risk_level")
-                if item.get("risk_level") in self._RISK_LEVELS
+                proposed_risk_level
+                if isinstance(proposed_risk_level, str)
+                and proposed_risk_level in self._RISK_LEVELS
                 else "medium"
             )
             expires_at = item.get("expires_at")
