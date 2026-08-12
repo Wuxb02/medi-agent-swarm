@@ -10,6 +10,7 @@ SupervisorGraph — 替代 SwarmCoordinator.process() 的 LangGraph 主图
 采用 Map-Reduce 模式：Send API 并行扇出 Worker，synthesize_results 汇总。
 """
 import asyncio
+import time
 import re
 import uuid
 from datetime import datetime
@@ -201,10 +202,41 @@ def build_supervisor_graph(
             return {"clarify_complete": True, "collected_info": ""}
 
         current_round = state.get("clarify_round", 0)
+        iteration = current_round + 1
+
+        def _emit_clarify_thinking(content: str, status: str = "running") -> None:
+            if event_callback:
+                event_callback(Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent=lead_agent.agent_id,
+                    data={
+                        "content": content,
+                        "iteration": iteration,
+                        "phase": "clarify",
+                        "title": f"信息澄清（第 {iteration} 轮）",
+                        "status": status,
+                    },
+                ))
+
+        def _emit_clarify_done(status: str = "completed") -> None:
+            if event_callback:
+                event_callback(Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent=lead_agent.agent_id,
+                    data={
+                        "iteration": iteration,
+                        "phase": "clarify",
+                        "status": status,
+                        "elapsed_seconds": round(time.monotonic() - think_start, 1),
+                    },
+                ))
 
         # 硬上限：先查再调 LLM，保证第 MAX_ROUNDS+1 次 LLM 不会被调用
         if current_round >= _CLARIFY_MAX_ROUNDS:
             logger.info(f"[SupervisorGraph] clarify 达到最大轮数 {_CLARIFY_MAX_ROUNDS}，结束澄清")
+            think_start = time.monotonic()
+            _emit_clarify_thinking("已达到信息澄清轮数上限，将使用已收集信息继续分析。", "skipped")
+            _emit_clarify_done("skipped")
             return {
                 "clarify_complete": True,
                 "collected_info": _merge_clarify_info(
@@ -233,19 +265,34 @@ def build_supervisor_graph(
                 context=context_text,
             )},
         ]
+        think_start = time.monotonic()
+        _emit_clarify_thinking("正在判断当前信息是否足以支持后续医疗分析。")
         try:
-            response = await lead_agent.llm_client.chat_with_tools(
-                messages=messages,
-                tools=[_QUESTION_TOOL_SCHEMA],
-                tool_choice="auto",
-                temperature=0.3,
-            )
+            if event_callback:
+                response = await lead_agent.llm_client.chat_with_tools_stream(
+                    messages=messages,
+                    tools=[_QUESTION_TOOL_SCHEMA],
+                    tool_choice="auto",
+                    temperature=0.3,
+                    on_reasoning_token=lambda token: _emit_clarify_thinking(token),
+                )
+            else:
+                response = await lead_agent.llm_client.chat_with_tools(
+                    messages=messages,
+                    tools=[_QUESTION_TOOL_SCHEMA],
+                    tool_choice="auto",
+                    temperature=0.3,
+                )
         except Exception as e:
             logger.error(f"LeadAgent clarify LLM error: {e}")
+            _emit_clarify_thinking("信息澄清判断失败，结束澄清并继续后续分析。", "failed")
+            _emit_clarify_done("failed")
             return {"clarify_complete": True, "collected_info": ""}
 
         if not response.has_tool_calls():
             logger.info("[SupervisorGraph] clarify: 无需额外信息，结束澄清")
+            _emit_clarify_thinking("当前信息已足够，无需继续追问。", "completed")
+            _emit_clarify_done()
             return {
                 "clarify_complete": True,
                 "collected_info": _merge_clarify_info(
@@ -256,6 +303,8 @@ def build_supervisor_graph(
         tool_call = response.tool_calls[0]
         if tool_call.name != "question_for_user":
             logger.warning(f"LeadAgent clarify: 未预期的工具调用 {tool_call.name}")
+            _emit_clarify_thinking("模型返回了非预期工具，已结束澄清。", "failed")
+            _emit_clarify_done("failed")
             return {
                 "clarify_complete": True,
                 "collected_info": _merge_clarify_info(
@@ -268,6 +317,8 @@ def build_supervisor_graph(
             questions = parse_questionnaire(questionnaire_xml)
         except Exception as e:
             logger.error(f"LeadAgent clarify: 问卷解析失败: {e}")
+            _emit_clarify_thinking("问卷内容解析失败，已结束澄清。", "failed")
+            _emit_clarify_done("failed")
             return {
                 "clarify_complete": True,
                 "collected_info": _merge_clarify_info(
@@ -286,6 +337,23 @@ def build_supervisor_graph(
         # 发射 AGENT_QUESTIONNAIRE 事件（结构与前端依赖一致）
         if event_callback:
             event_callback(Event(
+                type=EventType.AGENT_TOOL_STEP,
+                source_agent=lead_agent.agent_id,
+                data={
+                    "tool_name": "question_for_user",
+                    "arguments": {
+                        "round": iteration,
+                        "question_count": len(questions),
+                        "question_titles": [question.header for question in questions],
+                    },
+                    "result": "等待用户回答",
+                    "success": True,
+                    "iteration": iteration,
+                    "phase": "clarify",
+                    "status": "waiting",
+                },
+            ))
+            event_callback(Event(
                 type=EventType.AGENT_QUESTIONNAIRE,
                 source_agent=lead_agent.agent_id,
                 data={
@@ -293,6 +361,8 @@ def build_supervisor_graph(
                     "questionnaire_data": questionnaire_data,
                 },
             ))
+        _emit_clarify_thinking(f"需要补充 {len(questions)} 项信息，已发起问卷。", "waiting")
+        _emit_clarify_done("waiting")
 
         # 存 payload 到 state，由 clarify_ask 节点 interrupt 挂起
         return {
@@ -328,6 +398,21 @@ def build_supervisor_graph(
         readable = format_answers_for_llm(questions_ref, answers) or "（空回答）"
         logger.info(f"[SupervisorGraph] 收到第 {round_no} 轮问卷回答: {readable}")
 
+        if event_callback:
+            event_callback(Event(
+                type=EventType.AGENT_TOOL_STEP,
+                source_agent=lead_agent.agent_id,
+                data={
+                    "tool_name": "question_for_user",
+                    "arguments": {"round": round_no},
+                    "result": readable,
+                    "success": True,
+                    "iteration": round_no,
+                    "phase": "clarify",
+                    "status": "completed",
+                },
+            ))
+
         # 累积答案：本轮 answers 合并进 clarify_answers；记录到 clarify_rounds
         merged = dict(state.get("clarify_answers", {}))
         merged.update(answers)
@@ -352,14 +437,21 @@ def build_supervisor_graph(
                 event_callback(Event(
                     type=EventType.AGENT_THINKING,
                     source_agent="lead_agent",
-                    data={"content": content, "iteration": iteration},
+                    data={
+                        "content": content,
+                        "iteration": iteration,
+                        "phase": "decompose",
+                        "title": "任务分解",
+                        "status": "running",
+                    },
                 ))
 
             def _on_think_done(iteration, elapsed_seconds):
                 event_callback(Event(
                     type=EventType.AGENT_THINKING_DONE,
                     source_agent="lead_agent",
-                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds},
+                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds,
+                          "phase": "decompose", "status": "completed"},
                 ))
 
             lead_agent.set_on_thinking(_on_think)
@@ -708,13 +800,24 @@ def build_supervisor_graph(
                 event_callback(Event(
                     type=EventType.AGENT_THINKING,
                     source_agent="lead_agent",
-                    data={"content": content, "iteration": iteration},
+                    data={
+                        "content": content,
+                        "iteration": iteration,
+                        "phase": "synthesize",
+                        "title": "结果汇总",
+                        "status": "running",
+                    },
                 ))
             def _on_think_done_synth(iteration, elapsed_seconds):
                 event_callback(Event(
                     type=EventType.AGENT_THINKING_DONE,
                     source_agent="lead_agent",
-                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds},
+                    data={
+                        "iteration": iteration,
+                        "elapsed_seconds": elapsed_seconds,
+                        "phase": "synthesize",
+                        "status": "completed",
+                    },
                 ))
             lead_agent.set_on_thinking(_on_think_synth)
             lead_agent.set_on_thinking_done(_on_think_done_synth)

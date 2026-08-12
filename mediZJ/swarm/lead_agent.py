@@ -209,10 +209,22 @@ class LeadAgent:
         ]
 
         try:
-            content = await self.llm_client.chat(
-                messages,
-                response_format={'type': 'json_object'}
-            )
+            if self.on_thinking:
+                response = await self.llm_client.chat_with_tools_stream(
+                    messages=messages,
+                    tools=None,
+                    response_format={"type": "json_object"},
+                    on_reasoning_token=lambda token: self.on_thinking(
+                        content=token,
+                        iteration=iteration,
+                    ),
+                )
+                content = response.content or ""
+            else:
+                content = await self.llm_client.chat(
+                    messages,
+                    response_format={"type": "json_object"},
+                )
 
             logger.debug(f"LeadAgent assessment: {content[:200]}...")
 
@@ -422,6 +434,14 @@ class LeadAgent:
                     messages=messages,
                     tools=None,
                     on_content_token=_on_content_token,
+                    on_reasoning_token=(
+                        lambda token: self.on_thinking(
+                            content=token,
+                            iteration=iteration,
+                        )
+                        if self.on_thinking
+                        else None
+                    ),
                 )
                 response_text = response.content or ""
             else:

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, onUnmounted } from 'vue'
-import type { ToolStep } from '../../types'
+import type { ReasoningStatus, ToolStep } from '../../types'
 
 const props = defineProps<{
   thinking: string
@@ -10,6 +10,7 @@ const props = defineProps<{
   elapsedSeconds?: number
   isCollapsed: boolean
   label?: string
+  status?: ReasoningStatus
 }>()
 
 // 标题显示文本：优先用 label，否则走默认 "迭代N"
@@ -17,6 +18,22 @@ const displayLabel = computed(() => {
   if (props.label) return props.label
   return `迭代${props.iteration}`
 })
+
+const statusLabel = computed(() => {
+  const labels: Record<ReasoningStatus, string> = {
+    running: '进行中',
+    waiting: '等待回答',
+    completed: '已完成',
+    skipped: '已跳过',
+    failed: '失败',
+  }
+  return props.status ? labels[props.status] : ''
+})
+
+// 新版事件以 status 判断是否仍在执行；旧版事件继续兼容 isCollapsed。
+const isProcessing = computed(() =>
+  props.status ? props.status === 'running' : !props.isCollapsed,
+)
 
 const isExpanded = ref(!props.isCollapsed)
 
@@ -57,14 +74,14 @@ function stopTimer() {
   }
 }
 
-// 迭代未完成时启动计时，完成后停止
+// 执行中启动计时，完成、等待、跳过或失败时停止。
 watch(
-  () => props.isCollapsed,
-  (val) => {
-    if (val) {
-      stopTimer()
-    } else {
+  isProcessing,
+  (processing) => {
+    if (processing) {
       startTimer()
+    } else {
+      stopTimer()
     }
   },
   { immediate: true },
@@ -99,9 +116,22 @@ const displayElapsed = computed(() => {
       </svg>
 
       <span class="text-slate-500">{{ displayLabel }}</span>
+      <span
+        v-if="statusLabel"
+        class="rounded px-1.5 py-0.5 text-[10px]"
+        :class="{
+          'bg-blue-50 text-blue-600': status === 'running',
+          'bg-amber-50 text-amber-600': status === 'waiting',
+          'bg-green-50 text-green-600': status === 'completed',
+          'bg-slate-100 text-slate-500': status === 'skipped',
+          'bg-red-50 text-red-600': status === 'failed',
+        }"
+      >
+        {{ statusLabel }}
+      </span>
 
       <!-- 推理中：跳动点动画 -->
-      <span v-if="!isCollapsed" class="ml-auto flex gap-0.5">
+      <span v-if="isProcessing" class="ml-auto flex gap-0.5">
         <span
           class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
           style="animation-delay: 0ms"
@@ -147,7 +177,8 @@ const displayElapsed = computed(() => {
               />
             </svg>
             <span class="font-medium text-slate-600">{{ step.toolName }}</span>
-            <span v-if="step.success" class="text-green-500 ml-auto">&#x2713;</span>
+            <span v-if="step.status === 'waiting'" class="text-amber-500 ml-auto">等待回答</span>
+            <span v-else-if="step.success" class="text-green-500 ml-auto">&#x2713;</span>
             <span v-else class="text-red-500 ml-auto">&#x2717;</span>
           </button>
           <div

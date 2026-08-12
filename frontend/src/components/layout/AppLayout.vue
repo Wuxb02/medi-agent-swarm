@@ -4,11 +4,11 @@ import AppHeader from './AppHeader.vue'
 </script>
 
 <template>
-  <div class="flex h-screen overflow-hidden">
+  <div class="flex h-full min-h-0 overflow-hidden">
     <AppSidebar />
-    <div class="flex-1 flex flex-col overflow-hidden">
+    <div class="flex-1 min-h-0 flex flex-col overflow-hidden">
       <AppHeader />
-      <main class="flex-1 overflow-hidden">
+      <main class="flex-1 min-h-0 overflow-hidden">
         <router-view />
       </main>
     </div>

@@ -7,7 +7,6 @@
 - 工具权限收口：question_for_user 仅 LeadAgent 可见，Worker 不可见
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -85,8 +84,10 @@ def _make_coordinator(questionnaire_manager, lead_llm_response):
     llm_client = MagicMock()
     if isinstance(lead_llm_response, list):
         llm_client.chat_with_tools = AsyncMock(side_effect=lead_llm_response)
+        llm_client.chat_with_tools_stream = AsyncMock(side_effect=lead_llm_response)
     else:
         llm_client.chat_with_tools = AsyncMock(return_value=lead_llm_response)
+        llm_client.chat_with_tools_stream = AsyncMock(return_value=lead_llm_response)
     coordinator.lead_agent = type("LA", (), {
         "agent_id": "lead_agent",
         "llm_client": llm_client,
@@ -185,6 +186,64 @@ class TestClarifyInterrupt:
 
         clear_answer_queue("s-clarify")
         release_runtime("s-clarify")
+
+    @pytest.mark.asyncio
+    async def test_clarify_emits_lead_reasoning_and_questionnaire_tool_steps(self):
+        """流式澄清应输出 LeadAgent 思考、问卷等待与已回答状态。"""
+        from langgraph.types import Command
+
+        from mediZJ.api.services.session_runtime import (
+            clear_answer_queue,
+            release_runtime,
+        )
+        from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
+
+        events = []
+        coordinator = _make_coordinator(
+            MagicMock(),
+            [_questionnaire_response(), _no_clarify_response()],
+        )
+        registry = MagicMock()
+        registry.get_visible_tools = MagicMock(return_value=[])
+        graph = build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            event_callback=events.append,
+            hitl_enabled=True,
+        )
+        config = {"configurable": {"thread_id": "s-clarify-events"}}
+
+        first = await graph.ainvoke(
+            {"question": "头痛还恶心，怎么回事", "session_id": "s-clarify-events"},
+            config,
+        )
+        assert "__interrupt__" in first
+        await graph.ainvoke(Command(resume={"q0": "35"}), config)
+
+        clarify_thinking = [
+            event for event in events
+            if event.type.value == "agent_thinking"
+            and event.data.get("phase") == "clarify"
+        ]
+        questionnaire_steps = [
+            event for event in events
+            if event.type.value == "agent_tool_step"
+            and event.data.get("tool_name") == "question_for_user"
+        ]
+
+        assert clarify_thinking
+        assert {step.data["status"] for step in questionnaire_steps} == {
+            "waiting",
+            "completed",
+        }
+        completed_step = next(
+            step for step in questionnaire_steps
+            if step.data["status"] == "completed"
+        )
+        assert "年龄: 35" in completed_step.data["result"]
+
+        clear_answer_queue("s-clarify-events")
+        release_runtime("s-clarify-events")
 
     @pytest.mark.asyncio
     async def test_clarify_multi_round_follow_up(self):

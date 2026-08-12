@@ -25,6 +25,14 @@ from mediZJ.lgraph.tool_executor import make_tool_execution_node
 from mediZJ.core.llm_client import LLMResponse
 from mediZJ.core.prompt_loader import PromptLoader
 
+
+_CHINESE_REASONING_REMINDER = (
+    "## 本轮语言约束\n"
+    "你必须使用中文进行本轮的内部分析、reasoning content、工具选择和最终回答。"
+    "即使上一条 Skill 指令或工具结果使用英文，也不得改用英文思考。"
+    "仅工具名、Skill 名、药品名和必要的专有名词可保留原文。"
+)
+
 # 约束验证和自动修复
 try:
     from mediZJ.constraints import ConstraintValidator
@@ -167,6 +175,10 @@ def build_agent_subgraph(
 
         # 将 LangChain 消息对象转换为 OpenAI API 格式（add_messages reducer 会将 dict 转为 BaseMessage）
         messages = convert_to_openai_messages(messages)
+
+        # Skill 激活后的英文 instructions 会出现在消息尾部，可能覆盖初始
+        # system prompt 中的中文约束。每轮调用前在最后再注入一次，不写入状态历史。
+        messages.append({"role": "system", "content": _CHINESE_REASONING_REMINDER})
 
         # 流式或非流式 LLM 调用
         use_streaming = bool(on_thinking or on_content_token)

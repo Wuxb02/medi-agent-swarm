@@ -11,6 +11,7 @@ import type {
   AgentThinkingDoneData,
   AgentContentDeltaData,
   AgentQuestionnaireData,
+  IntentClassifiedData,
   DoneData,
   ErrorData,
 } from '../types'
@@ -28,6 +29,7 @@ export interface StreamCallbacks {
   onAgentContentDelta?: (data: AgentContentDeltaData) => void
   onAgentQuestionnaire?: (data: AgentQuestionnaireData) => void
   onAgentQuestionnaireCancelled?: (data: Record<string, unknown>) => void
+  onIntentClassified?: (data: IntentClassifiedData) => void
   onTraceSpan?: (data: Record<string, unknown>) => void
   onSuggestions?: (data: { suggestions: string[] }) => void
   onDone?: (data: DoneData) => void
@@ -110,6 +112,9 @@ export function useSSE() {
                 break
               case 'agent_questionnaire_cancelled':
                 callbacks.onAgentQuestionnaireCancelled?.(data)
+                break
+              case 'intent_classified':
+                callbacks.onIntentClassified?.(data)
                 break
               case 'trace_span':
                 callbacks.onTraceSpan?.(data)

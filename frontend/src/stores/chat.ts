@@ -67,6 +67,12 @@ export const useChatStore = defineStore('chat', () => {
           onStart(data) {
             sessionId.value = data.session_id
           },
+          onIntentClassified(data) {
+            aggregator.consume('intent_classified', data as Record<string, unknown>)
+            const snapshot = aggregator.getSnapshot()
+            const msg = messages.value.find((m) => m.id === assistantMsg.id)
+            if (msg) msg.thinkingBlocks = [...snapshot.thinkingBlocks]
+          },
           onTaskDecomposed(data) {
             aggregator.consume('task_decomposed', data as Record<string, unknown>)
             const snapshot = aggregator.getSnapshot()

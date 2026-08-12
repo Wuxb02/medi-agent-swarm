@@ -437,7 +437,9 @@ async def _chat_stream_impl(
     import time as _time
     THINK_FLUSH_INTERVAL = 0.08      # 80ms 批量间隔
     THINK_FLUSH_MIN_CHARS = 20       # 累积至少 20 字符再发送（避免首字符延迟感）
-    _think_buf: Dict[str, Dict[str, Any]] = {}  # key="agent_id:iteration" → {content, agent, iteration, ts}
+    # phase 必须纳入 key 并原样保留，否则 LeadAgent 第 2 轮澄清会被
+    # 前端的旧版 iteration=2 兼容逻辑误判为“结果汇总”。
+    _think_buf: Dict[str, Dict[str, Any]] = {}
     _last_think_flush = _time.monotonic()
 
     def _flush_think_buffer(force: bool = False):
@@ -455,7 +457,11 @@ async def _chat_stream_impl(
             # 合并为一个批量 thinking 事件
             batch_dict = {
                 "source_agent": entry["agent"],
-                "data": {"content": text, "iteration": entry["iteration"]},
+                "data": {
+                    "content": text,
+                    "iteration": entry["iteration"],
+                    **entry["metadata"],
+                },
                 "timestamp": datetime.now().isoformat(),
             }
             # 使用闭包捕获当前值（非局部变量引用在 generator 中安全）
@@ -486,10 +492,21 @@ async def _chat_stream_impl(
             d = event.data
             agent = event.source_agent
             iteration = d.get("iteration", 0)
-            key = f"{agent}:{iteration}"
+            phase = d.get("phase", "")
+            key = f"{agent}:{phase}:{iteration}"
             if key not in _think_buf:
-                _think_buf[key] = {"content": "", "agent": agent, "iteration": iteration}
+                _think_buf[key] = {
+                    "content": "",
+                    "agent": agent,
+                    "iteration": iteration,
+                    "metadata": {},
+                }
             _think_buf[key]["content"] += d.get("content", "")
+            _think_buf[key]["metadata"].update({
+                field: d[field]
+                for field in ("phase", "title", "status")
+                if field in d
+            })
             # 达到阈值或 thinking_done 后强制刷新
             total_chars = len(_think_buf[key]["content"])
             if total_chars >= THINK_FLUSH_MIN_CHARS or _time.monotonic() - _last_think_flush >= THINK_FLUSH_INTERVAL:
@@ -749,51 +766,58 @@ async def _chat_stream_impl(
 
 
 def _merge_thinking_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """将流式 agent_thinking token 事件按 (source_agent, iteration) 合并为完整文本"""
+    """合并流式 thinking token，同时保留实时事件的完整结构。"""
     merged: List[Dict[str, Any]] = []
     buf_agent: Optional[str] = None
     buf_iteration: Optional[int] = None
+    buf_phase: Optional[str] = None
     buf_parts: List[str] = []
-    buf_first_ts: Optional[str] = None
+    buf_envelope: Optional[Dict[str, Any]] = None
+    buf_payload: Optional[Dict[str, Any]] = None
 
     def _flush():
         """将缓冲区中的 token 拼接为一条完整事件"""
-        if not buf_parts:
+        if not buf_parts or buf_envelope is None or buf_payload is None:
             return
+        envelope = dict(buf_envelope)
+        payload = dict(buf_payload)
+        payload["content"] = "".join(buf_parts)
+        envelope["data"] = payload
         merged.append({
             "event": "agent_thinking",
-            "data": {
-                "source_agent": buf_agent,
-                "content": "".join(buf_parts),
-                "iteration": buf_iteration,
-                "timestamp": buf_first_ts,
-            }
+            "data": envelope,
         })
 
     for ev in events:
         if ev.get("event") != "agent_thinking":
             _flush()
             buf_parts.clear()
-            buf_agent = buf_iteration = buf_first_ts = None
+            buf_agent = buf_iteration = buf_phase = None
+            buf_envelope = buf_payload = None
             merged.append(ev)
             continue
 
         data = ev.get("data", {})
         agent = data.get("source_agent")
-        iteration = data.get("data", {}).get("iteration") if "data" in data else data.get("iteration")
+        payload = data.get("data", data)
+        iteration = payload.get("iteration")
+        phase = payload.get("phase")
 
-        if agent == buf_agent and iteration == buf_iteration:
+        if agent == buf_agent and iteration == buf_iteration and phase == buf_phase:
             # 同一轮 thinking，追加 token
-            content = data.get("data", {}).get("content") if "data" in data else data.get("content", "")
-            buf_parts.append(content)
+            buf_parts.append(payload.get("content", ""))
+            buf_payload.update({
+                key: value for key, value in payload.items() if key != "content"
+            })
         else:
             # 新的一轮 thinking，先 flush 旧的
             _flush()
             buf_agent = agent
             buf_iteration = iteration
-            content = data.get("data", {}).get("content") if "data" in data else data.get("content", "")
-            buf_parts = [content]
-            buf_first_ts = data.get("timestamp") or (data.get("data", {}).get("timestamp") if "data" in data else None)
+            buf_phase = phase
+            buf_parts = [payload.get("content", "")]
+            buf_envelope = dict(data)
+            buf_payload = dict(payload)
 
     _flush()
     return merged

@@ -44,9 +44,9 @@ watch(
 </script>
 
 <template>
-  <div class="flex flex-col h-full">
+  <div class="flex flex-col h-full min-h-0 overflow-hidden">
     <!-- 消息列表 -->
-    <div ref="messagesContainer" class="flex-1 overflow-y-auto">
+    <div ref="messagesContainer" class="flex-1 min-h-0 overflow-y-auto overscroll-contain">
       <!-- 空状态 -->
       <div
         v-if="chatStore.messages.length === 0"
@@ -96,6 +96,6 @@ watch(
     </div>
 
     <!-- 输入框 -->
-    <ChatInput :disabled="chatStore.isStreaming" @send="handleSend" />
+    <ChatInput class="shrink-0" :disabled="chatStore.isStreaming" @send="handleSend" />
   </div>
 </template>

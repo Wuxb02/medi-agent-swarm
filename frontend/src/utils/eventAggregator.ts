@@ -2,7 +2,13 @@
  * 统一的事件聚合器：将原始 SSE 事件转换为 UI 状态（AgentEvent / ThinkingBlock / TaskDelegation）。
  * 同时用于实时流式处理和历史回放重建，消除 chat.ts 中两套重复逻辑。
  */
-import type { AgentEvent, ThinkingBlock, TaskDelegation } from '../types'
+import type {
+  AgentEvent,
+  ReasoningPhase,
+  ReasoningStatus,
+  ThinkingBlock,
+  TaskDelegation,
+} from '../types'
 import { formatToolResult } from './formatToolResult'
 
 let idCounter = 0
@@ -34,6 +40,26 @@ export function createEventAggregator(isRealtime = false): {
 
   function consume(eventType: string, data: Record<string, unknown>) {
     switch (eventType) {
+      case 'intent_classified': {
+        const d = (data.data as Record<string, unknown>) || data
+        const intent = d.intent === 'others' ? '非医疗对话' : '医疗咨询'
+        const confidence = Number(d.confidence || 0)
+        const route = d.intent === 'others' ? '进入直接回答' : '进入信息澄清与医疗分析'
+        const reason = (d.reason as string) || '未提供额外理由'
+        thinkingBlocks.push({
+          id: (data.id as string) || genId(),
+          agentId: 'lead_agent',
+          thinking: `识别结果：${intent}\n置信度：${(confidence * 100).toFixed(0)}%\n判断理由：${reason}\n后续路由：${route}`,
+          iteration: 0,
+          phase: 'intent',
+          title: '意图识别',
+          status: 'completed',
+          toolSteps: [],
+          isCollapsed: !isRealtime,
+        })
+        break
+      }
+
       case 'task_decomposed': {
         const inner = (data.data as Record<string, unknown>) || data
         agentEvents.push({
@@ -87,24 +113,33 @@ export function createEventAggregator(isRealtime = false): {
         if (SKIP_AGENTS.has(agentId)) break
 
         const iteration = (d.iteration as number) || 0
+        const phase = d.phase as ReasoningPhase | undefined
         agentsWithThinking.add(agentId)
         thinkingAgents.add(agentId)
 
         // 同 agent + 同 iteration 追加到已有 block
         const condition = isRealtime
           ? (b: ThinkingBlock) =>
-              b.agentId === agentId && b.iteration === iteration && !b.isCollapsed
-          : (b: ThinkingBlock) => b.agentId === agentId && b.iteration === iteration
+              b.agentId === agentId &&
+              b.iteration === iteration &&
+              !b.isCollapsed &&
+              b.phase === phase
+          : (b: ThinkingBlock) =>
+              b.agentId === agentId && b.iteration === iteration && b.phase === phase
 
         const existing = thinkingBlocks.findLast(condition)
         if (existing) {
           existing.thinking += (d.content as string) || ''
+          existing.status = (d.status as ReasoningStatus) || existing.status
         } else {
           thinkingBlocks.push({
             id: genId(),
             agentId,
             thinking: (d.content as string) || '',
             iteration,
+            phase,
+            title: d.title as string | undefined,
+            status: (d.status as ReasoningStatus) || 'running',
             toolSteps: [],
             isCollapsed: !isRealtime, // 实时流：展开；历史回放：折叠
           })
@@ -115,23 +150,43 @@ export function createEventAggregator(isRealtime = false): {
       case 'agent_tool_step': {
         const d = (data.data as Record<string, unknown>) || data
         const iteration = (d.iteration as number) || 0
+        const phase = d.phase as ReasoningPhase | undefined
         const agentId = (data.source_agent as string) || 'unknown'
         if (SKIP_AGENTS.has(agentId)) break
         thinkingAgents.add(agentId)
 
         // 两级兜底查找
         const block =
-          thinkingBlocks.findLast((b) => b.iteration === iteration && b.agentId === agentId) ||
+          thinkingBlocks.findLast(
+            (b) => b.iteration === iteration && b.agentId === agentId && b.phase === phase,
+          ) ||
           thinkingBlocks.findLast((b) => b.agentId === agentId) ||
           thinkingBlocks[thinkingBlocks.length - 1]
 
         if (block) {
-          block.toolSteps.push({
-            toolName: (d.tool_name as string) || 'unknown',
-            arguments: (d.arguments as Record<string, unknown>) || {},
+          const toolName = (d.tool_name as string) || 'unknown'
+          const toolArguments = (d.arguments as Record<string, unknown>) || {}
+          const existingStep = block.toolSteps.findLast(
+            (step) =>
+              step.toolName === toolName &&
+              step.status === 'waiting' &&
+              step.arguments.round === toolArguments.round,
+          )
+          const nextStep = {
+            toolName,
+            arguments: toolArguments,
             result: formatToolResult(d.result),
             success: d.success !== false,
-          })
+            status: d.status as ReasoningStatus | undefined,
+          }
+          if (existingStep) {
+            Object.assign(existingStep, nextStep, {
+              arguments: { ...existingStep.arguments, ...toolArguments },
+            })
+          } else {
+            block.toolSteps.push(nextStep)
+          }
+          if (d.status) block.status = d.status as ReasoningStatus
         }
         break
       }
@@ -139,17 +194,21 @@ export function createEventAggregator(isRealtime = false): {
       case 'agent_thinking_done': {
         const d = (data.data as Record<string, unknown>) || data
         const iteration = (d.iteration as number) || 0
+        const phase = d.phase as ReasoningPhase | undefined
         const agentId = (data.source_agent as string) || 'unknown'
         if (SKIP_AGENTS.has(agentId)) break
 
         // 两级兜底查找
         const block =
-          thinkingBlocks.findLast((b) => b.iteration === iteration && b.agentId === agentId) ||
+          thinkingBlocks.findLast(
+            (b) => b.iteration === iteration && b.agentId === agentId && b.phase === phase,
+          ) ||
           thinkingBlocks.findLast((b) => b.agentId === agentId) ||
           thinkingBlocks[thinkingBlocks.length - 1]
 
         if (block) {
           block.elapsedSeconds = d.elapsed_seconds as number | undefined
+          block.status = (d.status as ReasoningStatus) || 'completed'
           block.isCollapsed = true
         }
         break

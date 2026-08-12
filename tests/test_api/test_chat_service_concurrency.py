@@ -9,6 +9,53 @@ from mediZJ.api.models.chat import ChatRequest
 from mediZJ.swarm.events import Event, EventType
 
 
+def test_merge_thinking_events_preserves_phase_and_envelope():
+    """历史持久化合并后应与实时 SSE 保持相同的事件结构。"""
+    events = [
+        {
+            "event": "agent_thinking",
+            "data": {
+                "source_agent": "lead_agent",
+                "timestamp": "2026-08-13T01:00:00",
+                "data": {
+                    "content": "正在综合",
+                    "iteration": 2,
+                    "phase": "synthesize",
+                    "title": "结果汇总",
+                    "status": "running",
+                },
+            },
+        },
+        {
+            "event": "agent_thinking",
+            "data": {
+                "source_agent": "lead_agent",
+                "timestamp": "2026-08-13T01:00:01",
+                "data": {
+                    "content": " Worker 结果",
+                    "iteration": 2,
+                    "phase": "synthesize",
+                    "title": "结果汇总",
+                    "status": "completed",
+                },
+            },
+        },
+    ]
+
+    merged = cs._merge_thinking_events(events)
+
+    assert len(merged) == 1
+    assert merged[0]["data"]["source_agent"] == "lead_agent"
+    assert merged[0]["data"]["timestamp"] == "2026-08-13T01:00:00"
+    assert merged[0]["data"]["data"] == {
+        "content": "正在综合 Worker 结果",
+        "iteration": 2,
+        "phase": "synthesize",
+        "title": "结果汇总",
+        "status": "completed",
+    }
+
+
 class _ConcurrencyTracker:
     """记录 process() 的最大并发进入数"""
 

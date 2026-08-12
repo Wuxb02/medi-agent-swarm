@@ -122,25 +122,22 @@ const leadBlocks = computed(() =>
   (props.message.thinkingBlocks || []).filter((b) => b.agentId === 'lead_agent'),
 )
 
-const leadDecomposeBlocks = computed(() => leadBlocks.value.filter((b) => b.iteration === 1))
+const leadIntentBlocks = computed(() => leadBlocks.value.filter((b) => b.phase === 'intent'))
 
-const leadSynthesizeBlocks = computed(() => leadBlocks.value.filter((b) => b.iteration === 2))
+const leadClarifyBlocks = computed(() => leadBlocks.value.filter((b) => b.phase === 'clarify'))
+
+const leadDecomposeBlocks = computed(() =>
+  leadBlocks.value.filter((b) => b.phase === 'decompose' || (!b.phase && b.iteration === 1)),
+)
+
+const leadSynthesizeBlocks = computed(() =>
+  leadBlocks.value.filter((b) => b.phase === 'synthesize' || (!b.phase && b.iteration === 2)),
+)
 
 const workerBlocks = computed(() =>
   (props.message.thinkingBlocks || []).filter(
     (b) => b.agentId !== 'lead_agent' && b.agentId !== 'swarm_coordinator',
   ),
-)
-
-// 完整 Swarm 周期：分解 + 合成（≥2 子任务时的多 Agent 协作）
-const hasFullSwarmCycle = computed(() => leadSynthesizeBlocks.value.length > 0)
-
-// 单 Agent 模式有分解但无合成，仍需嵌套展示（LeadAgent 分解 + Worker 执行）
-const hasLeadDecomposeWithWorker = computed(
-  () =>
-    leadDecomposeBlocks.value.length > 0 &&
-    workerGroups.value.length > 0 &&
-    !hasFullSwarmCycle.value,
 )
 
 // WorkerAgent 分组（按 agentId）
@@ -260,7 +257,7 @@ watch(
 
             <!-- Thinking 内容块 -->
             <!-- Swarm/单Agent 嵌套布局：LeadAgent 作为外层容器，WorkerAgent 内嵌 -->
-            <div v-if="hasFullSwarmCycle || hasLeadDecomposeWithWorker" class="space-y-2 mt-2">
+            <div v-if="leadBlocks.length > 0" class="space-y-2 mt-2">
               <div class="border border-blue-200 rounded-lg overflow-hidden text-xs bg-blue-50/30">
                 <!-- LeadAgent 标题栏 -->
                 <button
@@ -287,7 +284,7 @@ watch(
                     "
                   />
                   <span class="font-medium text-blue-700">任务协调</span>
-                  <span class="text-blue-500">({{ leadBlocks.length }} 次迭代)</span>
+                  <span class="text-blue-500">({{ leadBlocks.length }} 个阶段)</span>
                   <span v-if="leadBlocks.some((b) => !b.isCollapsed)" class="ml-auto flex gap-0.5">
                     <span
                       class="w-1 h-1 bg-blue-400 rounded-full animate-bounce"
@@ -305,8 +302,52 @@ watch(
                 </button>
 
                 <!-- LeadAgent 自身思考 + 委派信息 + WorkerAgent 思考 -->
-                <div v-if="!leadCollapsed" class="p-2 space-y-3">
-                  <!-- 1. 分解任务 (iteration=1) -->
+                <div v-if="!leadCollapsed" class="p-2 space-y-1.5">
+                  <!-- 1. 意图识别 -->
+                  <div v-if="leadIntentBlocks.length > 0" class="space-y-1.5">
+                    <ThinkingBlockItem
+                      v-for="block in leadIntentBlocks"
+                      :key="block.id"
+                      :thinking="block.thinking"
+                      :agent-id="block.agentId"
+                      :iteration="block.iteration"
+                      :tool-steps="block.toolSteps"
+                      :elapsed-seconds="block.elapsedSeconds"
+                      :is-collapsed="block.isCollapsed"
+                      :status="block.status"
+                      :label="block.title || '意图识别'"
+                    />
+                  </div>
+
+                  <!-- 2. 信息澄清 -->
+                  <div v-if="leadClarifyBlocks.length > 0" class="space-y-1.5">
+                    <ThinkingBlockItem
+                      v-for="block in leadClarifyBlocks"
+                      :key="block.id"
+                      :thinking="block.thinking"
+                      :agent-id="block.agentId"
+                      :iteration="block.iteration"
+                      :tool-steps="block.toolSteps"
+                      :elapsed-seconds="block.elapsedSeconds"
+                      :is-collapsed="block.isCollapsed"
+                      :status="block.status"
+                      :label="block.title || `信息澄清（第 ${block.iteration} 轮）`"
+                    />
+                    <QuestionnaireCard
+                      v-if="message.questionnaire"
+                      :questionnaire="message.questionnaire"
+                      :error="message.questionnaireError"
+                      @submit="
+                        (answers) =>
+                          chatStore.submitAnswers(
+                            message.questionnaire?.questionnaire_id || '',
+                            answers,
+                          )
+                      "
+                    />
+                  </div>
+
+                  <!-- 3. 分解任务 -->
                   <div v-if="leadDecomposeBlocks.length > 0" class="space-y-1.5">
                     <ThinkingBlockItem
                       v-for="block in leadDecomposeBlocks"
@@ -317,18 +358,22 @@ watch(
                       :tool-steps="block.toolSteps"
                       :elapsed-seconds="block.elapsedSeconds"
                       :is-collapsed="block.isCollapsed"
-                      label="分解任务"
+                      :status="block.status"
+                      :label="block.title || '分解任务'"
                     />
                   </div>
 
-                  <!-- 2. WorkerAgent 执行过程 -->
-                  <div v-if="workerGroups.length > 0" class="space-y-2">
+                  <!-- 4. WorkerAgent 执行过程 -->
+                  <div
+                    v-if="workerGroups.length > 0"
+                    class="border border-slate-200 rounded overflow-hidden bg-white"
+                  >
                     <button
                       @click="workerSectionCollapsed = !workerSectionCollapsed"
-                      class="flex items-center gap-1.5 text-[11px] text-slate-500 font-medium pl-1 hover:text-slate-700 transition w-full text-left"
+                      class="w-full flex items-center gap-2 px-3 py-1.5 text-slate-500 hover:bg-slate-50 transition text-left"
                     >
                       <svg
-                        class="w-2.5 h-2.5 text-slate-400 transition-transform shrink-0"
+                        class="w-3 h-3 text-slate-400 transition-transform shrink-0"
                         :class="{ 'rotate-90': !workerSectionCollapsed }"
                         fill="currentColor"
                         viewBox="0 0 20 20"
@@ -338,13 +383,26 @@ watch(
                           d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
                         />
                       </svg>
-                      Agent 执行过程
+                      <span>Agent 执行过程</span>
+                      <span
+                        class="rounded px-1.5 py-0.5 text-[10px]"
+                        :class="
+                          workerGroups.some((group) => group.isActive)
+                            ? 'bg-blue-50 text-blue-600'
+                            : 'bg-green-50 text-green-600'
+                        "
+                      >
+                        {{ workerGroups.some((group) => group.isActive) ? '进行中' : '已完成' }}
+                      </span>
                     </button>
-                    <div v-if="!workerSectionCollapsed">
+                    <div
+                      v-if="!workerSectionCollapsed"
+                      class="px-3 py-2 border-t border-slate-100 space-y-1.5"
+                    >
                       <div
                         v-for="wGroup in workerGroups"
                         :key="wGroup.agentId"
-                        class="ml-3 border-l-2 border-blue-100 pl-3"
+                        class="border-l-2 border-blue-100 pl-3"
                       >
                         <!-- Worker 分组标题 -->
                         <button
@@ -400,7 +458,7 @@ watch(
                     </div>
                   </div>
 
-                  <!-- 3. 生成回答 (iteration=2) -->
+                  <!-- 5. 结果汇总 -->
                   <div v-if="leadSynthesizeBlocks.length > 0" class="space-y-1.5">
                     <ThinkingBlockItem
                       v-for="block in leadSynthesizeBlocks"
@@ -411,7 +469,8 @@ watch(
                       :tool-steps="block.toolSteps"
                       :elapsed-seconds="block.elapsedSeconds"
                       :is-collapsed="block.isCollapsed"
-                      label="生成回答"
+                      :status="block.status"
+                      :label="block.title || '结果汇总'"
                     />
                   </div>
                 </div>
@@ -497,7 +556,7 @@ watch(
 
             <!-- 交互式问卷 -->
             <QuestionnaireCard
-              v-if="message.questionnaire"
+              v-if="message.questionnaire && leadClarifyBlocks.length === 0"
               :questionnaire="message.questionnaire"
               :error="message.questionnaireError"
               @submit="

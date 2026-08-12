@@ -18,6 +18,7 @@ export type SSEEventType =
   | 'agent_content_delta'
   | 'agent_questionnaire'
   | 'agent_questionnaire_cancelled'
+  | 'intent_classified'
   | 'trace_span'
   | 'suggestions'
   | 'done'
@@ -126,6 +127,19 @@ export interface AgentQuestionnaireData {
   }
 }
 
+export interface IntentClassifiedData {
+  source_agent?: string
+  id?: string
+  timestamp?: string
+  data?: {
+    intent: 'medical' | 'others'
+    confidence: number
+    source: string
+    reason?: string
+    skip_long_term_retrieval?: boolean
+  }
+}
+
 export interface DoneData {
   answer: string
   assistant_message_id?: string
@@ -230,7 +244,11 @@ export interface ToolStep {
   arguments: Record<string, unknown>
   result: string
   success: boolean
+  status?: ReasoningStatus
 }
+
+export type ReasoningPhase = 'intent' | 'clarify' | 'decompose' | 'synthesize'
+export type ReasoningStatus = 'running' | 'waiting' | 'completed' | 'skipped' | 'failed'
 
 export interface ThinkingBlock {
   id: string
@@ -240,6 +258,9 @@ export interface ThinkingBlock {
   toolSteps: ToolStep[]
   elapsedSeconds?: number
   isCollapsed: boolean
+  phase?: ReasoningPhase
+  title?: string
+  status?: ReasoningStatus
 }
 
 export interface KnowledgeItem {

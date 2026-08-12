@@ -257,10 +257,7 @@ function handleSubmit() {
       </button>
 
       <!-- 提交失败提示 -->
-      <div
-        v-if="error"
-        class="mt-2 text-xs text-red-600 flex items-center gap-1"
-      >
+      <div v-if="error" class="mt-2 text-xs text-red-600 flex items-center gap-1">
         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path
             stroke-linecap="round"
@@ -387,6 +384,7 @@ function handleSubmit() {
 }
 
 .qc-opt {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -409,10 +407,18 @@ function handleSubmit() {
 
 .sr-only {
   position: absolute;
-  width: 1px;
-  height: 1px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  cursor: pointer;
+}
+
+.qc-opt:focus-within {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.12);
 }
 
 .qc-radio {
