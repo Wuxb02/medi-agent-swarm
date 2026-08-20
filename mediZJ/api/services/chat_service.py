@@ -278,15 +278,28 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         timeout=_REQUEST_TIMEOUT,
     )
     result = await _verify_final_result(question, result)
-    # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
-    ltm_task = result.get('_ltm_save_task')
-    if ltm_task and not ltm_task.done():
+    # 仅从已通过医疗安全校验的最终回答提取记忆候选。
+    memory_saver = getattr(coordinator, "_save_memory_candidates", None)
+    if result.get("intent") != "others" and callable(memory_saver):
         try:
-            await asyncio.wait_for(ltm_task, timeout=30.0)
+            await asyncio.wait_for(
+                memory_saver(
+                    session_id,
+                    question,
+                    result.get("answer", ""),
+                    {
+                        "mode": result.get("mode", "langgraph"),
+                        "total_tokens": result.get("usage", {}).get(
+                            "total_tokens", 0
+                        ),
+                    },
+                ),
+                timeout=30.0,
+            )
         except asyncio.TimeoutError:
-            logger.warning(f"LTM save timeout in non-stream for session={session_id}")
+            logger.warning(f"Memory save timeout in non-stream for session={session_id}")
         except Exception as e:
-            logger.error(f"LTM save error in non-stream: {e}")
+            logger.error(f"Memory save error in non-stream: {e}")
 
     # 持久化到 SQLite + Milvus（同步驱动，下线程避免阻塞事件循环）
     persist_session_id = result.get("session_id", session_id)
@@ -735,10 +748,27 @@ async def _chat_stream_impl(
         await _finish_trace()
         return
 
-    # 组装对外 result（含 LTM fire-and-forget，与 coordinator.process() 一致）
+    # 组装对外 result。
     result = coordinator.compose_result(question, result, start_time, session_id, trace_id=trace_id)
     result = await _verify_final_result(question, result)
     await _finish_trace(result)
+
+    memory_task = None
+    memory_saver = getattr(coordinator, "_save_memory_candidates", None)
+    if result.get("intent") != "others" and callable(memory_saver):
+        memory_task = asyncio.create_task(
+            memory_saver(
+                session_id,
+                question,
+                result.get("answer", ""),
+                {
+                    "mode": result.get("mode", "langgraph"),
+                    "total_tokens": result.get("usage", {}).get(
+                        "total_tokens", 0
+                    ),
+                },
+            )
+        )
 
     # 6. 发送建议
     suggestions = result.get("suggestions", [])
@@ -775,16 +805,15 @@ async def _chat_stream_impl(
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
 
-    # 7.5 等待 LTM 保存任务完成（done 已 yield，客户端已收到数据）
-    ltm_task = getattr(coordinator, 'ltm_save_task', None)
-    if ltm_task and not ltm_task.done():
+    # 7.5 等待结构化记忆候选写入（done 已发送）。
+    if memory_task is not None and not memory_task.done():
         try:
-            await asyncio.wait_for(ltm_task, timeout=90.0)
-            logger.info(f"LTM save completed for session={session_id}")
+            await asyncio.wait_for(memory_task, timeout=90.0)
+            logger.info(f"Memory save completed for session={session_id}")
         except asyncio.TimeoutError:
-            logger.warning(f"LTM save timeout in chat_stream for session={session_id}")
+            logger.warning(f"Memory save timeout in chat_stream for session={session_id}")
         except Exception as e:
-            logger.error(f"LTM save error in chat_stream: {e}")
+            logger.error(f"Memory save error in chat_stream: {e}")
 
     # 8. 持久化事件到 JSON 文件（后台不阻塞返回）
     try:

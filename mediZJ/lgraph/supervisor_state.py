@@ -20,6 +20,7 @@ class SupervisorState(TypedDict, total=False):
     session_id: str
     context: Dict[str, Any]
     start_time: str                 # ISO timestamp
+    trace_id: str
 
     # === 消息（用于 Human-in-the-Loop clarify 阶段） ===
     messages: Annotated[List[Dict[str, Any]], add_messages]
@@ -28,13 +29,14 @@ class SupervisorState(TypedDict, total=False):
     recent_history: List[Dict[str, Any]]
     similar_memories: List[Dict[str, Any]]
     personal_profile: str
+    memory_context: Any
     collected_info: str             # clarify 阶段收集的信息
 
     # === 意图识别（检索门控） ===
     intent: str                     # medical | others
     intent_confidence: float        # 0.0 ~ 1.0
     intent_source: str              # "llm" | "fallback"
-    skip_long_term_retrieval: bool  # 是否跳过 Mem0 长期记忆检索
+    skip_long_term_retrieval: bool  # 是否跳过医疗情景记忆检索
     chat_mode: bool                 # others 意图时直接聊天回应，跳过任务分解
 
     # === 任务分解 ===

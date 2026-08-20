@@ -83,9 +83,8 @@ class Worker:
             **(config or {}),
         }
 
-        # 短期记忆 / 用户档案（由 Coordinator 注入）
+        # 短期记忆仅用于追加消息，读取统一由 ContextBuilder 完成。
         self.short_term_memory: Optional[Any] = None
-        self.user_context: Optional[str] = None
 
         # 流式回调（supervisor_graph 注入，agent_subgraph 消费）
         self.on_thinking: Optional[Callable] = None

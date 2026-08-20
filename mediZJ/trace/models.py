@@ -44,6 +44,8 @@ class TraceAttributes:
     question_summary: str = ""  # 前 200 字符
     agents_involved: List[str] = field(default_factory=list)
     total_tokens: int = 0
+    cached_prompt_tokens: Optional[int] = None
+    cache_hit_ratio: Optional[float] = None
     subtasks_created: int = 0
     subtasks_completed: int = 0
     timeout_occurred: bool = False

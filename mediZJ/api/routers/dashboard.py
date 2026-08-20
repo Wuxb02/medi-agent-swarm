@@ -36,8 +36,8 @@ async def health_check():
     except Exception:
         pass
 
-    # 检查 Mem0
-    memory_enabled = bool(os.getenv("MEM0_API_KEY"))
+    # 结构化记忆与会话库为本地核心能力。
+    memory_enabled = True
 
     status = "healthy" if llm_connected else "degraded"
 

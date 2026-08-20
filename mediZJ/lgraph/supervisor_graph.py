@@ -27,6 +27,57 @@ from mediZJ.lgraph.tool_registry import ToolRegistry
 from mediZJ.swarm.events import Event, EventType
 from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.swarm.lead_agent import _QUESTION_TOOL_SCHEMA
+from mediZJ.core.prompt_loader import PromptLoader
+from mediZJ.memory.context_builder import (
+    MedicalMemoryContext,
+)
+from mediZJ.memory.prompt_prefix import PromptPrefixAssembler, stable_hash
+
+
+class _TestContextBuilder:
+    """为未注入生产依赖的轻量测试协调器提供统一接口。"""
+
+    def __init__(self, working_memory) -> None:
+        self.working_memory = working_memory
+
+    async def build(self, **kwargs) -> MedicalMemoryContext:
+        global_prefix = PromptPrefixAssembler.global_prefix(
+            kwargs["base_system_prompt"]
+        )
+        recent = []
+        if kwargs.get("include_history", True):
+            recent = await self.working_memory.get_recent_messages(
+                session_id=kwargs["session_id"], limit=None
+            )
+        return MedicalMemoryContext(
+            global_static_prefix=global_prefix,
+            user_stable_prefix="",
+            recent_messages=recent,
+            global_prefix_hash=stable_hash(global_prefix),
+            profile_prefix_hash=stable_hash(""),
+            session_id=kwargs["session_id"],
+            user_id=kwargs["user_id"],
+            agent_id=kwargs["agent_id"],
+            call_type=kwargs["call_type"],
+            query=kwargs["query"],
+            collected_info=kwargs.get("collected_info", ""),
+            procedural_strategies=kwargs.get("verified_experiences", ""),
+        )
+
+
+def _memory_builder(coordinator) -> Any:
+    """获取统一记忆构建器，并兼容轻量测试协调器。"""
+    builder = getattr(coordinator, "memory_context_builder", None)
+    if builder is None:
+        builder = _TestContextBuilder(coordinator.short_term_memory)
+        coordinator.memory_context_builder = builder
+    return builder
+
+
+def _lead_system_prompt(coordinator, method: str, template: str) -> str:
+    lead_agent = getattr(coordinator, "lead_agent", None)
+    prompt_method = getattr(lead_agent, method, None)
+    return prompt_method() if callable(prompt_method) else PromptLoader.load(template)
 
 # Trace
 try:
@@ -42,42 +93,30 @@ async def retrieve_memories_with_intent_gate(
     session_id: str,
     question: str,
     intent: str = "medical",
+    collected_info: str = "",
+    verified_experiences: str = "",
 ) -> Dict[str, Any]:
-    """检索短期记忆，并按意图门控 Mem0 长期记忆检索。
-
-    意图分类在独立的 intent_classify 节点完成，此处仅消费其结果：
-    仅 medical（澄清后）路径到达本节点，长期记忆始终检索；
-    保留 intent 门控逻辑以兼容外部调用（others 跳过 Mem0）。
-    任何异常降级为空列表，不阻断链路。
-    """
-    # 短期记忆检索（完整历史）
-    recent_task = asyncio.create_task(
-        coordinator.short_term_memory.get_recent_messages(
-            session_id=session_id, limit=None,
-        )
+    """通过统一构建器获取工作、用户和情景记忆。"""
+    base_prompt = _lead_system_prompt(
+        coordinator, "_get_system_prompt", "swarm/lead_system.j2"
     )
-
-    recent_history = await recent_task
-
-    similar_memories: List[Dict[str, Any]] = []
-    if intent == "others":
-        logger.info("[SupervisorGraph] 意图=others，跳过长期记忆检索")
-    else:
-        try:
-            similar_memories = (
-                await coordinator.long_term_memory.search_similar_sessions(
-                    query=question, limit=3,
-                )
-            )
-        except BaseException as exc:
-            logger.warning(f"长期记忆检索失败: {exc}")
-            similar_memories = []
-
-    return {
-        "recent_history": recent_history,
-        "similar_memories": similar_memories,
+    context = await _memory_builder(coordinator).build(
+        session_id=session_id,
+        user_id=getattr(coordinator, "user_id", "default"),
+        query=question,
+        agent_id="lead_agent",
+        call_type="lead_assessment" if intent != "others" else "lead_chat",
+        base_system_prompt=base_prompt,
+        collected_info=collected_info,
+        verified_experiences=verified_experiences,
+    )
+    result = context.for_lead_agent()
+    result.update({
+        "memory_context": context,
+        "similar_memories": context.episodic_memories,
         "skip_long_term_retrieval": intent == "others",
-    }
+    })
+    return result
 
 
 async def classify_intent(coordinator, question: str) -> Dict[str, Any]:
@@ -164,14 +203,19 @@ def build_supervisor_graph(
             session_id=state["session_id"],
             question=state["question"],
             intent=state.get("intent", "medical"),
+            collected_info=state.get("collected_info", ""),
+            verified_experiences=state.get("context", {}).get(
+                "verified_experiences", ""
+            ),
         )
-
-        # 刷新 Worker 档案（含已验证的应答策略）
-        verified = state.get("context", {}).get("verified_experiences", "")
-        coordinator._refresh_worker_profiles(verified)
-
-        personal_text = coordinator.personal_profile.to_text()
-        result["personal_profile"] = personal_text if personal_text != "暂无" else ""
+        memory_context = result.get("memory_context")
+        context_builder = getattr(coordinator, "memory_context_builder", None)
+        context_store = getattr(context_builder, "store", None)
+        if memory_context is not None and context_store is not None:
+            await memory_context.record_usage(
+                context_store,
+                state.get("trace_id", ""),
+            )
 
         logger.info(
             f"[SupervisorGraph] 记忆检索完成: "
@@ -257,14 +301,23 @@ def build_supervisor_graph(
         if collected_text:
             context_text += f"\n\n## 已收集信息\n{collected_text}"
 
-        messages = [
-            {"role": "system", "content": lead_agent._get_clarify_system_prompt()},
-            {"role": "user", "content": _PL.render(
+        clarify_context = await _memory_builder(coordinator).build(
+            session_id=state["session_id"],
+            user_id=getattr(coordinator, "user_id", "default"),
+            query=state["question"],
+            agent_id="lead_agent",
+            call_type="lead_clarify",
+            base_system_prompt=lead_agent._get_clarify_system_prompt(),
+            collected_info=collected_text,
+            include_history=False,
+        )
+        messages = clarify_context.prompt_messages(
+            question=_PL.render(
                 "swarm/lead_clarify_user.j2",
                 question=state["question"],
                 context=context_text,
-            )},
-        ]
+            )
+        )
         think_start = time.monotonic()
         _emit_clarify_thinking("正在判断当前信息是否足以支持后续医疗分析。")
         try:
@@ -465,6 +518,7 @@ def build_supervisor_graph(
             "verified_experiences": state.get("context", {}).get(
                 "verified_experiences", ""
             ),
+            "memory_context": state.get("memory_context"),
         }
 
         _ctx = traced_span(SpanType.STAGE, name="assess_decompose") if TRACE_AVAILABLE else None
@@ -526,6 +580,18 @@ def build_supervisor_graph(
             _ctx.__enter__()
 
         try:
+            worker_memory_context = await _memory_builder(coordinator).build(
+                session_id=state["session_id"],
+                user_id=getattr(coordinator, "user_id", "default"),
+                query=state["question"],
+                agent_id=agent_id,
+                call_type=agent_id,
+                base_system_prompt=worker.get_base_system_prompt_stable(),
+                collected_info=state.get("collected_info", ""),
+                verified_experiences=state.get("context", {}).get(
+                    "verified_experiences", ""
+                ),
+            )
             # 构建并执行 AgentSubGraph
             subgraph = build_agent_subgraph(
                 worker=worker,
@@ -546,6 +612,7 @@ def build_supervisor_graph(
                 "subtask_type": task.get("type", ""),
                 "subtask_description": task.get("description", ""),
                 "question": state["question"],  # 含图片分析文本的完整问题
+                "memory_context": worker_memory_context,
                 "max_iterations": worker.config.get('max_iterations', 10),
                 "max_tool_calls": 2,
             })
@@ -606,19 +673,15 @@ def build_supervisor_graph(
 
     async def _chat_reply_node(state: SupervisorState) -> dict:
         """节点: 闲聊模式——others 意图时 LeadAgent 直接聊天回应，跳过任务分解"""
-        # retrieve_memories 位于 clarify 之后，闲聊分支未执行；此处自检索完整历史
-        recent_history: List[Dict[str, Any]] = []
-        try:
-            recent_history = await coordinator.short_term_memory.get_recent_messages(
-                session_id=state["session_id"], limit=None,
-            )
-        except BaseException as exc:
-            logger.warning(f"闲聊分支短期记忆检索失败: {exc}")
-
-        enhanced_context = {
-            "personal_profile": state.get("personal_profile", ""),
-            "recent_history": recent_history,
-        }
+        memory_context = await _memory_builder(coordinator).build(
+            session_id=state["session_id"],
+            user_id=getattr(coordinator, "user_id", "default"),
+            query=state["question"],
+            agent_id="lead_agent",
+            call_type="lead_chat",
+            base_system_prompt=PromptLoader.load("swarm/chat_reply.j2"),
+        )
+        enhanced_context = memory_context.for_lead_agent()
 
         _ctx = traced_span(SpanType.STAGE, name="chat_reply") if TRACE_AVAILABLE else None
         if _ctx:
@@ -708,6 +771,14 @@ def build_supervisor_graph(
             _ctx.__enter__()
 
         try:
+            worker_memory_context = await _memory_builder(coordinator).build(
+                session_id=state.get("session_id", ""),
+                user_id=getattr(coordinator, "user_id", "default"),
+                query=state["question"],
+                agent_id=agent_id,
+                call_type=agent_id,
+                base_system_prompt=worker.get_base_system_prompt_stable(),
+            )
             subgraph = build_agent_subgraph(
                 worker=worker,
                 tool_registry=tool_registry,
@@ -729,6 +800,7 @@ def build_supervisor_graph(
                     "subtask_type": subtask.get("type", ""),
                     "subtask_description": subtask.get("description", ""),
                     "question": state["question"],  # 含图片分析文本的完整问题
+                    "memory_context": worker_memory_context,
                     "max_iterations": worker.config.get('max_iterations', 10),
                     "max_tool_calls": 2,
                 }),
@@ -819,7 +891,12 @@ def build_supervisor_graph(
 
         # 收集所有贡献的 answer 文本 + 引用统一（匹配原 swarm 的 _unify_swarm_references + _apply_renumber_map）
         completed_agents = []
-        swarm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        swarm_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_prompt_tokens": 0,
+        }
         swarm_msg_count = 0
 
         # Step 1: 收集所有 Worker 的 references，按 doc_id 去重
@@ -835,6 +912,9 @@ def build_supervisor_graph(
                 swarm_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
                 swarm_usage["completion_tokens"] += u.get("completion_tokens", 0)
                 swarm_usage["total_tokens"] += u.get("total_tokens", 0)
+                swarm_usage["cached_prompt_tokens"] += u.get(
+                    "cached_prompt_tokens", 0
+                )
                 swarm_msg_count += contrib["result"].get("message_count", 0)
                 # 收集 references
                 refs = contrib["result"].get("references", [])
@@ -846,7 +926,11 @@ def build_supervisor_graph(
                         agent_refs.append({"old_index": ref.get("index", 0), "doc_id": doc_id})
             if agent_refs:
                 agent_ref_map[agent_id] = agent_refs
-
+        swarm_usage["cache_hit_ratio"] = (
+            swarm_usage["cached_prompt_tokens"] / swarm_usage["prompt_tokens"]
+            if swarm_usage["prompt_tokens"]
+            else None
+        )
         # Step 2: 按原始 index 排序后重新编号
         sorted_refs = sorted(all_refs.values(), key=lambda r: r.get("index", 0))
         swarm_citations = []
@@ -885,12 +969,25 @@ def build_supervisor_graph(
         _apply_renumber_to_contributions(shared_ctx, renumber_map)
 
         timeout_occurred = state.get("timeout_occurred", False)
+        synthesis_context = await _memory_builder(coordinator).build(
+            session_id=session_id,
+            user_id=getattr(coordinator, "user_id", "default"),
+            query=state["question"],
+            agent_id="lead_agent",
+            call_type="lead_synthesis",
+            base_system_prompt="你是医疗多智能体结果综合器。",
+            collected_info=state.get("collected_info", ""),
+            verified_experiences=state.get("context", {}).get(
+                "verified_experiences", ""
+            ),
+        )
         final_answer = await lead_agent.synthesize_results(
             question=state["question"],
             shared_context=shared_ctx,
             timeout_occurred=timeout_occurred,
             # 未校验的综合答案不对外流式发送。
             event_callback=None,
+            memory_context=synthesis_context,
         )
 
         if event_callback:
@@ -942,7 +1039,6 @@ def build_supervisor_graph(
         if state.get("_swarm_finalized"):
             return {}
 
-        session_id = state["session_id"]
         start_time_str = state.get("start_time", "")
         try:
             start_time = datetime.fromisoformat(start_time_str) if start_time_str else datetime.now()
@@ -951,27 +1047,6 @@ def build_supervisor_graph(
 
         end_time = datetime.now()
         total_time = (end_time - start_time).total_seconds()
-
-        # LTM fire-and-forget（闲聊模式跳过：寒暄无记忆价值，且省一次 LLM 评估）
-        final_answer = state.get("final_answer", "")
-        mode = state.get("mode", "single_agent")
-        usage = state.get("usage", {})
-        chat_mode = state.get("chat_mode", False)
-
-        if not chat_mode:
-            asyncio.ensure_future(
-                coordinator._save_long_term_memory(
-                    session_id=session_id,
-                    question=state["question"],
-                    answer=final_answer,
-                    metadata={
-                        "mode": mode,
-                        "subtasks_count": len(state.get("subtasks", [])),
-                        "total_time": total_time,
-                        "total_tokens": usage.get("total_tokens", 0),
-                    },
-                )
-            )
 
         return {
             "total_time": total_time,
@@ -1016,6 +1091,7 @@ def build_supervisor_graph(
                     "sub_session_id": sub_session_id,
                     "session_id": session_id,
                     "question": state["question"],
+                    "memory_context": state.get("memory_context"),
                 }
             ))
 

@@ -25,6 +25,7 @@ class AgentState(TypedDict, total=False):
 
     # === 用户原始问题（含图片 OCR 文本，所有 Agent 共用） ===
     question: str
+    memory_context: Any
 
     # === 对话消息（OpenAI 格式） ===
     # 使用 LangGraph 的 add_messages reducer 自动追加
@@ -44,7 +45,7 @@ class AgentState(TypedDict, total=False):
     # === 结果收集 ===
     final_answer: str               # 最终回答文本
     references: List[Dict]          # 知识库引用列表（doc_id 去重）
-    usage: Dict[str, int]           # token 用量 {prompt_tokens, completion_tokens, total_tokens}
+    usage: Dict[str, Any]           # token、缓存与前缀指纹
     message_count: int              # 消息计数
     iterations: int                 # 实际迭代次数
     completed: bool                 # 是否完成

@@ -25,7 +25,6 @@ def setup_env(request, monkeypatch):
     monkeypatch.setenv("LLM_MAX_TOKENS", "100")
     monkeypatch.setenv("MEDICAL_SEMANTIC_VERIFY_ENABLED", "false")
     monkeypatch.setenv("EVOLUTION_GLOBAL_MIN_SUPPORT", "3")
-    monkeypatch.setenv("MEM0_API_KEY", "test-mem0-key")
     monkeypatch.setenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-zh-v1.5")
 
 
@@ -246,7 +245,9 @@ def reset_trace_context():
 def pytest_configure(config):
     """注册自定义 markers。"""
     config.addinivalue_line("markers", "unit: 纯单元测试，无外部依赖")
-    config.addinivalue_line("markers", "integration: 需要外部服务 (LLM/Mem0/Milvus/网络)")
+    config.addinivalue_line(
+        "markers", "integration: 需要外部服务 (LLM/Milvus/Redis/网络)"
+    )
     config.addinivalue_line("markers", "slow: 慢速测试 (真实 LLM 调用)")
 
 

@@ -133,15 +133,20 @@ class LeadAgent:
                 context_text = "\n\n".join(parts)
 
         try:
-            messages = [
-                {"role": "system", "content": PromptLoader.load("swarm/chat_reply.j2")},
-                *history_messages,
-                {"role": "user", "content": PromptLoader.render(
-                    "swarm/chat_reply_user.j2",
-                    question=question,
-                    context=context_text,
-                )},
-            ]
+            user_prompt = PromptLoader.render(
+                "swarm/chat_reply_user.j2",
+                question=question,
+                context=context_text,
+            )
+            memory_context = (context or {}).get("memory_context")
+            if memory_context is not None:
+                messages = memory_context.prompt_messages(question=user_prompt)
+            else:
+                messages = [
+                    {"role": "system", "content": PromptLoader.load("swarm/chat_reply.j2")},
+                    *history_messages,
+                    {"role": "user", "content": user_prompt},
+                ]
 
             if event_callback:
                 def _on_content_token(token: str) -> None:
@@ -196,17 +201,22 @@ class LeadAgent:
                 iteration=iteration,
             )
 
-        messages = [
-            {"role": "system", "content": self._get_system_prompt()},
-            {"role": "user", "content": PromptLoader.render(
-                "swarm/assessment_user.j2",
-                question=question,
-                personal_profile=(context or {}).get("personal_profile"),
-                collected_info=(context or {}).get("collected_info"),
-                recent_history=(context or {}).get("recent_history"),
-                historical_cases=(context or {}).get("historical_cases"),
-            )}
-        ]
+        user_prompt = PromptLoader.render(
+            "swarm/assessment_user.j2",
+            question=question,
+            personal_profile=(context or {}).get("personal_profile"),
+            collected_info=(context or {}).get("collected_info"),
+            recent_history=(context or {}).get("recent_history"),
+            historical_cases=(context or {}).get("historical_cases"),
+        )
+        memory_context = (context or {}).get("memory_context")
+        if memory_context is not None:
+            messages = memory_context.prompt_messages(question=user_prompt)
+        else:
+            messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": user_prompt},
+            ]
 
         try:
             if self.on_thinking:
@@ -353,6 +363,7 @@ class LeadAgent:
         shared_context: SharedContext,
         timeout_occurred: bool = False,
         event_callback: Optional[Callable] = None,
+        memory_context: Optional[Any] = None,
     ) -> str:
         """
         汇总所有 Agent 的贡献，生成最终答案
@@ -421,7 +432,12 @@ class LeadAgent:
         )
 
         try:
-            messages = [{"role": "user", "content": synthesis_prompt}]
+            if memory_context is not None:
+                messages = memory_context.prompt_messages(
+                    question=synthesis_prompt
+                )
+            else:
+                messages = [{"role": "user", "content": synthesis_prompt}]
             if event_callback:
                 def _on_content_token(token: str) -> None:
                     event_callback(Event(

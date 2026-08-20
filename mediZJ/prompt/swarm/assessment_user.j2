@@ -6,8 +6,8 @@
 {{ collected_info }}
 {% endif %}{% if recent_history %}## 近期对话历史
 {% for msg in recent_history %}[{{ msg.role }}] {{ msg.content }}
-{% endfor %}{% endif %}{% if historical_cases %}## 历史相似案例
-{% for case in historical_cases %}- {{ case.summary }}（相似度: {{ "%.2f"|format(case.score) }}）
+{% endfor %}{% endif %}{% if historical_cases %}## 历史情景摘要（不可作为医学证据）
+{% for case in historical_cases %}- {{ case.summary }}
 {% endfor %}{% endif %}{% if verified_experiences %}## 已验证的应答策略
 仅在与当前问题匹配且不违反医学安全要求时使用：
 {{ verified_experiences }}

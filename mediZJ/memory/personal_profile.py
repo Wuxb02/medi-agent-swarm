@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
@@ -123,6 +123,11 @@ class PersonalProfile:
         self._db = db if db is not None else SessionDB()
         self._lock = _get_user_lock(user_id)
         self._migrate_files_to_db()
+        self._db.upsert_profile(self.user_id)
+        from .structured_memory import StructuredMemoryStore
+
+        self._structured = StructuredMemoryStore(self._db)
+        self._migrate_legacy_row_to_structured()
 
     # ========== 旧版文件 → DB 一次性迁移 ==========
 
@@ -188,7 +193,9 @@ class PersonalProfile:
 
     # ========== PERSONAL.md 解析（包含确认信息 + 病史） ==========
 
-    def _parse_profile(self, content: str = None) -> Dict[str, any]:
+    def _parse_profile(
+        self, content: Optional[str] = None
+    ) -> Dict[str, Any]:
         """解析档案正文，返回 {confirmed: Dict, records: List[MedicalRecord]}。
 
         新格式（有 ## 段落头）：
@@ -246,7 +253,7 @@ class PersonalProfile:
 
         return {"confirmed": confirmed, "records": records}
 
-    def _parse_old_format(self, content: str) -> Dict[str, any]:
+    def _parse_old_format(self, content: str) -> Dict[str, Any]:
         """解析旧格式档案正文（纯 key-value）。"""
         confirmed = {}
         for line in content.splitlines():
@@ -295,17 +302,17 @@ class PersonalProfile:
 
     # ========== 已确认信息 ==========
 
-    def load(self) -> Dict[str, str]:
+    def _legacy_load(self) -> Dict[str, str]:
         """加载已确认的个人信息。"""
         return self._parse_profile()["confirmed"]
 
-    def save(self, info: Dict[str, str]):
+    def _legacy_save(self, info: Dict[str, str]):
         """全量替换已确认的个人信息（保留病史记录）。"""
         with self._lock:
             data = self._parse_profile()
             self._save_profile(info, data["records"])
 
-    def update(self, new_items: List[Dict[str, str]]) -> Dict[str, str]:
+    def _legacy_update(self, new_items: List[Dict[str, str]]) -> Dict[str, str]:
         """增量更新已确认信息（合并新旧数据）。"""
         with self._lock:
             data = self._parse_profile()
@@ -320,7 +327,7 @@ class PersonalProfile:
 
     # ========== 病史记录 ==========
 
-    def load_records(self) -> List[MedicalRecord]:
+    def _legacy_load_records(self) -> List[MedicalRecord]:
         """加载病史记录。"""
         return self._parse_profile()["records"]
 
@@ -366,13 +373,13 @@ class PersonalProfile:
             outcome=outcome,
         )
 
-    def save_records(self, records: List[MedicalRecord]):
+    def _legacy_save_records(self, records: List[MedicalRecord]):
         """保存病史记录（保留已确认信息）。"""
         with self._lock:
             data = self._parse_profile()
             self._save_profile(data["confirmed"], records)
 
-    def add_records(self, new_records: List[Dict]) -> List[MedicalRecord]:
+    def _legacy_add_records(self, new_records: List[Dict]) -> List[MedicalRecord]:
         """追加病史记录，按 (date, description) 去重。"""
         with self._lock:
             data = self._parse_profile()
@@ -402,7 +409,7 @@ class PersonalProfile:
 
     # ========== 待确认暂存区（pending 列） ==========
 
-    def load_pending(self) -> List[PendingItem]:
+    def _legacy_load_pending(self) -> List[PendingItem]:
         """加载待确认条目（支持 [信息] 和 [病史] 两种类型）。"""
         content = self._read_row()["pending"]
         if not content:
@@ -469,7 +476,7 @@ class PersonalProfile:
             logger.error(f"Failed to load pending items: {e}")
             return []
 
-    def save_pending(self, items: List[PendingItem]):
+    def _legacy_save_pending(self, items: List[PendingItem]):
         """保存待确认条目。"""
         lines = ["# 待确认信息", ""]
         for item in items:
@@ -478,7 +485,7 @@ class PersonalProfile:
         self._write_pending("\n".join(lines))
         logger.debug(f"Saved {len(items)} pending items")
 
-    def add_pending(self, new_items: List[Dict]):
+    def _legacy_add_pending(self, new_items: List[Dict]):
         """追加待确认条目（信息类型），按 (key, value) 去重。"""
         with self._lock:
             existing = self.load_pending()
@@ -512,7 +519,7 @@ class PersonalProfile:
 
             self.save_pending(existing)
 
-    def add_pending_records(self, new_records: List[Dict]):
+    def _legacy_add_pending_records(self, new_records: List[Dict]):
         """追加待确认病史条目，按 (record_date, value) 去重。"""
         with self._lock:
             existing = self.load_pending()
@@ -550,7 +557,7 @@ class PersonalProfile:
 
             self.save_pending(existing)
 
-    def confirm_pending(self, key: str, value: str) -> bool:
+    def _legacy_confirm_pending(self, key: str, value: str) -> bool:
         """确认待确认条目：从暂存区移入已确认信息或病史。"""
         with self._lock:
             items = self.load_pending()
@@ -583,7 +590,7 @@ class PersonalProfile:
 
             return True
 
-    def dismiss_pending(self, key: str, value: str) -> bool:
+    def _legacy_dismiss_pending(self, key: str, value: str) -> bool:
         """丢弃待确认条目（不转入已确认）。"""
         with self._lock:
             items = self.load_pending()
@@ -595,13 +602,13 @@ class PersonalProfile:
                 return True
             return False
 
-    def get_pending(self) -> List[PendingItem]:
+    def _legacy_get_pending(self) -> List[PendingItem]:
         """获取所有待确认条目。"""
         return self.load_pending()
 
     # ========== Agent 上下文注入 ==========
 
-    def to_text(self) -> str:
+    def _legacy_to_text(self) -> str:
         """将已确认信息格式化为文本（注入 agent prompt）。
 
         仅输出已确认信息 + 已确认病史，不含待确认条目。
@@ -624,3 +631,345 @@ class PersonalProfile:
             return "暂无"
 
         return "\n\n".join(sections)
+
+    # ========== 结构化记忆兼容门面（新实现） ==========
+
+    def _migrate_legacy_row_to_structured(self) -> None:
+        """将旧 profiles 文本幂等迁移到结构化记忆。"""
+        if self._structured.list_items(
+            self.user_id,
+            statuses=("active", "pending", "dismissed", "superseded", "stale"),
+        ):
+            return
+        row = self._read_row()
+        parsed = self._parse_profile(row["content"])
+        for key, value in sorted(parsed["confirmed"].items()):
+            self._structured.upsert_active(
+                self.user_id, "profile_fact", key, value
+            )
+        for record in parsed["records"]:
+            value = {
+                "date": record.date,
+                "description": record.description,
+                "symptoms": record.symptoms,
+                "duration": record.duration,
+                "medication": record.medication,
+                "outcome": record.outcome,
+            }
+            self._structured.upsert_active(
+                self.user_id,
+                "medical_record",
+                self._record_key(record),
+                value,
+            )
+        for item in self._parse_legacy_pending(row["pending"]):
+            value = self._pending_value(item)
+            self._structured.add_pending(
+                self.user_id,
+                "medical_record" if item.is_record else "profile_fact",
+                self._record_key_from_pending(item) if item.is_record else item.key,
+                value,
+                confidence=self._confidence_value(item.confidence),
+            )
+
+    def _parse_legacy_pending(self, content: str) -> List[PendingItem]:
+        items: List[PendingItem] = []
+        record_pattern = re.compile(
+            r"^- \[病史\]\[(\d{4}-\d{2}(?:-\d{2})?)\]\s*(.+?)（"
+            r"(\d{4}-\d{2}-\d{2}) 提取）$"
+        )
+        info_pattern = re.compile(
+            r"^- (?:\[信息\])?(.+?)：(.+?)（(\d{4}-\d{2}-\d{2}) "
+            r"提取，置信度：(高|中)）$"
+        )
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            match = record_pattern.match(line)
+            if match:
+                record = self._parse_record_body(match.group(1), match.group(2))
+                items.append(PendingItem(
+                    key="病史",
+                    value=record.description,
+                    source_date=match.group(3),
+                    confidence="confirmed",
+                    record_date=record.date,
+                    symptoms=record.symptoms,
+                    duration=record.duration,
+                    medication=record.medication,
+                    outcome=record.outcome,
+                ))
+                continue
+            match = info_pattern.match(line)
+            if match:
+                items.append(PendingItem(
+                    key=match.group(1).strip(),
+                    value=match.group(2).strip(),
+                    source_date=match.group(3),
+                    confidence="high" if match.group(4) == "高" else "medium",
+                ))
+        return items
+
+    def load(self) -> Dict[str, str]:
+        """加载已确认个人信息。"""
+        items = self._structured.list_items(
+            self.user_id, statuses=("active",), memory_type="profile_fact"
+        )
+        return {item["memory_key"]: str(item["value"]) for item in items}
+
+    def save(self, info: Dict[str, str]) -> None:
+        """全量替换已确认个人信息。"""
+        with self._lock:
+            normalized = {
+                str(key).strip(): str(value).strip()
+                for key, value in info.items()
+                if str(key).strip() and str(value).strip()
+            }
+            self._structured.replace_active(
+                self.user_id, "profile_fact", normalized, actor_id=self.user_id
+            )
+
+    def update(self, new_items: List[Dict[str, str]]) -> Dict[str, str]:
+        """增量更新已确认信息。"""
+        with self._lock:
+            for item in new_items:
+                key = item.get("key", "").strip()
+                value = item.get("value", "").strip()
+                if key and value:
+                    self._structured.upsert_active(
+                        self.user_id, "profile_fact", key, value
+                    )
+            return self.load()
+
+    def load_records(self) -> List[MedicalRecord]:
+        """加载已确认病史。"""
+        records = []
+        for item in self._structured.list_items(
+            self.user_id, statuses=("active",), memory_type="medical_record"
+        ):
+            value = item["value"]
+            records.append(MedicalRecord(
+                date=str(value.get("date", "")),
+                description=str(value.get("description", "")),
+                symptoms=str(value.get("symptoms", "")),
+                duration=str(value.get("duration", "")),
+                medication=str(value.get("medication", "")),
+                outcome=str(value.get("outcome", "")),
+            ))
+        return sorted(records, key=lambda record: record.date, reverse=True)
+
+    def save_records(self, records: List[MedicalRecord]) -> None:
+        """全量替换已确认病史。"""
+        values = {
+            self._record_key(record): {
+                "date": record.date,
+                "description": record.description,
+                "symptoms": record.symptoms,
+                "duration": record.duration,
+                "medication": record.medication,
+                "outcome": record.outcome,
+            }
+            for record in records
+            if record.date and record.description
+        }
+        with self._lock:
+            self._structured.replace_active(
+                self.user_id, "medical_record", values, actor_id=self.user_id
+            )
+
+    def add_records(self, new_records: List[Dict]) -> List[MedicalRecord]:
+        """增量添加病史。"""
+        with self._lock:
+            for item in new_records:
+                record = MedicalRecord(
+                    date=str(item.get("date", "")).strip(),
+                    description=str(item.get("description", "")).strip(),
+                    symptoms=str(item.get("symptoms", "")),
+                    duration=str(item.get("duration", "")),
+                    medication=str(item.get("medication", "")),
+                    outcome=str(item.get("outcome", "")),
+                )
+                if not record.date or not record.description:
+                    continue
+                self._structured.upsert_active(
+                    self.user_id,
+                    "medical_record",
+                    self._record_key(record),
+                    {
+                        "date": record.date,
+                        "description": record.description,
+                        "symptoms": record.symptoms,
+                        "duration": record.duration,
+                        "medication": record.medication,
+                        "outcome": record.outcome,
+                    },
+                )
+            return self.load_records()
+
+    def load_pending(self) -> List[PendingItem]:
+        """加载待确认记忆。"""
+        result = []
+        for item in self._structured.list_items(
+            self.user_id, statuses=("pending",)
+        ):
+            value = item["value"]
+            if item["memory_type"] == "medical_record":
+                result.append(PendingItem(
+                    key="病史",
+                    value=str(value.get("description", "")),
+                    source_date=item["created_at"][:10],
+                    confidence=self._confidence_label(item["confidence"]),
+                    record_date=str(value.get("date", "")),
+                    symptoms=str(value.get("symptoms", "")),
+                    duration=str(value.get("duration", "")),
+                    medication=str(value.get("medication", "")),
+                    outcome=str(value.get("outcome", "")),
+                ))
+            else:
+                result.append(PendingItem(
+                    key=item["memory_key"],
+                    value=str(value),
+                    source_date=item["created_at"][:10],
+                    confidence=self._confidence_label(item["confidence"]),
+                ))
+        return result
+
+    def save_pending(self, items: List[PendingItem]) -> None:
+        """兼容评测辅助接口，全量替换待确认项。"""
+        existing = self._structured.list_items(
+            self.user_id, statuses=("pending",)
+        )
+        for existing_item in existing:
+            self._structured._set_status(
+                existing_item["memory_id"],
+                self.user_id,
+                "dismissed",
+                "replace_pending",
+            )
+        for pending_item in items:
+            self._add_pending_item(pending_item)
+
+    def add_pending(self, new_items: List[Dict]) -> None:
+        """添加待确认个人信息。"""
+        for item in new_items:
+            key = str(item.get("key", "")).strip()
+            value = str(item.get("value", "")).strip()
+            if not key or not value:
+                continue
+            self._structured.add_pending(
+                self.user_id,
+                "profile_fact",
+                key,
+                value,
+                confidence=self._confidence_value(item.get("confidence", "medium")),
+            )
+
+    def add_pending_records(self, new_records: List[Dict]) -> None:
+        """添加待确认病史。"""
+        for item in new_records:
+            record = MedicalRecord(
+                date=str(item.get("date", "")).strip(),
+                description=str(item.get("description", "")).strip(),
+                symptoms=str(item.get("symptoms", "")),
+                duration=str(item.get("duration", "")),
+                medication=str(item.get("medication", "")),
+                outcome=str(item.get("outcome", "")),
+            )
+            if record.date and record.description:
+                self._structured.add_pending(
+                    self.user_id,
+                    "medical_record",
+                    self._record_key(record),
+                    self._pending_value(PendingItem(
+                        key="病史",
+                        value=record.description,
+                        source_date=datetime.now().strftime("%Y-%m-%d"),
+                        confidence="medium",
+                        record_date=record.date,
+                        symptoms=record.symptoms,
+                        duration=record.duration,
+                        medication=record.medication,
+                        outcome=record.outcome,
+                    )),
+                )
+
+    def confirm_pending(self, key: str, value: str) -> bool:
+        """确认待确认记忆。"""
+        memory_key = key
+        if key == "病史":
+            match = next(
+                (item for item in self.load_pending() if item.is_record and item.value == value),
+                None,
+            )
+            if match:
+                memory_key = self._record_key_from_pending(match)
+        return self._structured.confirm_pending(self.user_id, memory_key, value)
+
+    def dismiss_pending(self, key: str, value: str) -> bool:
+        """驳回待确认记忆。"""
+        memory_key = key
+        if key == "病史":
+            match = next(
+                (item for item in self.load_pending() if item.is_record and item.value == value),
+                None,
+            )
+            if match:
+                memory_key = self._record_key_from_pending(match)
+        return self._structured.dismiss_pending(self.user_id, memory_key, value)
+
+    def get_pending(self) -> List[PendingItem]:
+        return self.load_pending()
+
+    def to_text(self) -> str:
+        """以确定性字段顺序输出已确认用户画像。"""
+        sections = []
+        confirmed = self.load()
+        if confirmed:
+            lines = [f"{key}：{confirmed[key]}" for key in sorted(confirmed)]
+            sections.append("个人信息：\n" + "\n".join(lines))
+        records = self.load_records()
+        if records:
+            lines = [f"- {record.to_summary()}" for record in records]
+            sections.append("病史记录：\n" + "\n".join(lines))
+        return "\n\n".join(sections) if sections else "暂无"
+
+    def _add_pending_item(self, item: PendingItem) -> None:
+        self._structured.add_pending(
+            self.user_id,
+            "medical_record" if item.is_record else "profile_fact",
+            self._record_key_from_pending(item) if item.is_record else item.key,
+            self._pending_value(item),
+            confidence=self._confidence_value(item.confidence),
+        )
+
+    @staticmethod
+    def _record_key(record: MedicalRecord) -> str:
+        return f"{record.date}:{record.description}"
+
+    @staticmethod
+    def _record_key_from_pending(item: PendingItem) -> str:
+        return f"{item.record_date}:{item.value}"
+
+    @staticmethod
+    def _pending_value(item: PendingItem):
+        if not item.is_record:
+            return item.value
+        return {
+            "date": item.record_date,
+            "description": item.value,
+            "symptoms": item.symptoms,
+            "duration": item.duration,
+            "medication": item.medication,
+            "outcome": item.outcome,
+        }
+
+    @staticmethod
+    def _confidence_value(value) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return {"high": 0.9, "confirmed": 0.9, "medium": 0.6}.get(
+            str(value), 0.5
+        )
+
+    @staticmethod
+    def _confidence_label(value: float) -> str:
+        return "high" if float(value) >= 0.8 else "medium"

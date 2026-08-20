@@ -100,6 +100,16 @@ class TestParseResponse:
         result = LLMClient._parse_response(response)
         assert result.usage["total_tokens"] == 30
 
+    def test_parse_response_with_cached_prompt_tokens(self):
+        response = make_mock_openai_response(
+            content="test",
+            usage={"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+        )
+        response.usage.prompt_tokens_details = MagicMock(cached_tokens=80)
+        result = LLMClient._parse_response(response)
+        assert result.usage["cached_prompt_tokens"] == 80
+        assert result.usage["cache_hit_ratio"] == 0.8
+
 
 class TestChatWithTools:
     @pytest.mark.asyncio

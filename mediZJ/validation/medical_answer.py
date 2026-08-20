@@ -10,6 +10,7 @@ from loguru import logger
 from mediZJ.core.llm_client import LLMClient
 from mediZJ.knowledge.catalog import KnowledgeCatalog
 from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
+from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
 
 
 _HIGH_RISK = (
@@ -176,7 +177,12 @@ class MedicalAnswerVerifier:
         )
         return await self.llm_client.chat(
             [
-                {"role": "system", "content": "你是保守的医疗安全编辑。"},
+                {
+                    "role": "system",
+                    "content": PromptPrefixAssembler.global_prefix(
+                        "你是保守的医疗安全编辑。"
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
@@ -254,7 +260,12 @@ class MedicalAnswerVerifier:
         try:
             raw = await self.llm_client.chat(
                 [
-                    {"role": "system", "content": "你是医疗安全校验器。"},
+                    {
+                        "role": "system",
+                        "content": PromptPrefixAssembler.global_prefix(
+                            "你是医疗安全校验器。"
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0,

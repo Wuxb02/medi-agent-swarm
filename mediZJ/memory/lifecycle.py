@@ -10,7 +10,6 @@ from typing import Any
 from mediZJ.knowledge.catalog import KnowledgeCatalog
 from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
 from mediZJ.memory.lineage import MemoryLineageStore
-from mediZJ.memory.long_term import LongTermMemory
 from mediZJ.memory.session_db import SessionDB
 from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
 from mediZJ.memory.session_vector_store import SessionVectorStore
@@ -84,9 +83,6 @@ class DataLifecycleService:
             result["memory_lineage"] = MemoryLineageStore(
                 self.session_db.db_path
             ).delete_user(user_id)
-            mem0_error = await self._delete_mem0(user_id)
-            if mem0_error:
-                errors.append(mem0_error)
             status = "failed" if errors else "completed"
             self.catalog.finish_job(
                 job_id, status, result, "; ".join(errors) or None
@@ -109,7 +105,10 @@ class DataLifecycleService:
                 kb.delete_document(version["version_id"])
                 if self.catalog.delete_version_record(version["version_id"]):
                     removed += 1
-            result = {"knowledge_versions": removed}
+            result = {
+                "knowledge_versions": removed,
+                **self._prune_memory_rows(),
+            }
             self.catalog.finish_job(job_id, "completed", result)
             self.catalog.audit("prune_expired", actor_id, "", result)
         except Exception as exc:
@@ -129,6 +128,11 @@ class DataLifecycleService:
         with sqlite3.connect(self.session_db.db_path) as conn:
             conn.execute("PRAGMA foreign_keys = ON")
             for table, field in (
+                ("memory_usage", "user_id"),
+                ("memory_audit", "user_id"),
+                ("episodic_summaries", "user_id"),
+                ("memory_profile_revisions", "user_id"),
+                ("user_memory_items", "user_id"),
                 ("sessions", "user_id"),
                 ("profiles", "user_id"),
                 ("auth_sessions", "user_id"),
@@ -143,26 +147,44 @@ class DataLifecycleService:
                     result[table] = 0
         return result
 
+    def _prune_memory_rows(self) -> dict[str, int]:
+        """清理过期记忆和超期审计记录。"""
+        now = datetime.now(timezone.utc).isoformat()
+        audit_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=365)
+        ).isoformat()
+        result: dict[str, int] = {}
+        with sqlite3.connect(self.session_db.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE user_memory_items
+                SET status = 'stale', updated_at = ?
+                WHERE status = 'active' AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            result["user_memory_items"] = cursor.rowcount
+            cursor = conn.execute(
+                """
+                UPDATE episodic_summaries
+                SET status = 'expired', updated_at = ?
+                WHERE status = 'active' AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                """,
+                (now, now),
+            )
+            result["episodic_summaries"] = cursor.rowcount
+            cursor = conn.execute(
+                "DELETE FROM memory_usage WHERE created_at <= ?",
+                (audit_cutoff,),
+            )
+            result["memory_usage"] = cursor.rowcount
+        return result
+
     @staticmethod
     def _delete_summary_files(session_id: str) -> None:
         base = Path(DEFAULT_SESSION_SUMMARY_DIR)
         for path in base.glob(f"*{session_id}*"):
             if path.is_file():
                 path.unlink(missing_ok=True)
-
-    @staticmethod
-    async def _delete_mem0(user_id: str) -> str | None:
-        memory = LongTermMemory(user_id=user_id)
-        if not memory.enabled:
-            return None
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(
-                    memory.mem0.delete_all,
-                    user_id=f"mediZJ_user_{user_id}",
-                ),
-                timeout=10,
-            )
-            return None
-        except Exception as exc:
-            return f"mem0:{exc}"

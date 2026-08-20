@@ -1,7 +1,7 @@
 """知识版本、引用安全和记忆血缘测试。"""
 
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import sqlite3
 from unittest.mock import AsyncMock
 
@@ -57,6 +57,17 @@ def test_failed_version_does_not_replace_active(catalog):
 
     assert catalog.active_version("doc")["version_id"] == active["version_id"]
     assert catalog.get_version(failed["version_id"])["status"] == "failed"
+
+
+def test_future_effective_version_is_not_active_for_retrieval(catalog):
+    metadata = _metadata()
+    metadata["effective_at"] = (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    ).isoformat()
+    future = catalog.begin_version("future", "hash-future", metadata)
+    catalog.activate(future["version_id"])
+    assert catalog.active_version("future") is None
+    assert catalog.active_by_version(future["version_id"]) is None
 
 
 def test_citation_validator_rejects_archived_and_enriches_active(catalog):
@@ -406,14 +417,7 @@ async def test_lifecycle_deletes_user_data_and_records_job(tmp_path, monkeypatch
         def delete_session(self, _session_id):
             return None
 
-    class DisabledMemory:
-        enabled = False
-
-        def __init__(self, user_id):
-            self.user_id = user_id
-
     monkeypatch.setattr(lifecycle_module, "SessionVectorStore", FakeVectors)
-    monkeypatch.setattr(lifecycle_module, "LongTermMemory", DisabledMemory)
     catalog = FakeCatalog()
     service = DataLifecycleService(
         catalog=catalog,
@@ -464,32 +468,6 @@ async def test_lifecycle_worker_start_stop_and_disabled(monkeypatch):
     await lifecycle_module.stop_lifecycle_worker()
     assert lifecycle_module._lifecycle_task is None
     await lifecycle_module.stop_lifecycle_worker()
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_mem0_success_and_failure(monkeypatch):
-    class FakeMem0:
-        def __init__(self, fails=False):
-            self.fails = fails
-
-        def delete_all(self, **_kwargs):
-            if self.fails:
-                raise RuntimeError("external unavailable")
-
-    class EnabledMemory:
-        enabled = True
-        fails = False
-
-        def __init__(self, user_id):
-            self.user_id = user_id
-            self.mem0 = FakeMem0(self.fails)
-
-    monkeypatch.setattr(lifecycle_module, "LongTermMemory", EnabledMemory)
-    assert await DataLifecycleService._delete_mem0("u1") is None
-    EnabledMemory.fails = True
-    assert "external unavailable" in (
-        await DataLifecycleService._delete_mem0("u1")
-    )
 
 
 def test_lifecycle_deletes_summary_files(tmp_path, monkeypatch):

@@ -3,7 +3,7 @@
 
 包含：
 - ShortTermMemory：会话级对话历史（内存/Redis）
-- LongTermMemory：跨会话记忆（Mem0）
+- MedicalMemoryContextBuilder：统一分层记忆上下文
 - MemoryEntropyManager：熵管理器（去重和压缩）
 - SessionDB：SQLite 会话数据库
 - SessionVectorStore：Milvus 会话向量索引
@@ -14,9 +14,9 @@ from .short_term import (
     ShortTermMemory,
     ConversationHistory
 )
-from .long_term import (
-    LongTermMemory
-)
+from .context_builder import MedicalMemoryContext, MedicalMemoryContextBuilder
+from .prompt_prefix import PromptPrefixAssembler
+from .structured_memory import StructuredMemoryStore
 
 # Harness Engineering: 熵管理
 from .entropy_manager import (
@@ -46,7 +46,10 @@ __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
     'ConversationHistory',
-    'LongTermMemory',
+    'MedicalMemoryContext',
+    'MedicalMemoryContextBuilder',
+    'PromptPrefixAssembler',
+    'StructuredMemoryStore',
     # Harness Engineering: 熵管理
     'MemoryEntropyManager',
     # 本地持久化类
@@ -57,6 +60,8 @@ __all__ = [
     'Lesson',
     'PerformanceMetrics',
     'PersonalProfile',
+    'MedicalRecord',
+    'PendingItem',
     # SQLite + Milvus 会话持久化
     'SessionDB',
     'SessionVectorStore',

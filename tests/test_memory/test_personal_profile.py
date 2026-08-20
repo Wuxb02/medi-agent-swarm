@@ -110,10 +110,10 @@ def test_user_files_migrated_idempotently(db, profile_dir):
     assert (user_dir / "PERSONAL.md.bak").exists()
     assert (user_dir / "PENDING.md.bak").exists()
 
-    # 二次实例化：DB 已有行，跳过迁移；修改 DB 内容后不会被文件覆盖
+    # 二次实例化：结构化记忆已迁移，旧 profiles 行不再参与运行时读取。
     db.upsert_profile("alice", content="# 患者档案\n\n## 个人信息\n- 年龄：31岁\n")
     profile = PersonalProfile(user_id="alice", db=db)
-    assert profile.load() == {"年龄": "31岁"}
+    assert profile.load() == {"年龄": "30岁"}
 
 
 def test_concurrent_update_no_lost_update(db):

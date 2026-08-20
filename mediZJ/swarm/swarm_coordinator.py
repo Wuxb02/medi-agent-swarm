@@ -12,6 +12,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 """
 import asyncio
 import json
+import os
 import re
 import uuid
 from datetime import datetime
@@ -20,6 +21,7 @@ from loguru import logger
 
 from mediZJ.core import LLMClient
 from mediZJ.core.prompt_loader import PromptLoader
+from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
 from mediZJ.swarm.lead_agent import LeadAgent
 from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.lgraph.worker import create_worker, Worker
@@ -27,7 +29,7 @@ from mediZJ.memory import (
     SessionSummaryManager,
     SessionSummary,
     ShortTermMemory,
-    LongTermMemory,
+    MedicalMemoryContextBuilder,
     PersonalProfile,
 )
 
@@ -90,28 +92,33 @@ class SwarmCoordinator:
 
         # 记忆管理器
         self.session_manager = SessionSummaryManager()
-        self.short_term_memory = ShortTermMemory(storage_type="memory", llm_client=self.llm_client)  # 或 "redis"
-        self.long_term_memory = LongTermMemory(user_id=user_id or "default")
+        self.short_term_memory = ShortTermMemory(
+            storage_type=os.getenv("WORKING_MEMORY_STORAGE", "redis"),
+            llm_client=self.llm_client,
+            enable_compression=False,
+        )
         self.personal_profile = PersonalProfile(user_id=user_id or "default")
-        self.ltm_save_task = None
+        self.memory_context_builder = MedicalMemoryContextBuilder(
+            store=self.personal_profile._structured,
+            working_memory=self.short_term_memory,
+        )
 
-        # 意图识别（用于门控 Mem0 长期记忆检索）
+        # 意图识别（用于医疗流程门控）
         self.intent_classifier = IntentClassifier(llm_client=self.llm_client)
 
         # LangGraph ToolRegistry
         self._tool_registry = None
         self._init_langgraph_registry()
 
-        # 将短期记忆和用户档案注入到所有 Worker
-        # 注意：LeadAgent 不继承 Worker，没有 short_term_memory 属性，不需要注入
-        personal_text = self.personal_profile.to_text()
+        # Worker 仅保留工作记忆写入能力，上下文由统一构建器提供。
         for worker in self._workers.values():
             worker.short_term_memory = self.short_term_memory
-            if personal_text != "暂无":
-                worker.user_context = personal_text
 
         logger.info(f"SwarmCoordinator initialized with {len(self._workers)} workers")
-        logger.info(f"Memory system: short_term={self.short_term_memory.storage_type}, long_term={'enabled' if self.long_term_memory.enabled else 'disabled'}")
+        logger.info(
+            "Memory system: working={}, structured=sqlite",
+            self.short_term_memory.storage_type,
+        )
 
     def get_worker(self, agent_id: str) -> Optional[Worker]:
         """根据 agent_id 返回对应的 Worker 实例"""
@@ -211,7 +218,7 @@ class SwarmCoordinator:
         graph = self.build_graph(event_callback=self.event_callback)
         config = {"configurable": {"thread_id": session_id}}
         initial_state = self.build_initial_state(
-            question, context, session_id, start_time,
+            question, context, session_id, start_time, trace_id,
         )
 
         try:
@@ -262,6 +269,7 @@ class SwarmCoordinator:
         context: Optional[Dict[str, Any]],
         session_id: str,
         start_time: datetime,
+        trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """构建 SupervisorState 初始状态"""
         return {
@@ -269,6 +277,7 @@ class SwarmCoordinator:
             "session_id": session_id,
             "context": context or {},
             "start_time": start_time.isoformat(),
+            "trace_id": trace_id or "",
             "clarify_complete": False,
             "clarify_round": 0,
             "subtasks": [],
@@ -316,7 +325,7 @@ class SwarmCoordinator:
     def compose_result(self, question: str, result_state: Dict[str, Any],
                        start_time: datetime, session_id: str,
                        trace_id: Optional[str] = None) -> Dict[str, Any]:
-        """将 SupervisorState 结果组装为对外 result（含 LTM fire-and-forget）"""
+        """将 SupervisorState 结果组装为对外 result。"""
         end_time = datetime.now()
         trace_id = trace_id or str(uuid.uuid4())
 
@@ -344,20 +353,6 @@ class SwarmCoordinator:
                 "experience_assignments", []
             ),
         }
-
-        # LTM fire-and-forget
-        ltm_task = asyncio.ensure_future(self._save_long_term_memory(
-            session_id=session_id,
-            question=question,
-            answer=result["answer"],
-            metadata={
-                "mode": result_state.get("mode", "langgraph"),
-                "subtasks_count": len(result_state.get("subtasks", [])),
-                "total_time": result["total_time"],
-                "total_tokens": result["usage"].get("total_tokens", 0),
-            },
-        ))
-        result["_ltm_save_task"] = ltm_task
 
         logger.info(
             f"[LangGraph] 处理完成: mode={result['mode']}, "
@@ -433,13 +428,8 @@ class SwarmCoordinator:
     # ===== 记忆检索（供 SupervisorGraph 节点复用）=====
 
     def _refresh_worker_profiles(self, verified_experiences: str = ""):
-        """刷新所有 Worker 的用户档案"""
-        personal_text = self.personal_profile.to_text()
-        sections = [] if personal_text == "暂无" else [personal_text]
-        if verified_experiences:
-            sections.append("已验证诊疗策略：\n" + verified_experiences)
-        for worker in self._workers.values():
-            worker.user_context = "\n\n".join(sections)
+        """兼容旧调用；画像和策略改由 ContextBuilder 组装。"""
+        return None
 
     # ===== 记忆评估与保存 =====
 
@@ -482,7 +472,15 @@ class SwarmCoordinator:
         try:
             response = await asyncio.wait_for(
                 self.llm_client.chat(
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": PromptPrefixAssembler.global_prefix(
+                                "你是医疗用户记忆候选提取器。"
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
                     temperature=0.2,
                     max_tokens=2048,
                     response_format={'type': 'json_object'},
@@ -522,8 +520,8 @@ class SwarmCoordinator:
 
         return result
 
-    async def _save_long_term_memory(self, session_id, question, answer, metadata):
-        """异步保存长期记忆（LLM 评估 + 信息分类存储）"""
+    async def _save_memory_candidates(self, session_id, question, answer, metadata):
+        """仅保存经评估的待确认结构化记忆。"""
         try:
             eval_result = await self._evaluate_and_extract_memory(
                 session_id, question, answer
@@ -546,47 +544,19 @@ class SwarmCoordinator:
                     for rec in medical_records:
                         logger.info(f"  [Pending-Record] [{rec.get('date', '')}] {rec.get('description', '')}")
 
-                # Mem0 门控
-                if score < 5:
-                    logger.info(
-                        f"Memory gate: SKIP Mem0 (score={score}) "
-                        f"reason={eval_result.get('reason', '')} session={session_id}"
-                    )
-                    # 打印本轮存储摘要
-                    session = self.short_term_memory.get_session(session_id)
-                    msg_count = len(session.messages) if session else 0
-                    logger.info(
-                        f"Memory turn summary — short_term={msg_count} msgs | "
-                        f"pending_info={len(stable_info)} pending_records={len(medical_records)} | mem0=SKIP"
-                    )
-                    return
-
-                # 可复用事实 → Mem0
-                reusable_facts = eval_result.get("reusable_facts", [])
-                if reusable_facts:
-                    memory_text = "; ".join(f["fact"] for f in reusable_facts)
-                    for f in reusable_facts:
-                        logger.info(f"  [Mem0] [{f.get('category', '')}] {f['fact']}")
-                else:
-                    memory_text = f"Q: {question[:200]} A: {answer[:300]}"
                 logger.info(
-                    f"Memory gate: PASS score={score} "
-                    f"facts={len(reusable_facts)} pending_info={len(stable_info)} pending_records={len(medical_records)} session={session_id}"
+                    "Structured memory candidates: score={} info={} records={} session={}",
+                    score,
+                    len(stable_info),
+                    len(medical_records),
+                    session_id,
                 )
             else:
-                memory_text = f"Q: {question[:200]} A: {answer[:300]}"
-                logger.info(f"Memory gate: FALLBACK (LLM eval unavailable) session={session_id}")
-                logger.info(f"  [Mem0] (raw) {memory_text[:100]}...")
-
-            await self.long_term_memory.add_session_summary(
-                session_id=session_id,
-                question=memory_text,
-                answer="",
-                metadata={
-                    **metadata,
-                    "quality_score": eval_result.get("score") if eval_result else None,
-                },
-            )
+                logger.warning(
+                    "记忆评估未完成，本轮不写入长期记忆: session={}",
+                    session_id,
+                )
+                return
 
             # 打印本轮存储摘要
             session = self.short_term_memory.get_session(session_id)
@@ -600,10 +570,10 @@ class SwarmCoordinator:
             logger.info(
                 f"Memory turn summary — short_term={msg_count} msgs | "
                 f"pending_info={info_count} pending_records={records_count} | "
-                f"mem0={'PASS' if eval_result else 'FALLBACK'}"
+                "structured=RECORDED"
             )
         except Exception as e:
-            logger.error(f"LTM save failed (session={session_id}): {e}")
+            logger.error(f"Structured memory save failed (session={session_id}): {e}")
 
     # ===== 会话摘要 =====
 
@@ -620,6 +590,11 @@ class SwarmCoordinator:
                 usage=usage, total_messages=message_count,
             )
             self.session_manager.save_summary(summary)
+            self.personal_profile._structured.save_episodic_summary(
+                session_id=session_id,
+                user_id=self.user_id,
+                summary=f"问题：{question}\n回答：{final_answer}",
+            )
         except Exception as e:
             logger.error(f"Failed to save session summary: {e}")
 

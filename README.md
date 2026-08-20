@@ -15,12 +15,13 @@
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 LangGraph Agent 子图**: LLM 驱动的 Skill 调用循环（AgentSubGraph），Worker 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
-- **🧠 记忆系统**: 短期记忆（写时增量压缩）+ 长期记忆（Mem0）+ 个人档案（SQLite profiles 表）+ **LLM 质量门控 + 信息分类存储** ✅
+- **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
+- **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **📚 知识版本治理**: SQLite Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、历史版本恢复、归档和过期过滤 ✅
 - **🛡️ 医疗回答安全验证**: 回答返回前统一检查红旗症状、诊断越界、处方、医学数值、引用有效性及语义一致性；最多重写一次，失败时安全降级 ✅
 - **🔗 可追溯引用**: 引用绑定文档版本和唯一 chunk，拒绝伪造、错版本、归档及过期引用，历史会话保留引用快照 ✅
-- **🧹 数据生命周期**: 非自进化记忆具备来源血缘、TTL、用户删除、外部 Mem0 失败重试和无医疗正文审计 ✅
+- **🧹 数据生命周期**: 结构化记忆具备来源、授权、时效、修订、用量记录、审计和用户删除治理 ✅
 - **⚖️ 医学知识冲突审核**: 新版本激活后异步发现阈值、禁忌、适用人群和指南差异，由管理员人工确认，不自动裁决医学事实 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -95,8 +96,8 @@
 5. **多轮对话支持**
    - 短期记忆：会话级对话历史（retrieve 阶段取最近 10 条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `AgentSubGraph` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
-   - 个人档案：SQLite `profiles` 表（Markdown 文本整体入库），由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message
-   - 长期记忆：Mem0 跨会话记忆（经 LLM 质量门控过滤），LeadAgent 筛选后嵌入子任务 description
+   - 用户语义记忆：SQLite `user_memory_items`，仅 active、未过期且已授权内容进入稳定用户前缀
+   - 情景记忆：SQLite `episodic_summaries`，作为跨会话背景动态注入，不参与医学引用
    - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
    - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
 
@@ -307,8 +308,8 @@ BASELINE_LLM_API_KEY=your_baseline_api_key_here
 BASELINE_LLM_BASE_URL=https://api.openai.com/v1
 BASELINE_LLM_MODEL_NAME=gpt-4o
 
-# Mem0 长期记忆配置（可选）
-MEM0_API_KEY=m0-your-api-key-here
+# Redis 工作记忆（默认）
+WORKING_MEMORY_STORAGE=redis
 ```
 
 ### 4. 初始化知识库
@@ -464,9 +465,11 @@ medix-agent-swarm/
 │   │   └── storage/
 │   │       └── __init__.py              # SQLite 存储（traces + spans 表，树 JSON + 扁平行）
 │   ├── memory/                          # 记忆管理（集成熵管理）
-│   │   ├── long_term.py                 # 长期记忆（Mem0）
-│   │   ├── short_term.py                # 短期记忆（单例，写时增量压缩 + 子会话隔离）
-│   │   ├── personal_profile.py          # 个人健康档案（SQLite profiles 表）
+│   │   ├── context_builder.py            # 统一医疗记忆上下文入口
+│   │   ├── prompt_prefix.py              # 确定性稳定前缀与指纹
+│   │   ├── structured_memory.py          # SQLite 用户/情景记忆与审计
+│   │   ├── short_term.py                # Redis 工作记忆（TTL + 子会话隔离）
+│   │   ├── personal_profile.py          # 个人档案 API 兼容层
 │   │   ├── session_summary.py           # 会话总结
 │   │   ├── session_db.py                # 会话数据库（sessions + messages 表）
 │   │   ├── session_vector_store.py      # Milvus 会话向量索引
@@ -535,7 +538,7 @@ medix-agent-swarm/
 │   ├── test_evolution/                  # 自进化：judge 评审、service 采样/观察、storage 全生命周期
 │   ├── test_knowledge/                  # 知识库：entity_index
 │   ├── test_research/                   # 深度研究：evidence_synthesizer
-│   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Mem0）
+│   └── test_integration/                # 集成测试（需要真实 LLM/Milvus/Redis）
 │
 ├── scripts/                             # 运维脚本
 │   └── stress_chat.py                   # 并发压测脚本（asyncio + httpx，支持干跑模式）
@@ -722,8 +725,8 @@ AUTH_COOKIE_SECURE=false
 # Embedding 模型配置（HuggingFace Hub，首次加载自动下载，之后走本地缓存）
 EMBEDDING_MODEL_NAME=BAAI/bge-small-zh-v1.5
 
-# Mem0 长期记忆配置（可选，获取地址：https://app.mem0.ai）
-MEM0_API_KEY=m0-your-api-key-here
+# Redis 工作记忆
+WORKING_MEMORY_STORAGE=redis
 
 # Vision 多模态模型配置（用于图片解析，可选；未设置则回退到主 LLM 配置）
 VISION_MODEL_NAME=gpt-4o
@@ -751,7 +754,16 @@ EVOLUTION_TRUSTED_DOMAINS=                # 可信域名白名单（逗号分隔
 
 ### 记忆系统配置
 
-本系统支持三层记忆机制：**短期记忆（会话级）**、**个人档案（SQLite 持久化）** 和 **长期记忆（Mem0 跨会话）**，通过 LLM 质量门控实现信息分类存储。
+本系统使用五类记忆：**KnowledgeCatalog 医学事实**、**SQLite 用户语义记忆**、**Redis 工作记忆**、**SQLite 情景记忆**和 **evolution 程序性策略**。只有 KnowledgeCatalog active 版本的医学证据可支撑引用。
+
+旧 `profiles`/`memory_lineage` 数据使用单事务迁移，上线前应先执行 dry-run：
+
+```bash
+uv run python -m mediZJ.memory.scripts.migrate_structured_memory --dry-run
+uv run python -m mediZJ.memory.scripts.migrate_structured_memory
+```
+
+迁移工具支持幂等执行、前后数量报告、稳定前缀 hash 校验和异常整体回滚。旧表保留一个发布周期，运行时不再读写。
 
 #### 短期记忆（ShortTermMemory）
 
@@ -759,22 +771,22 @@ EVOLUTION_TRUSTED_DOMAINS=                # 可信域名白名单（逗号分隔
 
 **配置**：
 ```python
-# 方式1: 内存存储（默认，无需配置）
+# 内存存储（仅测试/开发）
 from mediZJ.memory.short_term import ShortTermMemory
 memory = ShortTermMemory(storage_type="memory")
 
-# 方式2: Redis持久化（可选）
+# Redis 工作记忆（运行时默认）
 memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost", "port": 6379})
 ```
 
 **存储方式**：
-- **内存**（默认）：无需配置，保留时间 60 分钟（ttl_seconds=3600，memory/redis 均生效，周期性过期清理）
-- **Redis**（可选）：通过 `redis_config` 参数传入配置，支持持久化
-- 存储容量：累积消息，写入时熵驱动压缩
+- **Redis**：默认 TTL 60 分钟，保存当前会话原始消息和结构化临时状态
+- 协调器运行时设置 `enable_compression=False`，已进入历史的 role/content 不再重写，以提高 KV cache 命中
+- 不保存知识库 chunk 完整正文
 
 **智能压缩（写时增量压缩）**：
 
-短期记忆采用"写入时压缩、读取时零开销"模式。每次 `add_message()` 写入新消息后，检查未压缩消息的熵等级，仅当满足高熵条件时触发压缩：
+`ShortTermMemory` 仍保留可选的写时压缩能力，但协调器运行时显式关闭，确保历史消息不被重写。仅在非 KV cache 敏感的独立场景中手动启用时，才使用以下机制：
 
 - **熵驱动触发**：未压缩消息满足 `total_messages > 20` 或 `duplicate_rate > 0.15` 或 `avg_message_length > 500` 时才压缩，否则跳过
 - **增量压缩**：只压缩较旧的消息，保留最近 N 条不动；压缩摘要持久化到 messages 列表，下次读取直接返回
@@ -786,14 +798,15 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 
 **作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），**按 user_id 隔离存储**。
 
-**存储方式**：`mediZJ/memory/data/sessions.db` 的 `profiles` 表，Markdown 文本整体入库（`content` 列 = 已确认信息 + 病史，`pending` 列 = 待确认暂存区），按 `user_id` 主键隔离（未传 user_id 时默认 `default`）。旧版 `memory/profile/{user_id}/*.md` 文件在首次访问时自动迁移入库，原文件重命名为 `.bak` 保留。
+**存储方式**：`mediZJ/memory/data/sessions.db` 的 `user_memory_items` 表，按 `user_id` 隔离，支持 active/pending/dismissed/superseded/stale、来源权威、授权范围、时效和修订链。`PersonalProfile` 仅作为现有 API 的兼容层。
 
 **工作方式**：
 
 - 问答请求可携带 `user_id` 字段（`/api/chat`、`/api/chat/stream`），不同用户的档案互不可见
 - `/api/personal` 系列端点支持 `?user_id=` 查询参数，缺省操作 default 用户
-- LLM 每轮对话自动提取个人信息，增量合并写入（读写经共享锁串行化，并发不丢更新）
-- 对话开始时自动注入到 Agent 上下文（仅已确认信息，来自 `profiles` 表 `content` 列）
+- 回答通过医疗安全校验后才异步提取 pending 候选，提取失败或格式非法时不写入
+- 只有 active、未过期且符合 consent scope 的记忆进入用户稳定前缀
+- 医疗人员确认信息高于用户确认信息，低权威写入不会覆盖高权威 active 项
 - 前端「个人中心」支持手动查看和编辑
 
 **存储格式**（Markdown 文本，存于 `content` 列）：
@@ -805,44 +818,15 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 - 过敏史：青霉素过敏
 ```
 
-#### 长期记忆（Mem0）
+#### 情景记忆与医学事实
 
-**作用**：跨会话记忆，存储可复用的医学知识和事实。
+- `episodic_summaries` 保存跨会话摘要、已解析实体和来源会话，默认保留 180 天，只作为动态背景。
+- 医学事实继续由 KnowledgeCatalog + Milvus 管理版本、权威、`effective_at`、过期、冲突和引用。
+- Mem0 已从运行时、依赖、配置、Dashboard 和用户删除链路中下线；历史数据不自动导入或删除。
 
-**配置**：
-```env
-MEM0_API_KEY=m0-your-api-key-here  # 获取地址：https://app.mem0.ai
-```
+#### 安全校验后的记忆候选提取
 
-**存储方式**：
-- **Mem0 云服务**：自动处理向量化和相似度搜索
-- 存储范围：跨会话持久化
-- 存储内容：可复用的医学事实（症状关联、治疗方案、风险评估等）
-
-#### LLM 质量门控 + 信息分类存储
-
-每轮对话结束后，系统调用 LLM 对对话内容进行评估和分类：
-
-```
-对话完成
-  ↓
-LLM 评估（mediZJ/prompt/memory/quality_eval.j2）
-  ├─ 质量评分（1-10）
-  ├─ 提取个人信息 → profiles 表（sessions.db）
-  └─ 提取可复用事实 → Mem0
-```
-
-**评分规则**：
-- score < 5：跳过 Mem0 存储（低质量闲聊等），但个人信息仍会保存
-- score ≥ 5：个人信息 + 可复用事实均入库
-
-**日志输出**（每个 turn）：
-```
-  [Personal] 年龄：28岁
-  [Mem0] [症状与疾病的关联] 前额胀痛是紧张性头痛的典型表现
-Memory gate: PASS score=9 facts=5 personal=1 session=xxx
-Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
-```
+最终回答通过引用与医疗安全验证后，系统才异步提取用户资料和病史候选，写入 `user_memory_items(pending)`。候选项不进入稳定前缀；只有用户或医疗人员确认后才激活并提升 `profile_revision`。
 
 #### 记忆系统如何融入对话
 
@@ -851,34 +835,26 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 ```
 1. 会话开始
    ↓
-2. 短期记忆：直接返回当前会话历史（压缩已在写入时完成，读取零开销）→ 仅供 LeadAgent 参考
+2. `MedicalMemoryContextBuilder` 按权限、状态、时效和授权读取五类记忆
    ↓
-3. 长期记忆：检索 Mem0 相似案例
+3. `PromptPrefixAssembler` 确定性组装：全局稳定前缀 → 用户稳定前缀 → 原始会话历史 → 本轮动态内容
    ↓
-4. LeadAgent 任务分解（携带已确认档案 + 短期记忆 + 长期记忆）
-   - 用户档案（`to_text()`，仅已确认信息）→ clarify + assess 阶段自动注入
-   - 短期记忆 → 理解多轮对话意图
-   - 长期记忆 → 基于历史案例做更好的任务分配
-   - 相关记忆嵌入子任务 description → 传递给 Worker
+4. LeadAgent/Worker 通过 `prompt_messages()` 获取上下文
    ↓
 5. Worker Agent 执行（统一子会话隔离）
    - 所有模式（单 Agent / Swarm / 降级）均走 AgentSubGraph
    - 每个 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），历史互不干扰
-   - Worker 不加载短期记忆，只接收任务指令和用户档案
-   - 个人档案：由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message（所有 Worker 共享）
+   - Worker 不直接访问记忆存储，使用按 call type 构建的统一上下文
    - 执行完毕后：最终回答合并回主会话，子会话清除
    ↓
-6. 对话结束 → LLM 质量评估 + 信息分类
-   ├─ 个人信息 → profiles 表
-   ├─ 可复用事实 → Mem0
-   └─ 短期记忆 → AgentSubGraph 执行中自动保存
+6. 对话结束 → 安全验证 → 异步保存 pending 候选和情景摘要
 ```
 
 **注意事项**：
 
-- 未设置 `MEM0_API_KEY` 时，系统会优雅降级，仅使用短期记忆和个人档案
-- 短期记忆默认使用内存存储，无需配置 Redis
-- 个人档案始终可用（本地 SQLite，无外部依赖）
+- 本阶段不执行 token 计数、配额分配或长度裁剪
+- 本地 hash 仅验证前缀稳定性，真实命中率仅采信模型供应商 usage
+- 用户画像、当前自述、情景摘要和 evolution 策略均不得生成 citation
 
 ## 🚦 并发与压测
 
@@ -890,7 +866,7 @@ Memory turn summary — short_term=5 msgs | personal=1 items saved | mem0=PASS
 | ------ | ------ | ------ |
 | **会话互斥** | per-session asyncio.Lock，同会话请求排队执行，防止短期记忆 / turn_index 写竞争 | `mediZJ/api/services/chat_service.py` |
 | **记忆写锁** | 短期记忆 per-session 写锁，覆盖写入 + 增量压缩全过程 | `mediZJ/memory/short_term.py` |
-| **档案隔离** | 个人档案按 user_id 行级隔离（profiles 表），共享 RLock 串行化读写，旧版 md 文件自动迁移入库 | `mediZJ/memory/personal_profile.py` |
+| **档案隔离** | `user_memory_items` 按 user_id 行级隔离，active 项具备唯一约束、修订链和事务替换 | `mediZJ/memory/structured_memory.py` |
 | **任务认领** | SharedContext 子任务认领加锁，防止并行 Worker 重复执行 | `mediZJ/swarm/shared_context.py` |
 | **阻塞下线程** | embedding 推理 / SQLite / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
 | **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
@@ -950,7 +926,7 @@ uv run python scripts/stress_chat.py --tiers 10,30,50 --timeout 400
 
 #### 设计原则
 
-- **写时增量压缩，读时直接返回**：消息写入时检查熵，满足高熵条件时压缩早期对话，压缩结果持久化到 messages 列表；读取时直接返回列表尾部，零计算开销
+- **追加式历史，读时直接返回**：生产调用链关闭压缩，已进入历史的 role/content 不重新摘要、格式化或排序
 - **累积增长**：压缩后继续累积新消息，当新的未压缩部分再次满足高熵条件时再次压缩
 - **熵驱动**：先评估信息熵，低熵时零开销跳过，高熵时按需执行去重和压缩
 - **自动降级**：LLM 不可用时自动切换为截断模式，嵌入模型加载失败时直接返回原始消息
@@ -1026,8 +1002,8 @@ LLM 不可用或调用失败时，自动降级为截断模式：将 user + assis
 |--------|------|------|
 | **ShortTermMemory.add_message()** | `mediZJ/memory/short_term.py` | 写入时调用 `_maybe_compress_incremental()`，熵驱动增量压缩 |
 | **ShortTermMemory.get_recent_messages()** | `mediZJ/memory/short_term.py` | 读取时直接返回 messages 列表，零压缩开销 |
-| **LongTermMemory** | `mediZJ/memory/long_term.py` | 轻量使用：在 `search_similar_sessions()` 中仅调用 `deduplicate_sessions()`，无 LLM 客户端 |
-| **SwarmCoordinator** | `mediZJ/swarm/swarm_coordinator.py` | 传入 LLM 客户端，使短期记忆具备 LLM 压缩能力 |
+| **MedicalMemoryContextBuilder** | `mediZJ/memory/context_builder.py` | 统一读取、过滤并组装所有 Agent 上下文 |
+| **PromptPrefixAssembler** | `mediZJ/memory/prompt_prefix.py` | 生成字节稳定的全局/用户前缀及 SHA-256 指纹 |
 
 核心流程：
 
@@ -1098,7 +1074,7 @@ python -m mediZJ.eval.runner --score-abtest
 
 ### 动态”卡带式” System Prompt
 
-系统提示词采用 KV cache 友好的三层结构（基础角色 + 技能目录 → 用户档案 → Skill 指令通过 tool result 返回）。system prompt 前缀在 AgentSubGraph 中保持稳定，Skill 指令不修改 system prompt，而是通过 `activate_skill` 的工具返回值传递给 LLM。Swarm 层面，LeadAgent 与 Worker 的 Prompt 体系完全解耦。
+系统提示词采用 KV cache 友好的四段结构：全局稳定前缀 → 用户稳定前缀 → 追加式会话历史 → 本轮动态上下文。`PromptPrefixAssembler` 固定标题、字段顺序、JSON 格式和 tool schema 顺序，`MedicalMemoryContextBuilder` 是所有 Agent 获取记忆的唯一入口。
 
 ### 设计理念
 
@@ -1412,44 +1388,18 @@ SwarmCoordinator
 ### 记忆系统架构
 
 ```
-┌────────────────────────────────────┐
-│  短期记忆（会话级，内存/Redis）     │
-│  - 对话历史（messages）            │
-│  - 写时增量压缩（熵驱动）          │
-│  - 保留时间：60分钟                │
-│  存储：内存（默认）或 Redis        │
-├────────────────────────────────────┤
-│  熵管理器（写时触发）              │
-│  - 向量语义去重（检测重复消息）    │
-│  - LLM 语义摘要（压缩早期对话）    │
-│  - 截断降级（LLM 不可用时）        │
-│  → 压缩结果持久化到 messages 列表  │
-└────────────────────────────────────┘
-           ↕ (每轮对话后)
-┌────────────────────────────────────┐
-│  LLM 质量评估 + 信息分类           │
-│  - 质量评分（1-10）                │
-│  - 信息提取与分类                  │
-│  - 去重（已有事实跳过）            │
-└──────┬─────────────┬───────────────┘
-       │             │
-       ▼             ▼
-┌─────────────┐ ┌────────────────────┐
-│ 个人档案    │ │ 长期记忆（Mem0）   │
-│ profiles 表 │ │ 可复用医学事实     │
-│ （SQLite）  │ │ （向量数据库）     │
-│ 年龄/性别/  │ │ 症状关联/治疗方案/ │
-│ 病史/过敏史 │ │ 风险评估/生活建议  │
-└──────┬──────┘ └─────────┬──────────┘
-       │                  │
-       ▼                  ▼
-┌──────────────┐  ┌───────────────────┐
-│ AgentSubGraph │  │ LeadAgent         │
-│ 注入为       │  │ 筛选相关案例      │
-│ system msg   │  │ 嵌入 description  │
-│ (所有Worker) │  │ (传给 Worker)     │
-│ 仅已确认信息 │  │ 仅已确认信息      │
-└──────────────┘  └───────────────────┘
+医学知识事实 (KnowledgeCatalog + Milvus) ─┐
+用户语义记忆 (SQLite user_memory_items) ─┤
+工作记忆 (Redis ShortTermMemory) ──────┤
+情景记忆 (SQLite episodic_summaries) ───┤
+程序性策略 (evolution) ─────────────┤
+                                                   ▼
+                              MedicalMemoryContextBuilder
+                                                   │
+          全局稳定前缀 → 用户稳定前缀 → 会话历史 → 动态尾部
+                                                   │
+                                                   ▼
+                     LeadAgent / Worker / Clarify / Synthesis / Verifier
 ```
 ---
 ## 工作流
@@ -1487,10 +1437,9 @@ SwarmCoordinator
                             ▼ (携带 collected_info)
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 1.5：记忆检索 (retrieve_memories，先澄清再检索)                     │
-│ 统一检索三层记忆，构建增强上下文：                                       │
-│   - 短期记忆：当前会话最近 10 条消息                                     │
-│   - 长期记忆：Mem0 相似历史案例（最多 3 条）                             │
-│   - 个人档案：profiles 表（仅已确认信息）                                │
+│ MedicalMemoryContextBuilder 统一读取五类记忆：                         │
+│   - 权限、active 状态、effective_at/过期和 consent 过滤                  │
+│   - 稳定前缀与动态尾部分离，不进行 token 裁剪                           │
 └─────────────────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -1538,7 +1487,7 @@ SwarmCoordinator
 │ 收尾 (SwarmCoordinator)                                                 │
 │   - 子会话合并回主会话（Worker 历史隔离 → 主会话完整 Q&A 链）           │
 │   - SessionSummary 持久化（含性能指标）                                 │
-│   - LLM 质量门控 → 个人信息/病史进暂存区，高质量事实入 Mem0             │
+│   - 医疗安全验证通过后 → 用户信息/病史候选进 pending                     │
 │   - Trace 数据持久化                                                    │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1785,6 +1734,6 @@ MIT License
 ## 🙏 致谢
 
 - 使用 [LLM API](https://www.volcengine.com/) 作为LLM后端
-- 记忆管理基于 [Mem0](https://mem0.ai/)
+- 用户语义与情景记忆使用 SQLite，工作记忆使用 Redis
 
 ---

@@ -377,6 +377,19 @@ class KnowledgeCatalog:
 
     @staticmethod
     def _is_effective(row: sqlite3.Row) -> bool:
+        now = datetime.now(timezone.utc)
+        effective_at = row["effective_at"]
+        if effective_at:
+            try:
+                effective = datetime.fromisoformat(
+                    str(effective_at).replace("Z", "+00:00")
+                )
+            except ValueError:
+                return False
+            if effective.tzinfo is None:
+                effective = effective.replace(tzinfo=timezone.utc)
+            if effective > now:
+                return False
         expires_at = row["expires_at"]
         if not expires_at:
             return True
@@ -386,7 +399,7 @@ class KnowledgeCatalog:
             return False
         if expires.tzinfo is None:
             expires = expires.replace(tzinfo=timezone.utc)
-        return expires > datetime.now(timezone.utc)
+        return expires > now
 
     def create_job(self, job_type: str, target_id: str, actor_id: str) -> str:
         job_id = "lifecycle_" + uuid.uuid4().hex

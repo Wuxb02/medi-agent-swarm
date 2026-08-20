@@ -26,6 +26,9 @@ python mediZJ/knowledge/scripts/deduplicate.py  # 数据去重
 # 初始化会话数据库（SQLite + Milvus）
 python mediZJ/memory/scripts/init_session_db.py          # 首次初始化
 python mediZJ/memory/scripts/init_session_db.py --clean  # 清除后重新初始化
+# 旧 profiles/memory_lineage 迁移到结构化记忆（先 dry-run）
+python -m mediZJ.memory.scripts.migrate_structured_memory --dry-run
+python -m mediZJ.memory.scripts.migrate_structured_memory
 
 # 运行应用
 python mediZJ/main.py          # 交互模式
@@ -35,8 +38,8 @@ python mediZJ/main.py -v       # 详细日志模式
 uv run python mediZJ/api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
-# 运行测试（351 个单元测试 + 14 个集成/慢速测试）
-# 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
+# 运行测试（362 个单元测试 + 14 个集成/慢速测试）
+# 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Redis 默认跳过，
 # 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
 pytest tests/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
 pytest tests/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
@@ -147,14 +150,15 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 | `mediZJ/api/auth.py` | 免密登录认证（SQLite 随机会话令牌 + Cookie） |
 | `mediZJ/api/services/session_runtime.py` | 会话级运行期：缓存 graph + MemorySaver，支持 interrupt 恢复 |
 | `mediZJ/api/services/image_analyzer.py` | Vision 多模态图片解析（OCR 文本注入子任务） |
-| `mediZJ/memory/short_term.py` | 短期记忆（单例，写时增量压缩，支持内存/Redis） |
-| `mediZJ/memory/long_term.py` | 长期记忆（Mem0 云服务，经 LLM 质量门控过滤） |
+| `mediZJ/memory/short_term.py` | Redis 工作记忆，默认 TTL 1 小时；运行时关闭压缩以保持历史字节稳定 |
+| `mediZJ/memory/context_builder.py` | 统一 `MedicalMemoryContextBuilder`，负责权限、状态、时效过滤和上下文组装 |
+| `mediZJ/memory/prompt_prefix.py` | KV cache 友好的确定性前缀、tool schema 排序和 SHA-256 指纹 |
+| `mediZJ/memory/structured_memory.py` | SQLite 用户语义记忆、情景摘要、使用记录、审计和画像版本的唯一写入入口 |
 | `mediZJ/memory/entropy_manager.py` | 熵管理器：向量语义去重 + LLM 摘要 + 截断降级 |
-| `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages + profiles 表） |
+| `mediZJ/memory/session_db.py` | SQLite 会话与结构化记忆数据库 |
 | `mediZJ/memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
-| `mediZJ/memory/personal_profile.py` | 个人健康档案（SQLite `profiles` 表，md 文本整体入库） |
-| `mediZJ/memory/lineage.py` | 非自进化记忆来源血缘：来源分类、有效期、stale/revoked 状态与文档联动失效 |
-| `mediZJ/memory/lifecycle.py` | 非自进化数据生命周期：TTL、用户删除作业、外部清理重试和无正文审计 |
+| `mediZJ/memory/personal_profile.py` | 个人档案 API 兼容层，运行时读写 `user_memory_items` |
+| `mediZJ/memory/lifecycle.py` | 会话、用户记忆、情景摘要和使用记录的 TTL/删除治理 |
 | `mediZJ/memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
 | `mediZJ/knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
 | `mediZJ/knowledge/catalog.py` | SQLite 知识目录：逻辑文档/物理版本、原子激活、归档、冲突及清理作业元数据 |
@@ -227,7 +231,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 - 非自进化记忆统一记录 `user_reported`、`model_inferred`、`conversation_summary` 或 `authoritative_document` 来源；只有权威文档来源可以支撑医学事实。
 - 文档归档、过期或撤销时，关联的非自进化记忆转为 stale，注入 Agent 前会重新校验来源状态。
-- `DataLifecycleService` 以持久化作业协调会话、摘要、checkpoint、向量、Mem0、个人档案和用户关联 Trace 清理；外部失败可查询和重试，审计不保存医疗正文。
+- `DataLifecycleService` 以持久化作业协调会话、摘要、checkpoint、向量、结构化用户记忆和用户关联 Trace 清理；审计不保存医疗正文。
 - `MedicalConflictDetector` 在版本激活后异步生成冲突候选。管理员可确认、驳回或标记解决；未解决冲突会进入在线 Verifier，上层回答必须披露版本与适用条件。
 - 上述治理流程明确排除自进化评审、失败案例、learned experiences、发布版本和观察实验，不写入或触发进化经验。
 
@@ -249,15 +253,17 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - **Milvus**（`mediZJ/memory/data/session_vectors.db`）：会话摘要向量索引，语义搜索
 - **初始化**：`python mediZJ/memory/scripts/init_session_db.py`
 
-### 记忆系统（三层）
+### 记忆系统（五层）
 
 | 层级 | 存储 | 用途 |
 | --- | --- | --- |
-| 短期记忆 | 内存（默认）/Redis | 会话级对话历史，写时增量压缩，仅供 LeadAgent 参考 |
-| 个人档案 | `sessions.db` 的 `profiles` 表（content/pending 两列存 md 文本） | 患者信息（年龄/性别/病史/过敏史），由 SwarmCoordinator 注入 Worker.user_context，AgentSubGraph 注入为 system message |
-| 长期记忆 | Mem0 云服务 | 跨会话可复用医学事实，经 LLM 质量门控（score < 5 跳过） |
+| 医学知识事实 | KnowledgeCatalog + Milvus | 唯一可支撑医学引用的平面，校验 active、`effective_at`、过期和冲突 |
+| 用户语义记忆 | SQLite `user_memory_items` | 个人资料、过敏史、用药史、既往史和待确认候选 |
+| 工作记忆 | Redis `ShortTermMemory` | 当前会话原始 user/assistant 消息，默认 TTL 1 小时 |
+| 情景记忆 | SQLite `episodic_summaries` | 跨会话摘要与已解析实体，默认保留 180 天，不可引用 |
+| 程序性策略 | evolution | 仅影响路由、检索和表达，不作为医学事实 |
 
-未设置 `MEM0_API_KEY` 时优雅降级，仅使用短期记忆和个人档案。
+所有 LLM 调用通过 `MedicalMemoryContextBuilder` 按“全局稳定前缀 → 用户稳定前缀 → 会话历史 → 本轮动态上下文”组装。本阶段不进行 token 计数或裁剪。
 
 ## 配置
 
@@ -267,7 +273,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - `LLM_MAX_CONCURRENCY`（默认 16）— LLM 全局并发信号量
 - `LLM_TIMEOUT`（默认 60s）、`REQUEST_TIMEOUT`（默认 300s）— 单次 LLM 请求与问答总超时
 - `EMBEDDING_MODEL_NAME`（默认 `BAAI/bge-small-zh-v1.5`）
-- `MEM0_API_KEY` — 可选，Mem0 长期记忆服务
+- `WORKING_MEMORY_STORAGE`（默认 `redis`）— 工作记忆存储方式
 - `MEDIZJ_ADMIN_USERNAME` / `AUTH_SESSION_DAYS` / `AUTH_COOKIE_SECURE` — 免密登录配置
 - `VISION_MODEL_NAME` / `VISION_API_KEY` / `VISION_BASE_URL` — 可选，图片解析 Vision 模型（未设置回退主 LLM）
 - `BASELINE_LLM_API_KEY` / `BASELINE_LLM_BASE_URL` / `BASELINE_LLM_MODEL_NAME` — AB 测试 Baseline 配置

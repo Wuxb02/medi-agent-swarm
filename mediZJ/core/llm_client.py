@@ -61,7 +61,7 @@ class LLMResponse:
     tool_calls: List[ToolCall]
     finish_reason: str  # "stop", "tool_calls", "length", "content_filter"
     reasoning_content: Optional[str] = None  # 模型原生推理内容（如 GLM-4.7、DeepSeek-R1）
-    usage: Optional[Dict[str, int]] = None  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
+    usage: Optional[Dict[str, Any]] = None
 
     def has_tool_calls(self) -> bool:
         """是否包含 function calls"""
@@ -197,10 +197,23 @@ class LLMClient:
 
         usage = None
         if hasattr(response, 'usage') and response.usage:
+            details = getattr(response.usage, "prompt_tokens_details", None)
+            cached_tokens = (
+                getattr(details, "cached_tokens", None)
+                if details is not None
+                else None
+            )
+            prompt_tokens = response.usage.prompt_tokens
             usage = {
-                "prompt_tokens": response.usage.prompt_tokens,
+                "prompt_tokens": prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
+                "cached_prompt_tokens": cached_tokens,
+                "cache_hit_ratio": (
+                    cached_tokens / prompt_tokens
+                    if cached_tokens is not None and prompt_tokens
+                    else None
+                ),
             }
 
         return LLMResponse(
@@ -256,7 +269,9 @@ class LLMClient:
 
             # 添加工具参数（如果提供）
             if tools:
-                request_params["tools"] = tools
+                from mediZJ.memory.prompt_prefix import canonical_tools
+
+                request_params["tools"] = canonical_tools(tools)
                 if tool_choice != "auto":
                     request_params["tool_choice"] = tool_choice
 
@@ -270,6 +285,12 @@ class LLMClient:
                         span.llm_attrs.prompt_tokens = llm_response.usage.get("prompt_tokens", 0)
                         span.llm_attrs.completion_tokens = llm_response.usage.get("completion_tokens", 0)
                         span.llm_attrs.total_tokens = llm_response.usage.get("total_tokens", 0)
+                        span.llm_attrs.cached_prompt_tokens = llm_response.usage.get(
+                            "cached_prompt_tokens"
+                        )
+                        span.llm_attrs.cache_hit_ratio = llm_response.usage.get(
+                            "cache_hit_ratio"
+                        )
                     span.llm_attrs.finish_reason = llm_response.finish_reason
                     span.llm_attrs.output_content_summary = llm_response.content or ""
                     return llm_response
@@ -378,7 +399,9 @@ class LLMClient:
             }
 
             if tools:
-                request_params["tools"] = tools
+                from mediZJ.memory.prompt_prefix import canonical_tools
+
+                request_params["tools"] = canonical_tools(tools)
                 if tool_choice != "auto":
                     request_params["tool_choice"] = tool_choice
 
@@ -394,6 +417,12 @@ class LLMClient:
                         span.llm_attrs.prompt_tokens = result.usage.get("prompt_tokens", 0)
                         span.llm_attrs.completion_tokens = result.usage.get("completion_tokens", 0)
                         span.llm_attrs.total_tokens = result.usage.get("total_tokens", 0)
+                        span.llm_attrs.cached_prompt_tokens = result.usage.get(
+                            "cached_prompt_tokens"
+                        )
+                        span.llm_attrs.cache_hit_ratio = result.usage.get(
+                            "cache_hit_ratio"
+                        )
                     span.llm_attrs.finish_reason = result.finish_reason
                     span.llm_attrs.output_content_summary = result.content or ""
                     return result

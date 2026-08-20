@@ -43,3 +43,19 @@ class TestPromptLoader:
             )
             assert isinstance(result, str)
             assert "你好" in result
+
+
+def test_assessment_prompt_accepts_structured_episode_without_score():
+    """结构化情景摘要不依赖旧 Mem0 score 字段。"""
+    rendered = PromptLoader.render(
+        "swarm/assessment_user.j2",
+        question="头痛怎么办",
+        personal_profile="",
+        collected_info="",
+        recent_history=[],
+        historical_cases=[{"summary": "上次会话提到头痛"}],
+        verified_experiences="",
+    )
+
+    assert "上次会话提到头痛" in rendered
+    assert "相似度" not in rendered

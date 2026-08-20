@@ -1,4 +1,4 @@
-"""意图识别：判断用户输入是否涉及医疗/健康诉求，用于门控长期记忆检索。"""
+"""意图识别：判断用户输入是否涉及医疗/健康诉求。"""
 
 import asyncio
 import json
@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from mediZJ.core.llm_client import LLMClient
 from mediZJ.core.prompt_loader import PromptLoader
+from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
 
 # 合法意图取值
 _MEDICAL = "medical"
@@ -25,7 +26,7 @@ class IntentResult:
 
     @property
     def skip_long_term(self) -> bool:
-        """是否跳过 Mem0 长期记忆检索（仅非医疗输入跳过）。"""
+        """是否跳过医疗情景记忆检索。"""
         return self.intent == _OTHERS
 
 
@@ -33,7 +34,7 @@ class IntentClassifier:
     """基于 LLM 的意图识别器（纯 LLM 判断，无规则短路层）。
 
     医学安全优先：判断失败或不确定时一律降级为 medical（不跳过检索），
-    宁可多检索一次 Mem0，也不丢医疗问题。
+    宁可多执行一次医疗路由，也不丢失医疗问题。
     """
 
     def __init__(
@@ -61,7 +62,9 @@ class IntentClassifier:
                     [
                         {
                             "role": "system",
-                            "content": "你是医疗助手的意图识别模块，仅输出 JSON。",
+                            "content": PromptPrefixAssembler.global_prefix(
+                                "你是医疗助手的意图识别模块，仅输出 JSON。"
+                            ),
                         },
                         {"role": "user", "content": prompt},
                     ],

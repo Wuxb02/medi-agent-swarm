@@ -140,6 +140,104 @@ class SessionDB:
                 updated_at TEXT NOT NULL DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS user_memory_items (
+                memory_id         TEXT PRIMARY KEY,
+                user_id           TEXT NOT NULL,
+                memory_type       TEXT NOT NULL CHECK (
+                    memory_type IN ('profile_fact', 'medical_record')
+                ),
+                memory_key        TEXT NOT NULL,
+                value_json        TEXT NOT NULL,
+                status            TEXT NOT NULL CHECK (
+                    status IN (
+                        'pending', 'active', 'dismissed',
+                        'superseded', 'stale'
+                    )
+                ),
+                source_type       TEXT NOT NULL CHECK (
+                    source_type IN (
+                        'user_reported', 'clinician_confirmed',
+                        'report_extracted', 'model_inferred'
+                    )
+                ),
+                confidence        REAL NOT NULL DEFAULT 1.0,
+                sensitivity_level TEXT NOT NULL DEFAULT 'sensitive' CHECK (
+                    sensitivity_level IN (
+                        'normal', 'sensitive', 'highly_sensitive'
+                    )
+                ),
+                consent_scope     TEXT NOT NULL DEFAULT 'none' CHECK (
+                    consent_scope IN (
+                        'none', 'current_session', 'personalization'
+                    )
+                ),
+                source_message_id TEXT,
+                source_trace_id   TEXT,
+                effective_at      TEXT,
+                expires_at        TEXT,
+                revision          INTEGER NOT NULL DEFAULT 1,
+                supersedes_id     TEXT,
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                confirmed_at      TEXT,
+                FOREIGN KEY (user_id)
+                    REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_memory_active
+                ON user_memory_items(user_id, memory_type, memory_key)
+                WHERE status = 'active';
+            CREATE INDEX IF NOT EXISTS idx_user_memory_recall
+                ON user_memory_items(user_id, status, memory_type, memory_key);
+
+            CREATE TABLE IF NOT EXISTS episodic_summaries (
+                summary_id        TEXT PRIMARY KEY,
+                session_id        TEXT NOT NULL UNIQUE,
+                user_id           TEXT NOT NULL,
+                summary           TEXT NOT NULL,
+                resolved_entities TEXT NOT NULL DEFAULT '{}',
+                status            TEXT NOT NULL DEFAULT 'active' CHECK (
+                    status IN ('active', 'stale', 'expired')
+                ),
+                created_at        TEXT NOT NULL,
+                updated_at        TEXT NOT NULL,
+                expires_at        TEXT,
+                FOREIGN KEY (user_id)
+                    REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_episodic_user
+                ON episodic_summaries(user_id, status, updated_at);
+
+            CREATE TABLE IF NOT EXISTS memory_usage (
+                usage_id   TEXT PRIMARY KEY,
+                memory_id  TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                trace_id   TEXT,
+                agent_id   TEXT NOT NULL,
+                user_id    TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_usage_trace
+                ON memory_usage(trace_id, session_id);
+
+            CREATE TABLE IF NOT EXISTS memory_audit (
+                audit_id   TEXT PRIMARY KEY,
+                memory_id  TEXT,
+                user_id    TEXT NOT NULL,
+                action     TEXT NOT NULL,
+                actor_id   TEXT NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_profile_revisions (
+                user_id             TEXT PRIMARY KEY,
+                profile_revision    INTEGER NOT NULL DEFAULT 0,
+                profile_prefix_hash TEXT NOT NULL DEFAULT '',
+                updated_at          TEXT NOT NULL,
+                FOREIGN KEY (user_id)
+                    REFERENCES users(user_id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS users (
                 user_id             TEXT PRIMARY KEY,
                 username            TEXT NOT NULL,

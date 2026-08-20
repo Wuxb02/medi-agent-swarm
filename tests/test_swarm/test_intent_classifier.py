@@ -125,9 +125,6 @@ class TestRetrieveMemoriesGate:
         coordinator.short_term_memory = type("STM", (), {
             "get_recent_messages": AsyncMock(return_value=[{"role": "user", "content": "hi"}]),
         })()
-        coordinator.long_term_memory = type("LTM", (), {
-            "search_similar_sessions": AsyncMock(return_value=[{"memory_id": "m1"}]),
-        })()
         coordinator.personal_profile = type("PP", (), {"to_text": lambda self: "男，30岁"})()
         coordinator.intent_classifier = type("IC", (), {
             "classify": AsyncMock(return_value=IntentResult(
@@ -137,7 +134,7 @@ class TestRetrieveMemoriesGate:
         return coordinator
 
     @pytest.mark.asyncio
-    async def test_others_skips_mem0(self):
+    async def test_others_uses_unified_memory(self):
         from mediZJ.lgraph.supervisor_graph import retrieve_memories_with_intent_gate
 
         coordinator = self._make_coordinator(intent="others")
@@ -148,13 +145,12 @@ class TestRetrieveMemoriesGate:
             intent="others",
         )
 
-        coordinator.long_term_memory.search_similar_sessions.assert_not_awaited()
         coordinator.short_term_memory.get_recent_messages.assert_awaited_once()
         assert result["skip_long_term_retrieval"] is True
         assert result["similar_memories"] == []
 
     @pytest.mark.asyncio
-    async def test_medical_calls_mem0(self):
+    async def test_medical_uses_unified_memory(self):
         from mediZJ.lgraph.supervisor_graph import retrieve_memories_with_intent_gate
 
         coordinator = self._make_coordinator(intent="medical")
@@ -165,18 +161,14 @@ class TestRetrieveMemoriesGate:
             intent="medical",
         )
 
-        coordinator.long_term_memory.search_similar_sessions.assert_awaited_once()
         assert result["skip_long_term_retrieval"] is False
-        assert result["similar_memories"] == [{"memory_id": "m1"}]
+        assert result["similar_memories"] == []
 
     @pytest.mark.asyncio
-    async def test_mem0_failure_degrades_to_empty(self):
+    async def test_unified_memory_returns_empty_episodes(self):
         from mediZJ.lgraph.supervisor_graph import retrieve_memories_with_intent_gate
 
         coordinator = self._make_coordinator(intent="medical")
-        coordinator.long_term_memory.search_similar_sessions = AsyncMock(
-            side_effect=RuntimeError("mem0 down")
-        )
         result = await retrieve_memories_with_intent_gate(
             coordinator,
             session_id="s3",

@@ -24,7 +24,6 @@ dependencies = [
     "pydantic==2.10.0",
     "pydantic-settings==2.7.0",
     "pydantic-xml>=2.20.0",
-    "mem0ai==0.1.0",
     "redis==5.2.0",
     "qdrant-client==1.12.0",
     "pymilvus[model]>=2.3.0",
@@ -80,7 +79,7 @@ asyncio_mode = "auto"
 addopts = ["-v", "--strict-markers", "--tb=short"]
 markers = [
     "unit: 纯单元测试，无外部依赖",
-    "integration: 需要外部服务 (LLM/Mem0/Milvus/网络)",
+    "integration: 需要外部服务 (LLM/Milvus/Redis/网络)",
     "slow: 慢速测试 (真实 LLM 调用)",
 ]
 

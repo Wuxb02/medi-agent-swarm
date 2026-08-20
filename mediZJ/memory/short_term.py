@@ -101,7 +101,8 @@ class ShortTermMemory:
         storage_type: str = "memory",
         redis_config: Optional[Dict[str, Any]] = None,
         llm_client=None,
-        ttl_seconds: int = 3600
+        ttl_seconds: int = 3600,
+        enable_compression: bool = True,
     ):
         """
         初始化短期记忆管理器
@@ -127,7 +128,7 @@ class ShortTermMemory:
         self._initialized = True
 
         # Harness Engineering: 熵管理器
-        if ENTROPY_ENABLED:
+        if ENTROPY_ENABLED and enable_compression:
             embedding_client = load_embedding_model()
             self.entropy_manager = MemoryEntropyManager(embedding_client=embedding_client, llm_client=llm_client)
             logger.debug("✅ Entropy management enabled for short-term memory")

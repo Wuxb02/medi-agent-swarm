@@ -160,7 +160,7 @@ async def test_stream_timeout_returns_friendly_error(monkeypatch):
 
         def compose_result(self, question, result_state, start_time, session_id,
                            trace_id=None):
-            result_state["_ltm_save_task"] = None
+            result_state["_memory_save_task"] = None
             return result_state
 
     monkeypatch.setattr(cs, "SwarmCoordinator", SlowCoordinator)
@@ -225,7 +225,7 @@ async def test_multi_round_questionnaire_resume(monkeypatch):
 
         def compose_result(self, question, result_state, start_time, session_id,
                            trace_id=None):
-            result_state["_ltm_save_task"] = None
+            result_state["_memory_save_task"] = None
             return result_state
 
     monkeypatch.setattr(cs, "SwarmCoordinator", MultiRoundCoordinator)

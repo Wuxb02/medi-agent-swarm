@@ -88,30 +88,9 @@ def build_agent_subgraph(
 
     async def _prepare_messages(state: AgentState) -> dict:
         """初始化消息历史（替代 AgentLoop._initialize_messages）"""
-        messages = []
-
-        # 系统提示词（稳定版本，不含 Skill 指令，用于 KV cache 前缀）
-        system_prompt = worker.get_base_system_prompt_stable()
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-
-        # 用户档案
-        user_context = worker.user_context
-        if user_context:
-            messages.append({"role": "system", "content": f"## 用户档案\n{user_context}"})
-
-        # 历史对话（短期记忆）
         session_id = state.get("session_id", "")
         sub_session_id = state.get("sub_session_id", "")
         effective_id = sub_session_id or session_id
-
-        if (effective_id
-                and ":" not in effective_id
-                and worker.short_term_memory):
-            history = await worker.short_term_memory.get_history(effective_id, limit=5)
-            if history:
-                logger.info(f"加载 {len(history)} 条历史消息 (session={effective_id})")
-                messages.extend(history)
 
         # 用户输入：优先使用子任务描述，但若存在原始问题（含图片分析文本），作为上下文附加
         subtask_desc = state.get("subtask_description") or ""
@@ -126,8 +105,15 @@ def build_agent_subgraph(
             "subtask_type": state.get("subtask_type", ""),
             "session_id": effective_id,
         })
-
-        messages.append({"role": "user", "content": user_input})
+        memory_context = state.get("memory_context")
+        if memory_context is not None:
+            messages = memory_context.prompt_messages(question=user_input)
+        else:
+            messages = []
+            system_prompt = worker.get_base_system_prompt_stable()
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_input})
 
         # 记录用户消息到短期记忆
         if (worker.short_term_memory
@@ -135,7 +121,7 @@ def build_agent_subgraph(
             await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="user",
-                content=user_input,
+                content=question,
             )
 
         logger.info(
@@ -151,6 +137,27 @@ def build_agent_subgraph(
             "active_skill": None,
             "completed": False,
             "message_count": 1,  # user message counted
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_prompt_tokens": 0,
+                "cache_hit_ratio": None,
+                "global_prefix_hash": getattr(
+                    memory_context, "global_prefix_hash", ""
+                ),
+                "profile_prefix_hash": getattr(
+                    memory_context, "profile_prefix_hash", ""
+                ),
+                "global_prefix_version": getattr(
+                    memory_context, "global_prefix_version", ""
+                ),
+                "profile_revision": getattr(
+                    memory_context, "profile_revision", 0
+                ),
+                "call_type": getattr(memory_context, "call_type", ""),
+                "model": str(worker.llm_client.model_name),
+            },
         }
 
     async def _llm_call(state: AgentState) -> dict:
@@ -227,11 +234,24 @@ def build_agent_subgraph(
             }
 
         # 累加 token 用量
-        usage = state.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        usage = state.get("usage", {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_prompt_tokens": 0,
+        })
         if llm_response.usage:
             usage["prompt_tokens"] += llm_response.usage.get("prompt_tokens", 0)
             usage["completion_tokens"] += llm_response.usage.get("completion_tokens", 0)
             usage["total_tokens"] += llm_response.usage.get("total_tokens", 0)
+            cached = llm_response.usage.get("cached_prompt_tokens")
+            if cached is not None:
+                usage["cached_prompt_tokens"] += cached
+            usage["cache_hit_ratio"] = (
+                usage["cached_prompt_tokens"] / usage["prompt_tokens"]
+                if usage["prompt_tokens"]
+                else None
+            )
 
         # Thinking 内容推送
         if on_thinking and llm_response.reasoning_content:
