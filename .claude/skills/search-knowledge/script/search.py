@@ -70,6 +70,11 @@ async def search_knowledge(query: str, max_results: int = 5) -> Dict[str, Any]:
             "score": doc["score"],
             "snippet": content[:200] + ("..." if len(content) > 200 else ""),
             "content": content,
+            "document_id": metadata.get("document_id", metadata.get("doc_id", "")),
+            "version_id": metadata.get("version_id", ""),
+            "document_version": metadata.get("document_version", ""),
+            "chunk_uid": metadata.get("chunk_uid", ""),
+            "authority_level": metadata.get("authority_level", ""),
         })
 
     # Skill 的格式化输出

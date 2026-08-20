@@ -1,11 +1,9 @@
 # test/conftest.py - 共享 fixtures、markers、pytest 配置
 
 import asyncio
-import os
 import tempfile
-import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -25,6 +23,8 @@ def setup_env(request, monkeypatch):
     monkeypatch.setenv("LLM_MODEL_NAME", "test-model")
     monkeypatch.setenv("LLM_TEMPERATURE", "0.0")
     monkeypatch.setenv("LLM_MAX_TOKENS", "100")
+    monkeypatch.setenv("MEDICAL_SEMANTIC_VERIFY_ENABLED", "false")
+    monkeypatch.setenv("EVOLUTION_GLOBAL_MIN_SUPPORT", "3")
     monkeypatch.setenv("MEM0_API_KEY", "test-mem0-key")
     monkeypatch.setenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-zh-v1.5")
 

@@ -18,12 +18,45 @@ from mediZJ.core.questionnaire_manager import QuestionnaireManager
 from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
 from mediZJ.memory.session_db import SessionDB
 from mediZJ.memory.session_vector_store import SessionVectorStore
+from mediZJ.validation.medical_answer import MedicalAnswerVerifier
 
 # 事件持久化目录（与 SessionSummaryManager 一致）
 _SUMMARY_DIR = DEFAULT_SESSION_SUMMARY_DIR
 
 _session_db = SessionDB()
 _session_vectors: Optional[SessionVectorStore] = None
+_answer_verifier: Optional[MedicalAnswerVerifier] = None
+
+
+def _get_answer_verifier() -> MedicalAnswerVerifier:
+    """按需构建最终回答校验器。"""
+    global _answer_verifier
+    if _answer_verifier is None:
+        from mediZJ.core.llm_client import LLMClient
+
+        semantic_enabled = os.getenv(
+            "MEDICAL_SEMANTIC_VERIFY_ENABLED", "true"
+        ).lower() in {"1", "true", "yes"}
+        _answer_verifier = MedicalAnswerVerifier(
+            llm_client=LLMClient() if semantic_enabled else None
+        )
+    return _answer_verifier
+
+
+async def _verify_final_result(
+    question: str,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """在持久化和输出前执行唯一的安全门。"""
+    answer, verification = await _get_answer_verifier().verify_and_rewrite(
+        question,
+        result.get("answer", ""),
+        result.get("citations", []),
+    )
+    result["answer"] = answer
+    result["citations"] = verification.validated_citations
+    result["verification"] = verification.to_dict()
+    return result
 
 
 def _get_session_vectors() -> SessionVectorStore:
@@ -244,6 +277,7 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         )),
         timeout=_REQUEST_TIMEOUT,
     )
+    result = await _verify_final_result(question, result)
     # 等待长期记忆保存完成（最多 30 秒，超时降级不阻塞）
     ltm_task = result.get('_ltm_save_task')
     if ltm_task and not ltm_task.done():
@@ -284,6 +318,7 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
         citations=[
             Citation(**c) for c in result.get("citations", [])
         ],
+        verification=result.get("verification"),
     )
 
 
@@ -702,6 +737,7 @@ async def _chat_stream_impl(
 
     # 组装对外 result（含 LTM fire-and-forget，与 coordinator.process() 一致）
     result = coordinator.compose_result(question, result, start_time, session_id, trace_id=trace_id)
+    result = await _verify_final_result(question, result)
     await _finish_trace(result)
 
     # 6. 发送建议
@@ -734,6 +770,7 @@ async def _chat_stream_impl(
         "usage": result.get("usage", {}),
         "performance_metrics": result.get("performance_metrics", {}),
         "citations": result.get("citations", []),
+        "verification": result.get("verification"),
     }
     yield _json_line("done", done_data)
     collected_events.append({"event": "done", "data": done_data})
@@ -844,6 +881,7 @@ def _save_session_events(session_id: str, events: List[Dict[str, Any]], result: 
         "usage": result.get("usage", {}),
         "performance_metrics": result.get("performance_metrics", {}),
         "citations": result.get("citations", []),
+        "verification": result.get("verification"),
     }
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2, default=str)

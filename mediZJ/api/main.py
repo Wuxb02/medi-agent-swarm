@@ -12,6 +12,7 @@ from mediZJ.api.routers import (
     chat,
     dashboard,
     evolution,
+    governance,
     knowledge,
     personal,
     sessions,
@@ -86,6 +87,7 @@ app.include_router(dashboard.router)
 app.include_router(personal.router)
 app.include_router(traces.router)
 app.include_router(evolution.router)
+app.include_router(governance.router)
 
 
 @app.on_event("startup")
@@ -94,6 +96,9 @@ async def start_evolution_worker():
     from mediZJ.evolution import EvolutionService
 
     await EvolutionService().start()
+    from mediZJ.memory.lifecycle import start_lifecycle_worker
+
+    await start_lifecycle_worker()
 
 
 @app.on_event("shutdown")
@@ -102,6 +107,9 @@ async def stop_evolution_worker():
     from mediZJ.evolution import EvolutionService
 
     await EvolutionService().stop()
+    from mediZJ.memory.lifecycle import stop_lifecycle_worker
+
+    await stop_lifecycle_worker()
 
 # 上传目录通过鉴权路由提供，避免患者图片公开暴露
 _uploads_path = _PROJECT_ROOT / "mediZJ" / "data" / "uploads"

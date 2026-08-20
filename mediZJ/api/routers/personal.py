@@ -118,6 +118,13 @@ async def update_personal_info(
     profile_manager = _get_profile(user)
     info_dict = {item.key: item.value for item in body.items if item.key.strip()}
     profile_manager.save(info_dict)
+    from mediZJ.memory.lineage import MemoryLineageStore
+
+    lineage = MemoryLineageStore(profile_manager._db.db_path)
+    for key, value in info_dict.items():
+        lineage.record(
+            user["user_id"], "profile", f"{key}:{value}", "user_reported"
+        )
 
     items = [PersonalInfoItem(key=k, value=v) for k, v in info_dict.items()]
 

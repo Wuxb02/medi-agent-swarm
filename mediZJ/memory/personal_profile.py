@@ -500,6 +500,14 @@ class PersonalProfile:
                     confidence=confidence,
                 ))
                 existing_keys.add((key, value))
+                from mediZJ.memory.lineage import MemoryLineageStore
+
+                MemoryLineageStore(self._db.db_path).record(
+                    self.user_id,
+                    "profile_pending",
+                    f"{key}:{value}",
+                    "model_inferred",
+                )
                 logger.info(f"  [Pending] {key}：{value}（置信度：{confidence}）")
 
             self.save_pending(existing)
@@ -530,6 +538,14 @@ class PersonalProfile:
                     outcome=item.get("outcome", ""),
                 ))
                 existing_keys.add(("病史", desc))
+                from mediZJ.memory.lineage import MemoryLineageStore
+
+                MemoryLineageStore(self._db.db_path).record(
+                    self.user_id,
+                    "profile_pending_record",
+                    f"{rec_date}:{desc}",
+                    "model_inferred",
+                )
                 logger.info(f"  [Pending-Record] [{rec_date}] {desc}")
 
             self.save_pending(existing)

@@ -14,6 +14,13 @@ class Citation(BaseModel):
     score: float = 0.0
     snippet: str = ""
     content: str = ""
+    document_id: str = ""
+    version_id: str = ""
+    document_version: str = ""
+    chunk_uid: str = ""
+    effective_at: Optional[str] = None
+    authority_level: str = ""
+    validation_status: str = "legacy"
 
 
 class ChatRequest(BaseModel):
@@ -42,6 +49,7 @@ class ChatResponse(BaseModel):
     timeout_occurred: bool = False
     usage: Dict[str, int] = {}  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
     citations: List[Citation] = []
+    verification: Optional[Dict[str, Any]] = None
 
 
 class MessageItem(BaseModel):

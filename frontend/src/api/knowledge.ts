@@ -1,5 +1,5 @@
 import api from './client'
-import type { DocumentSummary, ChunkDetail } from '../types'
+import type { ChunkDetail, DocumentSummary, DocumentVersion, KnowledgeConflict } from '../types'
 
 export interface KnowledgeSearchRequest {
   query: string
@@ -67,5 +67,44 @@ export async function updateDocument(
     disease,
     source,
   })
+  return data
+}
+
+export async function getDocumentVersions(docId: string): Promise<DocumentVersion[]> {
+  const { data } = await api.get(`/knowledge/documents/${encodeURIComponent(docId)}/versions`)
+  return data.items
+}
+
+export async function activateDocumentVersion(docId: string, versionId: string) {
+  const { data } = await api.post(
+    `/knowledge/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(versionId)}/activate`,
+  )
+  return data
+}
+
+export async function getKnowledgeConflicts(
+  status?: KnowledgeConflict['review_status'],
+): Promise<KnowledgeConflict[]> {
+  const { data } = await api.get('/governance/conflicts', { params: { status } })
+  return data.items
+}
+
+export async function reviewKnowledgeConflict(
+  conflictId: string,
+  action: 'confirmed' | 'dismissed' | 'resolved',
+) {
+  const { data } = await api.post(`/governance/conflicts/${conflictId}/${action}`)
+  return data
+}
+
+export async function pruneExpiredData() {
+  const { data } = await api.post('/governance/lifecycle/prune')
+  return data
+}
+
+export async function deleteUserData(userId: string) {
+  const { data } = await api.post(
+    `/governance/lifecycle/users/${encodeURIComponent(userId)}/delete`,
+  )
   return data
 }

@@ -516,7 +516,8 @@ def build_supervisor_graph(
                 worker,
                 agent_id,
                 event_callback,
-                stream_final_content=True,
+                # 最终内容需先通过统一医疗安全校验。
+                stream_final_content=False,
             )
 
         # Trace: AGENT span
@@ -577,12 +578,6 @@ def build_supervisor_graph(
             if ref_section:
                 reference_text = "\n" + ref_section
                 final_answer += reference_text
-                if event_callback:
-                    event_callback(Event(
-                        type=EventType.AGENT_CONTENT_DELTA,
-                        source_agent=agent_id,
-                        data={"token": reference_text, "is_final": True},
-                    ))
 
         # 子会话合并到主会话
         await coordinator.short_term_memory.add_message(
@@ -894,7 +889,8 @@ def build_supervisor_graph(
             question=state["question"],
             shared_context=shared_ctx,
             timeout_occurred=timeout_occurred,
-            event_callback=event_callback,
+            # 未校验的综合答案不对外流式发送。
+            event_callback=None,
         )
 
         if event_callback:
@@ -907,12 +903,6 @@ def build_supervisor_graph(
             if ref_section:
                 reference_text = "\n" + ref_section
                 final_answer += reference_text
-                if event_callback:
-                    event_callback(Event(
-                        type=EventType.AGENT_CONTENT_DELTA,
-                        source_agent="lead_agent",
-                        data={"token": reference_text, "is_final": True},
-                    ))
 
         # 合并子会话到主会话
         for agent_id, contribs in contributions.items():

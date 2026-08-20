@@ -132,6 +132,14 @@ defineExpose({ popoverRef })
           <span v-if="cite.disease">疾病：{{ cite.disease }}</span>
           <span v-if="cite.type">类型：{{ cite.type }}</span>
           <span v-if="cite.filename" class="truncate max-w-[200px]">文件：{{ cite.filename }}</span>
+          <span v-if="cite.document_version">版本：v{{ cite.document_version }}</span>
+          <span v-if="cite.validation_status === 'valid'" class="text-emerald-600">已校验</span>
+        </div>
+        <div
+          v-if="cite.conflicts?.length"
+          class="mt-2 rounded-md bg-amber-50 px-2 py-1.5 text-xs text-amber-700"
+        >
+          该来源存在待审核的医学知识差异，请结合适用人群并咨询专业医生。
         </div>
       </div>
     </div>

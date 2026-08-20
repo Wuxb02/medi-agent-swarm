@@ -280,6 +280,14 @@ export interface Citation {
   score: number
   snippet: string
   content: string
+  document_id?: string
+  version_id?: string
+  document_version?: string
+  chunk_uid?: string
+  effective_at?: string | null
+  authority_level?: string
+  validation_status?: string
+  conflicts?: KnowledgeConflict[]
 }
 
 export interface DocumentSummary {
@@ -289,6 +297,30 @@ export interface DocumentSummary {
   disease: string
   source: string
   chunk_count: number
+  version_id?: string
+  document_version?: string
+  status?: string
+}
+
+export interface DocumentVersion {
+  version_id: string
+  document_id: string
+  version: number
+  status: 'indexing' | 'active' | 'archived' | 'failed'
+  created_at: string
+  activated_at?: string | null
+  error?: string | null
+}
+
+export interface KnowledgeConflict {
+  conflict_id: string
+  conflict_type: string
+  confidence: number
+  explanation: string
+  detection_status: 'completed' | 'failed'
+  review_status: 'pending' | 'confirmed' | 'dismissed' | 'resolved'
+  error?: string | null
+  created_at: string
 }
 
 export interface ChunkDetail {

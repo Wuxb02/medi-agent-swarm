@@ -35,12 +35,12 @@ python mediZJ/main.py -v       # 详细日志模式
 uv run python mediZJ/api_main.py                      # 后端 API，默认 8000 端口
 cd frontend && npm install && npm run dev      # 前端，http://localhost:5173
 
-# 运行测试（328 个单元测试 + 14 个集成测试）
+# 运行测试（351 个单元测试 + 14 个集成/慢速测试）
 # 单元测试默认执行；集成测试因依赖真实 LLM/Milvus/Mem0 默认跳过，
 # 传 --run-integration 启用。集成测试依赖 .env 中的 LLM_API_KEY / LLM_BASE_URL 配置。
 pytest tests/ -m "not integration"                     # 仅单元测试（快速，无需外部服务）
 pytest tests/ -m "integration" --run-integration       # 仅集成测试（需要 .env 配置）
-pytest tests/ --run-integration                        # 全部测试（342 个）
+pytest tests/ --run-integration                        # 全部测试（365 个）
 pytest tests/ -m "not integration" --cov --cov-report=html  # 覆盖率报告
 
 # 运行评估（5 项指标）
@@ -76,7 +76,7 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
   │
   ├─ LeadAgent.assess_and_decompose()  ← 判断复杂度并分解
   │
-  ├─ 1 个子任务 → Worker 通过 AgentSubGraph 执行（隔离子会话）→ 最终回答
+  ├─ 1 个子任务 → Worker 通过 AgentSubGraph 执行（隔离子会话）
   │
   └─ ≥2 个子任务 → Swarm 模式
        ├─ LeadAgent.create_subtasks()   ← 创建 SubTask 写入 SharedContext
@@ -84,7 +84,12 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
        │    ├─ consultation_agent (健康咨询)
        │    ├─ diagnostic_agent (症状诊断)
        │    └─ research_agent (医学研究)
-       └─ LeadAgent.synthesize_results() ← 汇总结果 → 最终回答
+       └─ LeadAgent.synthesize_results() ← 汇总结果
+  │
+  └─ 统一输出安全验证：确定性检查 → 引用校验 → LLM 语义验证
+       ├─ 通过 → 保存消息并返回客户端
+       ├─ 首次失败 → 仅重做答案综合（最多一次）
+       └─ 再次失败 → 固定保守回答和就医建议
 ```
 
 每个 Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，内部运行 `AgentSubGraph`（LangGraph 状态图：Think-Act-Observe 循环），每次最多执行 2 次工具调用。所有 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），无历史上下文。
@@ -148,18 +153,24 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 | `mediZJ/memory/session_db.py` | SQLite 会话数据库（sessions + messages + profiles 表） |
 | `mediZJ/memory/session_vector_store.py` | Milvus 会话向量索引（session_summaries 集合） |
 | `mediZJ/memory/personal_profile.py` | 个人健康档案（SQLite `profiles` 表，md 文本整体入库） |
+| `mediZJ/memory/lineage.py` | 非自进化记忆来源血缘：来源分类、有效期、stale/revoked 状态与文档联动失效 |
+| `mediZJ/memory/lifecycle.py` | 非自进化数据生命周期：TTL、用户删除作业、外部清理重试和无正文审计 |
 | `mediZJ/memory/embedding.py` | 共享 embedding 工具（BAAI/bge-small-zh-v1.5，512 维） |
 | `mediZJ/knowledge/milvus_kb.py` | Milvus Lite 向量知识库（单例）— 三路混合检索：Dense + BM25 + Entity Boost |
+| `mediZJ/knowledge/catalog.py` | SQLite 知识目录：逻辑文档/物理版本、原子激活、归档、冲突及清理作业元数据 |
+| `mediZJ/knowledge/conflict_detector.py` | active 医学知识候选冲突检测，只生成待审核记录，不自动裁决或归档 |
 | `mediZJ/knowledge/entity_index.py` | 轻量级医学实体倒排索引：jieba 自抽取 + 内存映射，支持查询时精确命中加权 |
 | `mediZJ/research/deep_research_workflow.py` | 多步骤研究流水线 |
 | `mediZJ/constraints/validator.py` | 运行时约束验证（工具权限、输出质量） |
 | `mediZJ/validation/auto_fixer.py` | 自动修复违规输出（高危警告、截断等） |
+| `mediZJ/validation/medical_answer.py` | 版本化引用校验与统一医疗回答 Verifier，支持一次有限重写和安全降级 |
 | `mediZJ/trace/` | 全链路追踪：Span 模型、收集器、聚合分析、SQLite 持久化 |
 | `mediZJ/evolution/service.py` | 自进化编排：反馈入队、异步评审 worker、运行时经验检索、确定性采样与观察分流 |
 | `mediZJ/evolution/judge.py` | `ConversationJudge`：真实对话 LLM 评审器（医疗安全七维量表 + 评分封顶 + 经验脱敏/过期控制） |
 | `mediZJ/evolution/storage.py` | 自进化 SQLite 存储：反馈/评审/失败/经验/发布版本/任务的全生命周期与回滚 |
 | `mediZJ/evolution/source_catalog.py` | 失败归因的安全源码追溯目录（白名单映射 + 源码片段读取） |
 | `mediZJ/api/routers/evolution.py` | `/api/evolution` 路由：反馈、评审、经验流转、发布回滚、任务重试 |
+| `mediZJ/api/routers/governance.py` | `/api/governance` 路由：数据清理作业、失败重试、知识冲突查询与人工审核 |
 
 ### 关键设计模式
 
@@ -180,7 +191,7 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 
 ### 知识库 — 三路混合检索
 
-`MedicalKnowledgeBase.search()` 内部采用 **Dense + BM25 + Entity Boost** 三路融合，对外签名不变，所有 Skill 无需改动。
+`MedicalKnowledgeBase.search()` 内部采用 **Dense + BM25 + Entity Boost** 三路融合，对外签名不变，所有 Skill 无需改动。检索结果还会经过 `KnowledgeCatalog` 过滤，只返回 active 且未过期的文档版本。
 
 | 路径 | 方法 | 说明 |
 | --- | --- | --- |
@@ -188,7 +199,9 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 | Path 2 — BM25 | Milvus 内置 BM25 Function → SPARSE_INVERTED_INDEX | 稀疏关键词检索 |
 | Path 3 — Entity | jieba 分词 + 内存倒排索引 | 医学实体精确命中加权 |
 
-融合：Milvus RRF (Path 1+2, k=60) + App-level Entity Boost (+0.15)，最终 `min(RRF_norm + entity_bonus × 0.15, 1.0)`。按 `doc_id` 去重保留最高分。
+融合：Milvus RRF (Path 1+2, k=60) + App-level Entity Boost (+0.15)，最终 `min(RRF_norm + entity_bonus × 0.15, 1.0)`。按逻辑文档 ID 去重保留最高分；每个 chunk 携带 `version_id`、`document_version` 和全局唯一 `chunk_uid`。
+
+文档更新采用两阶段切换：先在 Catalog 创建 `indexing` 版本并写入 Milvus，全部 chunk 成功后再在 SQLite 事务中激活新版本和归档旧版本。写入失败时清理新 chunks 并标记 `failed`，旧 active 版本继续提供检索。普通删除仅归档，超过保留期的物理清理由生命周期作业执行。
 
 `MedicalEntityIndex`（`mediZJ/knowledge/entity_index.py`）：启动时从 Milvus 全量文档自抽取实体（中文字符 2-12 字、ICD 编码、药品后缀），构建 `entity → Set[doc_id]` 内存倒排；文档增删时增量同步。
 
@@ -197,7 +210,7 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 `[N]` `[N,M]` 可点击引用标注。
 
 **后端链路**：
-- 三个 RAG Skill（`search-knowledge` / `clinical-guideline` / `deep-research`）统一返回结构化 `references` 数组：`[{index, doc_id, source, disease, type, filename, score, snippet, content}]`
+- 三个 RAG Skill（`search-knowledge` / `clinical-guideline` / `deep-research`）统一返回结构化 `references` 数组；除旧字段外，新增 `document_id`、`version_id`、`document_version`、`chunk_uid`、`effective_at`、`authority_level` 和 `validation_status`
 - `ToolExecutor`（`mediZJ/lgraph/tool_executor.py`）工具执行后自动收集 references，按 `doc_id` 去重，附入 Worker 最终 result
 - `SwarmCoordinator`：单 Agent 直接透传；Swarm 模式跨 Worker 收集 → 去重 → 重编号 → 替换贡献文本旧编号
 - `synthesis.j2` 指示 LeadAgent 保留引用编号
@@ -208,7 +221,15 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 - `CitationPopover.vue`：Teleport 浮层，scroll/resize 实时跟随引用位置，外部点击关闭，固定高度滚动区展示 chunk 全文 + 来源/疾病/类型/相关度
 - `ChatMessage.vue`：集成点击事件驱动 Popover
 
-**持久化**：`messages` 表新增 `citations TEXT` 列（自动迁移），`save_turn` 写入 / `get_session` 反序列化；历史会话加载后引用标注仍可点击。
+**验证与持久化**：`CitationValidator` 根据 Catalog 和原始 chunk 拒绝伪造、错版本、归档或过期引用；有效引用形成版本快照。`messages` 表的 `citations TEXT` 保存快照，旧 Citation 数据仍可反序列化；原始未通过安全验证的回答不会被保存或发送。
+
+### 数据治理与冲突审核
+
+- 非自进化记忆统一记录 `user_reported`、`model_inferred`、`conversation_summary` 或 `authoritative_document` 来源；只有权威文档来源可以支撑医学事实。
+- 文档归档、过期或撤销时，关联的非自进化记忆转为 stale，注入 Agent 前会重新校验来源状态。
+- `DataLifecycleService` 以持久化作业协调会话、摘要、checkpoint、向量、Mem0、个人档案和用户关联 Trace 清理；外部失败可查询和重试，审计不保存医疗正文。
+- `MedicalConflictDetector` 在版本激活后异步生成冲突候选。管理员可确认、驳回或标记解决；未解决冲突会进入在线 Verifier，上层回答必须披露版本与适用条件。
+- 上述治理流程明确排除自进化评审、失败案例、learned experiences、发布版本和观察实验，不写入或触发进化经验。
 
 ### Prompt 管理
 

@@ -1,12 +1,12 @@
 """知识库服务：封装 MedicalKnowledgeBase 搜索"""
 import hashlib
-import json
 import re
 from pathlib import Path
 from typing import List, Optional
 from loguru import logger
 
 from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
+from mediZJ.knowledge.catalog import KnowledgeCatalog
 from mediZJ.api.models.knowledge import (
     KnowledgeItem, KnowledgeTypeInfo,
     DocumentSummary, DocumentListResponse,
@@ -48,20 +48,34 @@ def search_knowledge(
     """搜索知识库"""
     try:
         kb = MedicalKnowledgeBase()
+        catalog = _catalog_with_legacy(kb)
         results = kb.search(
             query=query,
-            top_k=top_k,
+            top_k=max(top_k * 4, 20),
             filter_type=filter_type
         )
-        return [
-            KnowledgeItem(
-                id=str(r.get("id", "")),
-                content=r.get("content", ""),
-                metadata=r.get("metadata", {}),
-                score=r.get("score", 0.0)
+        active_results = []
+        for result in results:
+            metadata = result.get("metadata", {})
+            document_id = metadata.get("doc_id", "")
+            version_id = metadata.get("version_id") or metadata.get(
+                "physical_doc_id", document_id
             )
-            for r in results
-        ]
+            version = catalog.active_by_version(version_id)
+            if not version:
+                continue
+            metadata.update(_version_metadata(version))
+            active_results.append(
+                KnowledgeItem(
+                    id=str(result.get("id", "")),
+                    content=result.get("content", ""),
+                    metadata=metadata,
+                    score=result.get("score", 0.0),
+                )
+            )
+            if len(active_results) >= top_k:
+                break
+        return active_results
     except Exception as e:
         logger.error(f"Knowledge search error: {e}")
         return []
@@ -75,8 +89,7 @@ def get_knowledge_types() -> List[KnowledgeTypeInfo]:
 def get_knowledge_base_size() -> int:
     """获取知识库文档数量"""
     try:
-        kb = MedicalKnowledgeBase()
-        return kb.count_documents()
+        return len(_catalog_with_legacy(MedicalKnowledgeBase()).list_active())
     except Exception:
         return 0
 
@@ -84,24 +97,49 @@ def get_knowledge_base_size() -> int:
 def list_all_documents() -> DocumentListResponse:
     """获取知识库文档列表"""
     kb = MedicalKnowledgeBase()
-    docs = kb.list_documents()
-    summaries = [DocumentSummary(**d) for d in docs]
+    catalog = _catalog_with_legacy(kb)
+    summaries = []
+    for version in catalog.list_active():
+        chunks = kb.get_document_chunks(version["version_id"])
+        summaries.append(
+            DocumentSummary(
+                doc_id=version["document_id"],
+                filename=version["filename"],
+                type=version["doc_type"],
+                disease=version["disease"],
+                source=version["source"],
+                chunk_count=len(chunks),
+                version_id=version["version_id"],
+                document_version=str(version["version"]),
+                status=version["status"],
+            )
+        )
     return DocumentListResponse(documents=summaries, total=len(summaries))
 
 
 def get_document_chunks(doc_id: str) -> DocumentChunksResponse:
     """获取文档的所有分块"""
     kb = MedicalKnowledgeBase()
-    chunks = kb.get_document_chunks(doc_id)
+    version = _catalog_with_legacy(kb).active_version(doc_id)
+    chunks = kb.get_document_chunks(version["version_id"]) if version else []
     details = [ChunkDetail(**c) for c in chunks]
     return DocumentChunksResponse(doc_id=doc_id, chunks=details, total=len(details))
 
 
 def delete_document(doc_id: str) -> DocumentDeleteResponse:
-    """删除文档"""
+    """归档文档，保留历史版本和引用快照。"""
     kb = MedicalKnowledgeBase()
-    count = kb.delete_document(doc_id)
-    return DocumentDeleteResponse(doc_id=doc_id, chunks_deleted=count)
+    catalog = _catalog_with_legacy(kb)
+    version = catalog.active_version(doc_id)
+    count = len(kb.get_document_chunks(version["version_id"])) if version else 0
+    catalog.archive_document(doc_id)
+    if version:
+        from mediZJ.memory.lineage import MemoryLineageStore
+
+        MemoryLineageStore().invalidate_document(doc_id, "document_archived")
+    return DocumentDeleteResponse(
+        doc_id=doc_id, chunks_deleted=count, message="archived"
+    )
 
 
 def upload_document(
@@ -112,14 +150,9 @@ def upload_document(
     source: str = "用户上传",
 ) -> DocumentUploadResponse:
     """上传文档到知识库"""
-    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     safe_name = re.sub(r'[^\w]', '_', Path(filename).stem)
     doc_id = f"{doc_type}_{safe_name}"
-
-    kb = MedicalKnowledgeBase()
-
-    if kb.document_exists_by_hash(content_hash):
-        raise ValueError(f"内容相同的文档已存在: {filename}")
 
     metadata = {
         "type": doc_type,
@@ -127,15 +160,17 @@ def upload_document(
         "source": source,
         "filename": filename,
         "content_hash": content_hash,
+        "authority_level": "authoritative" if doc_type == "clinical_guideline" else "user",
     }
-    doc = {"id": doc_id, "content": content, "metadata": metadata}
-    chunks_added = kb.add_documents([doc])
+    chunks_added, version = _ingest_version(doc_id, content, metadata)
 
     return DocumentUploadResponse(
         doc_id=doc_id,
         filename=filename,
         type=doc_type,
         chunks_added=chunks_added,
+        version_id=version["version_id"],
+        document_version=str(version["version"]),
     )
 
 
@@ -148,32 +183,92 @@ def update_document(
 ) -> DocumentUploadResponse:
     """更新知识库文档"""
     kb = MedicalKnowledgeBase()
-
-    existing = kb.get_document_chunks(doc_id)
-    if not existing:
+    catalog = _catalog_with_legacy(kb)
+    active = catalog.active_version(doc_id)
+    if not active:
         raise ValueError(f"Document not found: {doc_id}")
 
-    # 从已有 chunk 获取原始元数据
-    old_meta_row = kb.milvus_client.query(
-        collection_name=kb.collection_name,
-        filter=f'doc_id == "{doc_id}"',
-        output_fields=["doc_type", "disease", "source", "filename"],
-        limit=1
-    )
-    old_meta = old_meta_row[0] if old_meta_row else {}
-
     metadata = {
-        "type": doc_type or old_meta.get("doc_type", "general"),
-        "disease": disease or old_meta.get("disease", ""),
-        "source": source or old_meta.get("source", "用户上传"),
-        "filename": old_meta.get("filename", ""),
+        "type": doc_type or active["doc_type"],
+        "disease": disease or active["disease"],
+        "source": source or active["source"],
+        "filename": active["filename"],
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "authority_level": active["authority_level"],
     }
-
-    chunks_added = kb.update_document(doc_id, content, metadata)
+    chunks_added, version = _ingest_version(doc_id, content, metadata)
     return DocumentUploadResponse(
         doc_id=doc_id,
         filename=metadata["filename"],
         type=metadata["type"],
         chunks_added=chunks_added,
         message="updated",
+        version_id=version["version_id"],
+        document_version=str(version["version"]),
     )
+
+
+def list_document_versions(doc_id: str) -> list[dict]:
+    """列出文档版本链。"""
+    return _catalog_with_legacy(MedicalKnowledgeBase()).list_versions(doc_id)
+
+
+def activate_document_version(doc_id: str, version_id: str) -> dict:
+    """激活已完整入库的历史版本。"""
+    catalog = _catalog_with_legacy(MedicalKnowledgeBase())
+    version = catalog.get_version(version_id)
+    if not version or version["document_id"] != doc_id:
+        raise LookupError("文档版本不存在")
+    if version["status"] in {"failed", "indexing"}:
+        raise ValueError("未完成入库的版本不能激活")
+    return catalog.activate(version_id)
+
+
+def _ingest_version(
+    document_id: str,
+    content: str,
+    metadata: dict,
+) -> tuple[int, dict]:
+    kb = MedicalKnowledgeBase()
+    catalog = _catalog_with_legacy(kb)
+    pending = catalog.begin_version(document_id, metadata["content_hash"], metadata)
+    version_metadata = {
+        **metadata,
+        "document_id": document_id,
+        "version_id": pending["version_id"],
+        "document_version": pending["version"],
+    }
+    try:
+        chunks_added = kb.add_documents(
+            [{"id": pending["version_id"], "content": content, "metadata": version_metadata}]
+        )
+        active = catalog.activate(pending["version_id"])
+        if pending.get("supersedes_version_id"):
+            from mediZJ.memory.lineage import MemoryLineageStore
+
+            MemoryLineageStore().invalidate_document(
+                document_id, "document_superseded"
+            )
+    except Exception as exc:
+        kb.delete_document(pending["version_id"])
+        catalog.mark_failed(pending["version_id"], str(exc))
+        raise
+    return chunks_added, active
+
+
+def _catalog_with_legacy(kb: MedicalKnowledgeBase) -> KnowledgeCatalog:
+    catalog = KnowledgeCatalog()
+    for document in kb.list_documents():
+        catalog.register_legacy(document)
+    return catalog
+
+
+def _version_metadata(version: dict) -> dict:
+    return {
+        "doc_id": version["document_id"],
+        "document_id": version["document_id"],
+        "version_id": version["version_id"],
+        "document_version": str(version["version"]),
+        "effective_at": version["effective_at"],
+        "authority_level": version["authority_level"],
+    }

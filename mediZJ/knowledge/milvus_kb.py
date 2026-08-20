@@ -25,6 +25,7 @@ from pymilvus import (
     Function, FunctionType,
 )
 from mediZJ.knowledge.entity_index import MedicalEntityIndex
+from mediZJ.knowledge.catalog import KnowledgeCatalog
 from mediZJ.memory.embedding import load_embedding_model
 
 COLLECTION_NAME = "medical_knowledge_v2"
@@ -101,6 +102,11 @@ class MedicalKnowledgeBase:
         # ---- Entity Index ----
         self.entity_index = MedicalEntityIndex()
         self._build_entity_index()
+
+        # 幂等登记旧库，使所有检索入口共用 active 事实边界。
+        catalog = KnowledgeCatalog()
+        for document in self.list_documents():
+            catalog.register_legacy(document)
 
         self._initialized = True
 
@@ -220,13 +226,17 @@ class MedicalKnowledgeBase:
         )
 
         # 分块
-        all_chunks = []
+        all_chunks: List[Dict[str, Any]] = []
         for doc in documents:
             chunks = self._chunk_text(doc["content"], chunk_size=chunk_size)
             meta = doc.get("metadata", {})
             for i, chunk in enumerate(chunks):
                 all_chunks.append({
                     "doc_id": doc["id"],
+                    "document_id": meta.get("document_id", doc["id"]),
+                    "version_id": meta.get("version_id", doc["id"]),
+                    "document_version": str(meta.get("document_version", "1")),
+                    "chunk_uid": f"{meta.get('version_id', doc['id'])}:{i}",
                     "doc_type": meta.get("type", ""),
                     "chunk_id": i,
                     "total_chunks": len(chunks),
@@ -244,10 +254,14 @@ class MedicalKnowledgeBase:
         vectors = self.embedding_model.encode(texts, show_progress_bar=True)
 
         # 组装插入数据
-        data = []
+        data: List[Dict[str, Any]] = []
         for i, chunk in enumerate(all_chunks):
             entry: Dict[str, Any] = {
                 "doc_id": chunk["doc_id"],
+                "document_id": chunk["document_id"],
+                "version_id": chunk["version_id"],
+                "document_version": chunk["document_version"],
+                "chunk_uid": chunk["chunk_uid"],
                 "doc_type": chunk["doc_type"],
                 "chunk_id": chunk["chunk_id"],
                 "total_chunks": chunk["total_chunks"],
@@ -315,7 +329,9 @@ class MedicalKnowledgeBase:
             limit=top_k * 3,
             output_fields=[
                 "id", "doc_id", "doc_type", "chunk_id",
-                "total_chunks", "text",
+                "total_chunks", "text", "document_id", "version_id",
+                "document_version", "chunk_uid", "disease", "source",
+                "filename", "content_hash",
             ],
         )
 
@@ -375,6 +391,15 @@ class MedicalKnowledgeBase:
                     t.tool_attrs.result_summary = json.dumps({"error": str(e)}, ensure_ascii=False)
                 return []
 
+            catalog = KnowledgeCatalog()
+            hits = [
+                hit for hit in hits
+                if catalog.active_by_version(
+                    hit.get("entity", {}).get("version_id")
+                    or hit.get("entity", {}).get("doc_id", "")
+                )
+            ]
+
             # Step 3: RRF 线性动态映射 + Entity Boost 融合
             ENTITY_BONUS_COEFFICIENT = 0.15
             RRF_K = 60
@@ -386,19 +411,22 @@ class MedicalKnowledgeBase:
 
             scoring_detail = []
             for hit in hits:
-                doc_id = hit.get("entity", {}).get("doc_id", "")
-                hit["_doc_id"] = doc_id
+                entity = hit.get("entity", {})
+                physical_doc_id = entity.get("doc_id", "")
+                document_id = entity.get("document_id") or physical_doc_id
+                hit["_doc_id"] = document_id
+                hit["_physical_doc_id"] = physical_doc_id
                 hit["_text"] = hit.get("entity", {}).get("text", "")
 
                 raw_rrf = hit.get("distance", 0.0)
                 # 进行比例归一化缩放
                 normalized_rrf = raw_rrf / normalization_factor if normalization_factor > 0 else raw_rrf
-                bonus = entity_boost.get(doc_id, 0.0) * ENTITY_BONUS_COEFFICIENT
+                bonus = entity_boost.get(document_id, 0.0) * ENTITY_BONUS_COEFFICIENT
 
                 # 融合最终得分
                 hit["final_score"] = min(normalized_rrf + bonus, 1.0)
                 scoring_detail.append({
-                    "doc_id": doc_id,
+                    "doc_id": document_id,
                     "raw_rrf": round(raw_rrf, 6),
                     "normalized_rrf": round(normalized_rrf, 4),
                     "entity_bonus": round(bonus, 4),
@@ -421,6 +449,14 @@ class MedicalKnowledgeBase:
                         "content": hit["_text"],
                         "metadata": {
                             "doc_id": doc_id,
+                            "physical_doc_id": hit.get("_physical_doc_id", doc_id),
+                            "version_id": hit.get("entity", {}).get("version_id", ""),
+                            "document_version": hit.get("entity", {}).get("document_version", ""),
+                            "chunk_uid": hit.get("entity", {}).get("chunk_uid", ""),
+                            "disease": hit.get("entity", {}).get("disease", ""),
+                            "source": hit.get("entity", {}).get("source", ""),
+                            "filename": hit.get("entity", {}).get("filename", ""),
+                            "content_hash": hit.get("entity", {}).get("content_hash", ""),
                             "type": hit.get("entity", {}).get("doc_type", ""),
                         },
                         "score": round(score, 4),
@@ -435,7 +471,8 @@ class MedicalKnowledgeBase:
             for doc in top_docs:
                 doc_id = doc["metadata"].get("doc_id", "")
                 if doc_id:
-                    full_chunks = self.get_document_chunks(doc_id)
+                    physical_id = doc["metadata"].get("physical_doc_id", doc_id)
+                    full_chunks = self.get_document_chunks(physical_id)
                     if full_chunks:
                         doc["content"] = "\n".join(
                             c["content"] for c in full_chunks
@@ -547,7 +584,8 @@ class MedicalKnowledgeBase:
                 output_fields=[
                     "id", "chunk_id", "total_chunks", "text",
                     "doc_type", "disease", "source", "filename",
-                    "content_hash",
+                    "content_hash", "document_id", "version_id",
+                    "document_version", "chunk_uid",
                 ],
                 limit=16384,
             )
@@ -569,6 +607,10 @@ class MedicalKnowledgeBase:
                 "total_chunks": row.get("total_chunks", 0),
                 "metadata": {
                     "doc_id": doc_id,
+                    "document_id": row.get("document_id") or doc_id,
+                    "version_id": row.get("version_id") or doc_id,
+                    "document_version": row.get("document_version", "1"),
+                    "chunk_uid": row.get("chunk_uid") or f"{doc_id}:{chunk_id}",
                     "type": row.get("doc_type", ""),
                     "disease": row.get("disease", ""),
                     "source": row.get("source", ""),

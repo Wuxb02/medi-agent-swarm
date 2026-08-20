@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`mediZJ/` contains the Python application. Orchestration lives in `core/`, Swarm coordination in `swarm/`, LangGraph workflows in `lgraph/` (including the lightweight `Worker` spec that replaces the former `agents/` package), API routes and services in `api/`, persistence in `memory/`, retrieval in `knowledge/`, self-improvement in `evolution/` (feedback-driven evaluation and reusable experience extraction), and Jinja prompts in `prompt/`. Backend tests mirror these areas under `tests/`. The Vue 3 client is in `frontend/src/`, organized into `components/`, `views/`, `stores/`, `composables/`, `api/`, `router/`, `types/`, and `utils/`; colocated frontend tests use `__tests__/`. Documentation belongs in `docs/`, while utilities live in `scripts/`.
+`mediZJ/` contains the Python application. Orchestration lives in `core/`, Swarm coordination in `swarm/`, LangGraph workflows in `lgraph/` (including the lightweight `Worker` spec that replaces the former `agents/` package), API routes and services in `api/`, persistence and non-evolution data lifecycle management in `memory/`, versioned retrieval and medical conflict detection in `knowledge/`, answer/citation safety checks in `validation/`, self-improvement in `evolution/` (feedback-driven evaluation and reusable experience extraction), and Jinja prompts in `prompt/`. Backend tests mirror these areas under `tests/`. The Vue 3 client is in `frontend/src/`, organized into `components/`, `views/`, `stores/`, `composables/`, `api/`, `router/`, `types/`, and `utils/`; colocated frontend tests use `__tests__/`. Documentation belongs in `docs/`, while utilities live in `scripts/`.
 
 ## Build, Test, and Development Commands
 
@@ -22,7 +22,7 @@ Follow PEP 8 with four-space indentation for Python. Use `snake_case` for module
 
 ## Testing Guidelines
 
-Pytest discovers `test_*.py`, `Test*`, and `test_*`; mark external-service tests as `integration` and real-LLM tests as `slow`. Keep unit tests deterministic and mock LLM, Milvus, Redis, and network boundaries. Frontend specs use `*.spec.ts`. New or changed behavior should target at least 80% coverage and include failure, concurrency, and boundary cases where relevant.
+Pytest discovers `test_*.py`, `Test*`, and `test_*`; mark external-service tests as `integration` and real-LLM tests as `slow`. Keep unit tests deterministic and mock LLM, Milvus, Redis, and network boundaries. Frontend specs use `*.spec.ts`. New or changed behavior should target at least 80% coverage and include failure, concurrency, and boundary cases where relevant. For knowledge-governance changes, cover atomic version activation, failed indexing rollback, active/expiry filtering, citation rejection, verifier rewrite/fallback, lifecycle retry, and conflict-review boundaries.
 
 ## Commit & Pull Request Guidelines
 
@@ -30,4 +30,4 @@ Use Angular-style commits seen in history, such as `feat(concurrency): isolate u
 
 ## Security & Configuration
 
-Copy `.env.example` to `.env` for local setup. Never commit API keys, credentials, patient data, or production endpoints. Preserve medical safety warnings and validation constraints when changing prompts or agent routing.
+Copy `.env.example` to `.env` for local setup. Never commit API keys, credentials, patient data, or production endpoints. Preserve medical safety warnings and validation constraints when changing prompts or agent routing. Knowledge updates must write chunks under an `indexing` version before activation and must never expose non-active or expired versions. Every chat path must pass through the shared citation and medical-answer verifier before persistence or client delivery. Data lifecycle operations must exclude evolution reviews, failures, learned experiences, releases, and observation experiments unless an evolution change is explicitly requested.

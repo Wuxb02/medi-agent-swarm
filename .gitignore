@@ -53,6 +53,7 @@ mediZJ/memory/swarm/session_summaries/*
 
 # 数据库（Milvus Lite + SQLite + BM25 模型）
 mediZJ/knowledge/data/milvus_lite.db
+mediZJ/knowledge/data/knowledge_catalog.db
 mediZJ/knowledge/data/.milvus_lite.db.lock
 mediZJ/knowledge/data/bm25_model.pkl
 mediZJ/knowledge/scripts/knowledge/data/milvus_lite.db

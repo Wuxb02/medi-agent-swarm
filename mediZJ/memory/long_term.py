@@ -132,6 +132,8 @@ class LongTermMemory:
                     user_id=f"mediZJ_user_{self.user_id}",
                     metadata={
                         "type": "session_summary",
+                        "source_type": "conversation_summary",
+                        "lineage_status": "valid",
                         "session_id": session_id,
                         "timestamp": datetime.now().isoformat(),
                         **(metadata or {})
@@ -203,12 +205,15 @@ class LongTermMemory:
                 results_list = []
 
             for result in results_list:
+                metadata = result.get("metadata", {})
+                if metadata.get("lineage_status", "valid") != "valid":
+                    continue
                 formatted_results.append({
                     "memory_id": result.get("id", "unknown"),
                     "content": result.get("memory", result.get("text", "")),
                     "score": result.get("score", 0.0),
-                    "metadata": result.get("metadata", {}),
-                    "timestamp": result.get("metadata", {}).get("timestamp")
+                    "metadata": metadata,
+                    "timestamp": metadata.get("timestamp")
                 })
 
             # Harness Engineering: 熵管理 - 去重相似会话（encode 下线程）
@@ -229,5 +234,4 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []
-
 

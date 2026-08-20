@@ -44,6 +44,9 @@ class DocumentSummary(BaseModel):
     disease: str
     source: str
     chunk_count: int
+    version_id: str = ""
+    document_version: str = ""
+    status: str = "active"
 
 
 class DocumentListResponse(BaseModel):
@@ -74,6 +77,8 @@ class DocumentUploadResponse(BaseModel):
     type: str
     chunks_added: int
     message: str = "ok"
+    version_id: str = ""
+    document_version: str = ""
 
 
 class DocumentDeleteResponse(BaseModel):
