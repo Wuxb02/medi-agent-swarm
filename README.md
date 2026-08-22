@@ -14,7 +14,7 @@
 - **🩺 交互式问诊**: LeadAgent 在任务分发前通过结构化问卷收集用户背景信息（症状、病史、用药等），基于 LangGraph interrupt/Command 挂起恢复，支持 **LLM 自决多轮追问**（硬上限 3 轮），实现"先问后诊" ✅
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 LangGraph Agent 子图**: LLM 驱动的 Skill 调用循环（AgentSubGraph），Worker 自主规划、调用 Skills 并完成任务 ✅
-- **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 隔离子会话、无历史上下文，路由由 LeadAgent 评估自动决定 ✅
+- **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 使用隔离子会话执行并通过统一 ContextBuilder 获取受控上下文，路由由 LeadAgent 评估自动决定 ✅
 - **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
 - **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
@@ -32,23 +32,64 @@
 - **🖼️ 多模态图片**: 图片上传 → Vision 模型（VISION_* 配置）解析 OCR 文本 → 注入 Agent 子任务上下文 ✅
 - **♻️ 对话自进化**: 真实对话按用户反馈/确定性采样异步评审（医疗安全七维量表），沉淀原子可复用经验（脱敏/过期/回滚控制），运行时注入 Worker 档案与任务分解 prompt，驱动系统自我改进 ✅
 
-## 🛡️ 知识治理与回答安全
+## 🛡️ 可信 RAG、知识治理与回答安全
 
-知识正文和向量继续由 Milvus 保存，`KnowledgeCatalog` 使用独立 SQLite 保存版本状态。上传或更新文档时，系统先建立 `indexing` 版本并完成所有 chunk 写入，随后原子激活新版本并归档旧版本；如果写入失败，旧版本仍可检索。普通删除为归档，历史版本可在管理端查看和重新激活。
+本项目的可信 RAG 不仅是“向量检索 + 引用编号”，而是覆盖 **知识准入、版本发布、混合检索、证据传递、引用校验、冲突审核和安全降级** 的完整链路。
 
-聊天回答在保存和发送前统一经过以下流程：
+### 可信边界
+
+| 信息来源 | 可否影响回答 | 可否支撑医学引用 |
+| --- | --- | --- |
+| KnowledgeCatalog active 且有效的知识 chunk | 是 | **是** |
+| 用户语义记忆（画像、病史、过敏史） | 是，用于个性化 | 否 |
+| 当前会话用户自述 | 是，用于理解当前情况 | 否 |
+| 情景摘要 | 是，用于跨会话背景 | 否 |
+| evolution 程序性策略 | 是，仅影响路由、检索和表达 | 否 |
+
+提示词中的位置与事实权威分开治理：用户画像虽放在稳定前缀中以提高 KV Cache 命中，但其权威不高于有效医学证据。
+
+### 知识准入与原子发布
+
+知识正文和向量保存在 Milvus，`KnowledgeCatalog` 使用 SQLite 保存逻辑文档、物理版本、权威等级、生效时间、过期时间和状态。更新文档时执行两阶段切换：
 
 ```text
-综合回答
-  → 确定性医疗安全检查
-  → Citation 版本及原始 chunk 校验
-  → LLM 语义一致性检查
-  → 通过 / 一次有限重写 / 固定安全降级
+创建 indexing 版本
+  → 分块并写入 Milvus
+  → 校验全部 chunk 写入成功
+  → SQLite 事务内激活新版本并归档旧版本
 ```
 
-引用会展示文档版本、权威等级和验证状态。医学数值、诊疗建议或权威性陈述如果没有有效来源，将触发重写或保守回答。未解决的知识冲突也会进入验证上下文，系统必须说明来源版本和适用条件，无法安全解释时建议咨询专业医生。
+任何分块写入失败都会清理新版本 chunk 并将版本标记为 `failed`，旧 active 版本继续服务，禁止部分索引上线。在线检索同时过滤非 active、尚未到 `effective_at` 或已过 `expires_at` 的版本。
 
-非自进化记忆按用户自述、模型推断、会话摘要和权威文档分类记录来源。关联文档失效后，相应记忆会保留审计但停止注入 Agent。管理员可创建持久化数据清理作业、查询各存储目标结果并重试外部失败；这些流程不修改自进化评审、经验、发布和观察机制。
+### 证据检索与传递
+
+`MedicalKnowledgeBase.search()` 执行 Dense 语义检索、BM25 稀疏检索和医学实体加权，先使用 RRF（k=60）融合 Dense/BM25 排名，再叠加实体命中增益，最后按逻辑文档去重。每个候选 chunk 携带：
+
+- `document_id` / `version_id` / `document_version`
+- 全局唯一 `chunk_uid`
+- `source`、`authority_level`、`effective_at`
+- `validation_status`、检索分数及原始正文
+
+三个 RAG Skill 返回结构化 `references`，`ToolExecutor` 收集后交给 Worker；Swarm 模式跨 Worker 去重、重新编号，最终综合节点保留证据编号，避免只传递纯文本导致来源丢失。
+
+### 引用与回答验证
+
+聊天回答在保存和发送前必须经过共享验证链：
+
+```text
+综合回答 + 本轮原始 evidence chunks
+  → 确定性医疗安全检查
+  → CitationValidator 校验编号、chunk、文档版本和有效期
+  → LLM 语义一致性检查
+  → 通过 / 最多一次有限重写 / 固定保守回答
+  → 通过后才持久化并发送客户端
+```
+
+验证器拒绝伪造 chunk、错误版本、归档版本、过期版本以及非本轮知识证据产生的引用。有效引用以版本快照保存到 `messages.citations`，保证知识库更新后仍能还原历史回答的证据。
+
+### 知识冲突与人工治理
+
+新版本激活后，`MedicalConflictDetector` 对阈值、禁忌、适用人群和指南差异生成冲突候选，但不自动裁决医学事实。管理员可确认、驳回或标记解决；未解决冲突进入在线 Verifier，要求回答披露来源版本和适用条件，无法安全解释时给出就医建议。
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -94,12 +135,11 @@
    - 否则 → 兼容模式（所有工具平铺暴露，旧行为）
 
 5. **多轮对话支持**
-   - 短期记忆：会话级对话历史（retrieve 阶段取最近 10 条消息），**仅供 LeadAgent 使用**（任务分解时参考上下文）
-   - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `AgentSubGraph` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 无历史上下文、只接收任务指令
+   - 工作记忆：Redis 保存追加式原始对话，统一 ContextBuilder 根据调用类型组装历史和本轮上下文
+   - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `AgentSubGraph` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 不直接读取任何记忆存储
    - 用户语义记忆：SQLite `user_memory_items`，仅 active、未过期且已授权内容进入稳定用户前缀
    - 情景记忆：SQLite `episodic_summaries`，作为跨会话背景动态注入，不参与医学引用
-   - **上下文利用率 100%**：追问能正确理解历史对话（LeadAgent 持有历史，分解出引用上下文的子任务）
-   - **LLM 语义摘要**：写入时增量压缩，早期对话自动压缩为结构化摘要，保留关键医学信息
+   - **追加式历史**：生产调用链不重新摘要、格式化或排序已入历史消息，保持 KV Cache 前缀稳定
 
 ### SKILL.md 格式
 
@@ -237,7 +277,7 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 3. **decide/ask 双节点多轮循环**：`_clarify_decide`（LLM 判定是否追问）+ `_clarify_ask`（唯一 interrupt 挂起点）构成环，每轮 resume 只重跑 ask（无 LLM 重放）；**LLM 自决追问 + 硬上限 3 轮**，第 4 次 LLM 不会被调用
 4. **SSE 状态机**：`_chat_stream_impl` 用 `while True + phase` 统一管理 0/1/多次 interrupt——挂起时等待答案、收到后 resume、可能再次挂起，resume 后正常完成则收尾（不卡死）
 5. **先澄清再检索**：意图分类独立节点提前路由闲聊/澄清；记忆检索（retrieve_memories）后移到 clarify 完成后、任务分解之前
-6. **上下文注入**：clarify 决策每轮注入用户档案 + 近期对话 + 历史相似案例 + 已收集答案，避免重复提问已有信息；收集的信息打包为 collected_info 注入任务分解
+6. **上下文注入**：clarify 决策每轮通过 ContextBuilder 注入已授权用户画像、近期对话、情景摘要和已收集答案，避免重复提问；收集的信息打包为 collected_info 注入任务分解
 7. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
 8. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
 9. **提交失败保护**：前端仅 POST 成功才清空问卷卡片；失败保留卡片 + 错误提示，用户可重试（避免后端一直等答案、SSE 挂起导致会话卡死）
@@ -337,17 +377,17 @@ python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床�
 集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
 
 ```bash
-# 单元测试（328 个，无需外部服务，秒级完成）
-pytest tests/ -m "not integration"
+# 单元测试（无需外部服务）
+uv run pytest tests/ -m "not integration"
 
 # 集成测试（14 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
-pytest tests/ -m "integration" --run-integration
+uv run pytest tests/ -m "integration" --run-integration
 
-# 全部测试（342 个）
-pytest tests/ --run-integration
+# 全部测试（当前基线：376 collected / 362 passed / 14 skipped）
+uv run pytest tests/ --run-integration
 
 # 覆盖率报告
-pytest tests/ -m "not integration" --cov --cov-report=html
+uv run pytest tests/ -m "not integration" --cov=mediZJ --cov-report=html
 ```
 
 ### 6. 开始使用
@@ -754,7 +794,55 @@ EVOLUTION_TRUSTED_DOMAINS=                # 可信域名白名单（逗号分隔
 
 ### 记忆系统配置
 
-本系统使用五类记忆：**KnowledgeCatalog 医学事实**、**SQLite 用户语义记忆**、**Redis 工作记忆**、**SQLite 情景记忆**和 **evolution 程序性策略**。只有 KnowledgeCatalog active 版本的医学证据可支撑引用。
+本系统将“医学事实”、“用户信息”、“会话状态”、“跨会话摘要”和“执行策略”分开存储与治理，避免将用户自述、模型推断或历史摘要误当成权威医学证据。
+
+#### 五层记忆与存储边界
+
+| 记忆层 | 权威存储 | 主要内容 | 注入位置 | 可否引用 |
+| --- | --- | --- | --- | --- |
+| 医学知识事实 | KnowledgeCatalog SQLite + Milvus | 文档版本、chunk、向量、权威、时效和冲突 | 本轮动态证据 | **是** |
+| 用户语义记忆 | SQLite `user_memory_items` | 个人资料、过敏史、用药史、既往史和候选项 | 用户稳定前缀 | 否 |
+| 工作记忆 | Redis `ShortTermMemory` | 当前会话消息、已确认实体、澄清结果和 chunk ID | 追加式会话历史/动态尾部 | 否 |
+| 情景记忆 | SQLite `episodic_summaries` | 跨会话摘要、已解析实体和来源会话 | 本轮动态背景 | 否 |
+| 程序性策略 | evolution SQLite | 路由、检索、上下文和表达经验 | 本轮动态策略 | 否 |
+
+#### 事实权威顺序
+
+```text
+有效医学知识证据
+> 医疗人员确认信息
+> 用户明确确认信息
+> 当前会话用户自述
+> 情景摘要
+> 程序性策略
+```
+
+`clinician_confirmed` active 项不会被低权威的 `user_reported`、`report_extracted` 或 `model_inferred` 写入覆盖。这个权威顺序用于解决信息冲突，与提示词中的前缀位置无关。
+
+#### 结构化长期记忆数据模型
+
+`user_memory_items` 以单条记忆为最小修订和审计单元，`value_json` 使用按键排序的 JSON 存储标量或结构化病史，不再将整份 Markdown 档案作为权威数据。关键字段包括：
+
+- 身份与分类：`memory_id`、`user_id`、`memory_type`、`memory_key`、`value_json`
+- 状态与修订：`status`、`revision`、`supersedes_id`
+- 来源与证据链：`source_type`、`source_message_id`、`source_trace_id`、`confidence`
+- 隐私与时效：`sensitivity_level`、`consent_scope`、`effective_at`、`expires_at`
+- 时间字段：`created_at`、`updated_at`、`confirmed_at`
+
+同一 `(user_id, memory_type, memory_key)` 最多只有一条 active 记录。新版本激活时，旧版本在同一 SQLite 事务内转为 `superseded`，不执行 Markdown 全文读取、修改和覆盖。
+
+辅助表用途：
+
+| 表 | 用途 |
+| --- | --- |
+| `episodic_summaries` | 保存摘要、解析实体、来源会话、状态和过期时间 |
+| `memory_usage` | 记录实际注入的 memory ID、session、trace 和 Agent |
+| `memory_audit` | 记录创建、确认、驳回、替换、失效和删除操作 |
+| `memory_profile_revisions` | 保存用户画像版本和稳定前缀 hash |
+
+pending、dismissed、superseded、stale、过期或未授权的记忆不进入上下文。`highly_sensitive` 数据只有在 `consent_scope=personalization` 时才能跨会话使用。pending、审计记录和最后访问时间变化不会提升 `profile_revision`。
+
+#### 旧数据迁移
 
 旧 `profiles`/`memory_lineage` 数据使用单事务迁移，上线前应先执行 dry-run：
 
@@ -763,7 +851,7 @@ uv run python -m mediZJ.memory.scripts.migrate_structured_memory --dry-run
 uv run python -m mediZJ.memory.scripts.migrate_structured_memory
 ```
 
-迁移工具支持幂等执行、前后数量报告、稳定前缀 hash 校验和异常整体回滚。旧表保留一个发布周期，运行时不再读写。
+迁移工具将旧 `profiles.content` 拆分为 active profile fact/病史，将 `profiles.pending` 转为 `pending/model_inferred`，并尽可能合并 `memory_lineage` 中的来源、trace 和有效期。工具支持幂等执行、前后数量报告、稳定前缀 hash 重复生成校验和异常整体回滚；无法可靠解析的数据会使整体迁移失败，禁止部分成功后上线。旧表保留一个发布周期，运行时不再读写。
 
 #### 短期记忆（ShortTermMemory）
 
@@ -809,14 +897,24 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 - 医疗人员确认信息高于用户确认信息，低权威写入不会覆盖高权威 active 项
 - 前端「个人中心」支持手动查看和编辑
 
-**存储格式**（Markdown 文本，存于 `content` 列）：
-```markdown
-# 患者个人信息
+**存储格式**（SQLite 行记录 + 确定性 JSON）：
 
-- 年龄：28岁
-- 性别：男性
-- 过敏史：青霉素过敏
+```json
+{
+  "memory_id": "memory_xxx",
+  "user_id": "user_xxx",
+  "memory_type": "profile_fact",
+  "memory_key": "过敏史",
+  "value_json": "\"青霉素过敏\"",
+  "status": "active",
+  "source_type": "clinician_confirmed",
+  "sensitivity_level": "sensitive",
+  "consent_scope": "personalization",
+  "revision": 1
+}
 ```
+
+前端个人档案 API 仍保持原有展示结构，Markdown/文本只是展示格式，不再是长期记忆的权威存储格式。
 
 #### 情景记忆与医学事实
 
@@ -827,6 +925,29 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 #### 安全校验后的记忆候选提取
 
 最终回答通过引用与医疗安全验证后，系统才异步提取用户资料和病史候选，写入 `user_memory_items(pending)`。候选项不进入稳定前缀；只有用户或医疗人员确认后才激活并提升 `profile_revision`。
+
+#### KV Cache 优先的上下文组装
+
+`MedicalMemoryContextBuilder` 是 Supervisor、LeadAgent、Worker 和最终综合节点获取记忆的统一入口。`PromptPrefixAssembler` 按以下顺序生成消息，调用方不再自行拼接个人档案或历史摘要：
+
+1. `global_static_prefix`
+   - Agent 基础角色、医疗安全规则、固定输出协议和按名称排序的 Skill 目录。
+   - 不包含用户、会话、时间、trace 或召回分数。
+2. `user_stable_prefix`
+   - 仅包含 active、已生效、未过期且符合授权的用户语义记忆。
+   - 按固定类别、`memory_key`、`memory_id` 排序，不输出更新时间、置信度、trace ID 或召回分数。
+3. `session_stable_history`
+   - 保留真实 user/assistant 角色和正文，以追加方式扩展。
+   - 运行时关闭自动压缩，避免历史消息被重新摘要或格式化。
+4. `turn_dynamic_context`
+   - 本轮澄清结果、解析实体、情景召回、医学证据、evolution 策略和当前任务。
+   - 全部放在尾部，不改变前两段稳定前缀指纹。
+
+确定性规则包括固定标题、换行和字段顺序；字典按键排序，集合转换为排序列表，JSON 使用 `ensure_ascii=False` 和固定分隔符，tool schema 按工具名称排序。相同输入必须生成相同 UTF-8 字节和 SHA-256 指纹。
+
+不同调用类型（任务评估、闲聊、澄清、各 Worker、最终综合与安全重写）使用独立 `global_prefix_version`，不强行共享不一致的系统提示词。用户 active 画像变化时才提升 `profile_revision`；情景召回、医学证据或当前问题变化不会改变两个稳定前缀 hash。
+
+LLM usage/trace 记录 `prompt_tokens`、`cached_prompt_tokens`、`cache_hit_ratio`、`global_prefix_hash`、`profile_prefix_hash`、前缀版本、画像修订、`call_type` 和模型名。供应商未返回 cached token 时记录 `None`，不根据本地 hash 推断真实缓存命中。
 
 #### 记忆系统如何融入对话
 
@@ -1147,7 +1268,7 @@ quality_eval = PromptLoader.render(
 
 ---
 
-## 📚 统一知识库
+## 📚 可信 RAG 与统一知识库
 
 - **向量数据库**: Milvus Lite（本地文件，无需服务器）
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
@@ -1296,10 +1417,10 @@ LeadAgent 基于 RAG 结果生成最终回答时，引用的检索内容句尾�
 ```
 search-knowledge / clinical-guideline / deep-research
     │  返回 answer（含引用编号 [N]）+ 结构化 references 数组
-    │  references: [{index, doc_id, source, disease, type, filename, score, snippet, content}]
+    │  references 携带 document_id/version_id/document_version/chunk_uid/权威与时效
     ▼
 ToolExecutor（lgraph/tool_executor.py）
-    │  工具执行后自动收集 references，按 doc_id 去重，附入 Worker 最终 result
+    │  工具执行后自动收集 references，按逻辑文档去重，附入 Worker 最终 result
     ▼
 SwarmCoordinator
     ├─ 单Agent/降级模式 : references → citations 透传
@@ -1308,8 +1429,11 @@ SwarmCoordinator
 LeadAgent.synthesize_results()
     │  synthesis.j2 指示保留引用编号，综合后最终回答含统一编号
     ▼
+CitationValidator + MedicalAnswerVerifier
+    │  核对本轮 chunk、active 版本、effective_at/过期及语义一致性
+    ▼
 ChatService
-    │  SSE done 事件 + JSON 事件文件 + non-stream ChatResponse 均携带 citations
+    │  验证通过后，SSE done 事件与 non-stream ChatResponse 携带 citations
     ▼
 SQLite (messages.citations) / JSON 事件文件
     │  持久化引用数据，历史会话可回放
@@ -1343,6 +1467,19 @@ SQLite (messages.citations) / JSON 事件文件
 - **search-knowledge**：格式化输出中 `相关度: 85.00%`，LLM 可见以辅助内容可信度判断
 - **clinical-guideline**：`format_guideline` 追加 `相关度: XX%`
 - **deep-research**：`format_research_report` 来源列表逐条展示分数
+
+> `score` 只表示查询与 chunk 的检索相关度，不等于医学真实性或来源权威。可信性由 KnowledgeCatalog 状态、版本、权威、时效、冲突状态与最终引用验证综合决定。
+
+### 可信 RAG 验收边界
+
+相关测试应至少覆盖：
+
+- 新版本原子激活与索引失败回滚
+- active、`effective_at`、`expires_at` 过滤
+- 伪造引用、非本轮 chunk、错版本、归档版本和过期版本拒绝
+- Verifier 一次有限重写与再次失败的固定安全回答
+- 冲突候选创建、人工确认/驳回/解决及在线披露
+- 用户画像、当前自述、情景摘要和 evolution 策略不能成为 citation
 
 ## 🤝 技术架构
 
@@ -1427,7 +1564,7 @@ SwarmCoordinator
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 1：信息澄清 (clarify_decide ⇄ clarify_ask 多轮 interrupt)          │
 │ Prompt: lead_clarify.j2 + lead_clarify_user.j2                          │
-│ 每轮注入: 用户档案 + 近期对话 + 历史相似案例 + 已收集答案                │
+│ 每轮注入: 已授权用户画像 + 近期对话 + 情景摘要 + 已收集答案              │
 │ clarify_decide：LLM 判定是否需问卷 → 调 question_for_user 发问卷        │
 │ clarify_ask：interrupt() 挂起 → SSE 推问卷 → 用户提交 →                  │
 │              Command(resume) 恢复 → 回到 clarify_decide                  │
@@ -1517,7 +1654,7 @@ SwarmCoordinator
       ▼
 ┌───────────────────────── Role: User (动态) ─────────────────────────────┐
 │  4. 当前输入 (User Input): 用户本次提问或派发的子任务内容               │
-│     （Worker 通过 AgentSubGraph 执行，隔离子会话，无历史上下文）        │
+│     （Worker 通过 AgentSubGraph 执行，隔离子会话且仅接收受控上下文）      │
 └─────────────────────────────────────────────────────────────────────────┘
       │
       ▼
