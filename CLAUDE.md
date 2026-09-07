@@ -77,6 +77,12 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
   │
   ├─ 检索长短期记忆，构建增强上下文（retrieve_memories，先澄清再检索）
   │
+  ├─ 阶段规划（plan_stages 节点，纯函数预筛 + LeadAgent.plan_stages 决策）
+  │    ├─ dag（同消息内依赖性子问）→ 分层循环：stage_advance ⇄ worker_stage
+  │    │    按"依赖已就绪即执行"逐层 Send 求解，前置阶段结论注入后一阶段 worker
+  │    │    → synthesize_stage 跨阶段引用统一重编号 → 拼成一条分小节回答
+  │    └─ atomic（普通单问）→ 进入任务分解
+  │
   ├─ LeadAgent.assess_and_decompose()  ← 判断复杂度并分解
   │
   ├─ 1 个子任务 → Worker 通过 AgentSubGraph 执行（隔离子会话）
@@ -96,6 +102,8 @@ cd frontend && npm run test:coverage # 前端测试覆盖率
 ```
 
 每个 Worker 由轻量 `Worker` 规格（`mediZJ/lgraph/worker.py`）承载，内部运行 `AgentSubGraph`（LangGraph 状态图：Think-Act-Observe 循环），每次最多执行 2 次工具调用。所有 Worker 使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），无历史上下文。
+
+**依赖性子问题（DAG 分层求解）**：同一用户消息内含多个依赖子问时（如"xx 最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"），`plan_stages` 节点判 `dag` 后进入分层循环——每层只执行依赖已就绪的阶段（`worker_stage`，复用 AgentSubGraph），前一阶段产出的具体结论以 `stage_prereq_text` 注入后一阶段 worker 输入；全部完成后 `synthesize_stage` 把各阶段结论跨阶段引用统一重编号，拼成**一条** `##` 分小节回答，仍走一次医疗安全校验与 1 user=1 assistant 落库。依赖阶段数/层数/总耗时由 `STAGE_MAX_STAGES`、`STAGE_MAX_WAVES`、`STAGE_TOTAL_BUDGET`、`STAGE_WORKER_TIMEOUT` 护栏控制，超限自动跳过剩余阶段并附说明。
 
 ### 自进化闭环（对话级）
 
@@ -140,10 +148,11 @@ verified_experiences 注入 Worker 档案 + assessment_user.j2（仅匹配且不
 | `mediZJ/lgraph/worker.py` | 轻量 Worker 规格：承载 AgentSubGraph 执行的系统提示词、用户输入格式化、结果后处理、Skill 工具执行 |
 | `mediZJ/swarm/swarm_coordinator.py` | 顶层协调器：意图分类 + 记忆检索 + 路由分发 + 并行调度（单次问答总超时由 `REQUEST_TIMEOUT` 控制） |
 | `mediZJ/swarm/intent_classifier.py` | 意图识别门控（medical / others，失败降级 medical） |
-| `mediZJ/swarm/lead_agent.py` | 闲聊直答 + 信息澄清 + 复杂度评估 + 任务分解 + 结果综合 |
+| `mediZJ/swarm/lead_agent.py` | 闲聊直答 + 信息澄清 + 复杂度评估 + 任务分解 + 阶段规划（plan_stages）+ 结果综合 |
+| `mediZJ/swarm/stage_planner.py` | 阶段规划纯函数：依赖链启发式预筛、计划规范化（去环/白名单）、层波次、跨阶段引用重编号 |
 | `mediZJ/swarm/shared_context.py` | 共享黑板系统（SubTask/Contribution 生命周期管理） |
 | `mediZJ/swarm/events.py` | 事件驱动通信（16 种事件类型，含 AGENT_QUESTIONNAIRE） |
-| `mediZJ/lgraph/supervisor_graph.py` | SupervisorGraph 主图：intent_classify → clarify ⇄ ask → retrieve → decompose → route → synthesize |
+| `mediZJ/lgraph/supervisor_graph.py` | SupervisorGraph 主图：intent_classify → clarify ⇄ ask → retrieve → plan_stages →（dag 分层循环 stage_advance ⇄ worker_stage / atomic → decompose）→ route → synthesize |
 | `mediZJ/lgraph/agent_subgraph.py` | AgentSubGraph：Worker Think-Act-Observe 子图 |
 | `mediZJ/lgraph/tool_registry.py` | 工具注册中心（allowed_agents 权限收口） |
 | `mediZJ/lgraph/tool_executor.py` | 工具执行节点（约束验证 + references 收集） |
@@ -281,6 +290,7 @@ user_msg = PromptLoader.render("swarm/assessment_user.j2", question="...", recen
 - `EVOLUTION_POLL_INTERVAL`（默认 2s）/ `EVOLUTION_JUDGE_TIMEOUT`（默认 120s）— 评审 worker 轮询与单次评审超时
 - `EVOLUTION_MEDICAL_EXPIRY_DAYS`（默认 180）/ `EVOLUTION_TRUSTED_SOURCES` / `EVOLUTION_TRUSTED_DOMAINS` — 高危经验过期与可信来源白名单
 - `EVOLUTION_GLOBAL_MIN_SUPPORT`（默认 3）— 全局经验发布所需的至少支持用户数（distinct_users 与 support_count 双门槛）
+- `STAGE_MAX_STAGES`（默认 4）/ `STAGE_MAX_WAVES`（默认 4）/ `STAGE_TOTAL_BUDGET`（默认 200s）/ `STAGE_WORKER_TIMEOUT`（默认 70s）— 依赖性子问题（DAG 分层）护栏：阶段数、层数、总耗时与单阶段 worker 超时；超限自动跳过剩余阶段并附说明
 
 约束定义（YAML）：
 - `mediZJ/constraints/agent_constraints.yaml` — 各 Agent 能力边界、允许工具、禁止行为

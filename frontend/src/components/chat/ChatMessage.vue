@@ -168,6 +168,45 @@ const workerGroups = computed(() => {
   return groups
 })
 
+// ---- 依赖性子问题（DAG 分层）时间线 ----
+// 阶段 worker 的 thinking 块带 phase="stage_{stage_id}"，各层 lead 块以
+// "分层求解推进"/"回答阶段规划"为标题。按到达顺序穿插渲染，使每个阶段
+// 的 agent 执行过程紧跟在对应"分层求解推进"下方。
+
+interface DagEntry {
+  kind: 'header' | 'stage'
+  block: ThinkingBlock
+}
+
+function isDagWaveOrPlanHeader(b: ThinkingBlock): boolean {
+  return b.agentId === 'lead_agent' && (b.title === '回答阶段规划' || b.title === '分层求解推进')
+}
+
+function isDagStageBlock(b: ThinkingBlock): boolean {
+  return b.agentId !== 'lead_agent' && String(b.phase || '').startsWith('stage_')
+}
+
+// 仅当确实进入分层执行（出现层推进或阶段 worker）时才启用 DAG 视图，
+// 避免"仅规划块、未真正分层"的消息误切换布局。
+const isDagView = computed(() =>
+  (props.message.thinkingBlocks || []).some(
+    (b) => isDagStageBlock(b) || b.title === '分层求解推进',
+  ),
+)
+
+const dagTimeline = computed<DagEntry[]>(() => {
+  const entries: DagEntry[] = []
+  for (const b of props.message.thinkingBlocks || []) {
+    if (isDagWaveOrPlanHeader(b)) entries.push({ kind: 'header', block: b })
+    else if (isDagStageBlock(b)) entries.push({ kind: 'stage', block: b })
+  }
+  return entries
+})
+
+function dagStageLabel(b: ThinkingBlock): string {
+  return agentNameMap[b.agentId] || b.agentId
+}
+
 // LeadAgent 折叠状态
 const leadCollapsed = ref(false)
 
@@ -347,8 +386,40 @@ watch(
                     />
                   </div>
 
-                  <!-- 3. 分解任务 -->
-                  <div v-if="leadDecomposeBlocks.length > 0" class="space-y-1.5">
+                  <!-- 3. 任务分解 / DAG 分层逐层执行 -->
+                  <div v-if="isDagView" class="space-y-1.5">
+                    <template v-for="item in dagTimeline" :key="item.block.id">
+                      <!-- 阶段 agent 执行过程：缩进在对应"分层求解推进"下一行 -->
+                      <div
+                        v-if="item.kind === 'stage'"
+                        class="ml-4 border-l-2 border-blue-100 pl-2.5"
+                      >
+                        <ThinkingBlockItem
+                          :thinking="item.block.thinking"
+                          :agent-id="item.block.agentId"
+                          :iteration="item.block.iteration"
+                          :tool-steps="item.block.toolSteps"
+                          :elapsed-seconds="item.block.elapsedSeconds"
+                          :is-collapsed="item.block.isCollapsed"
+                          :status="item.block.status"
+                          :label="dagStageLabel(item.block)"
+                        />
+                      </div>
+                      <!-- 规划 / 分层推进 标题块 -->
+                      <ThinkingBlockItem
+                        v-else
+                        :thinking="item.block.thinking"
+                        :agent-id="item.block.agentId"
+                        :iteration="item.block.iteration"
+                        :tool-steps="item.block.toolSteps"
+                        :elapsed-seconds="item.block.elapsedSeconds"
+                        :is-collapsed="item.block.isCollapsed"
+                        :status="item.block.status"
+                        :label="item.block.title || '任务分解'"
+                      />
+                    </template>
+                  </div>
+                  <div v-else-if="leadDecomposeBlocks.length > 0" class="space-y-1.5">
                     <ThinkingBlockItem
                       v-for="block in leadDecomposeBlocks"
                       :key="block.id"
@@ -363,9 +434,9 @@ watch(
                     />
                   </div>
 
-                  <!-- 4. WorkerAgent 执行过程 -->
+                  <!-- 4. WorkerAgent 执行过程（非 DAG 时保留原布局） -->
                   <div
-                    v-if="workerGroups.length > 0"
+                    v-if="!isDagView && workerGroups.length > 0"
                     class="border border-slate-200 rounded overflow-hidden bg-white"
                   >
                     <button

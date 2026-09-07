@@ -31,6 +31,7 @@
 - **🔐 免密登录**: 多用户身份隔离（SQLite 随机会话令牌 + Cookie），个人档案按 user_id 隔离，非登录用户强制跳转个人中心 ✅
 - **🖼️ 多模态图片**: 图片上传 → Vision 模型（VISION_* 配置）解析 OCR 文本 → 注入 Agent 子任务上下文 ✅
 - **♻️ 对话自进化**: 真实对话按用户反馈/确定性采样异步评审（医疗安全七维量表），沉淀原子可复用经验（脱敏/过期/回滚控制），运行时注入 Worker 档案与任务分解 prompt，驱动系统自我改进 ✅
+- **🪜 依赖性子问题（DAG 分层求解）**: 同一消息内含有依赖的子问时（如"xx 最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"），`plan_stages` 判 dag 后按"依赖已就绪即执行"逐层求解，前一阶段具体结论注入后一阶段 worker；最终合成一条 `##` 分小节回答，一次引用统一、一次安全校验 ✅
 
 ## 🛡️ 可信 RAG、知识治理与回答安全
 
@@ -222,6 +223,11 @@ Command(resume=answers) 恢复图 → clarify_ask 返回答案 ──┘（回�
 记忆检索（retrieve_memories，先澄清再检索）
     │
     ▼
+阶段规划（plan_stages 节点）
+    ├─ dag（同消息内依赖性子问）→ 分层循环逐层求解（见"依赖性子问题"章节）
+    └─ atomic（普通单问）→ 进入任务分解
+            │
+            ▼
 LeadAgent.assess_and_decompose(问题 + collected_info)
     │
     └─ 按子任务数量路由 → Worker 执行（统一走 AgentSubGraph + 隔离子会话）
@@ -281,6 +287,35 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 7. **Tab 切换 UI**：前端问卷不一次性展开，每次只显示一个问题，支持上/下一题切换和进度指示
 8. **自由输入兜底**：单选/多选题底部均有"其他"输入框，避免选项遗漏用户实际情况
 9. **提交失败保护**：前端仅 POST 成功才清空问卷卡片；失败保留卡片 + 错误提示，用户可重试（避免后端一直等答案、SSE 挂起导致会话卡死）
+
+
+## 🪜 依赖性子问题（DAG 分层求解）
+
+用户可能一次提问包含**多个存在依赖**的子问题，例如：
+
+> "xx 病最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"
+
+第二问里的"这个方案"指向前一问将要产出的**具体治疗方案**——没有前一问的结论就无法回答。系统在记忆检索后新增 `plan_stages` 规划节点：**普通单问 → 原任务分解路径（行为不变）；含依赖子问（dag）→ 进入 DAG 分层循环**。
+
+### 工作流程
+
+```text
+retrieve_memories → plan_stages（纯函数启发式预筛 + LeadAgent.plan_stages 决策）
+   ├─ atomic（无回指链/普通单问）→ assess_decompose 原路径
+   └─ dag → stage_advance ──(依赖已就绪即执行的当前层)──▶ worker_stage × N（并行）
+                 ▲                                          │（每个 stage 独立 AgentSubGraph）
+                 └────────────── worker_stage ───────────────┘（层间 Send 超步 join 屏障）
+             全部完成 → synthesize_stage：跨阶段引用统一重编号
+                        → 各阶段结论拼成一条 "## 小节" 回答 → finalize
+```
+
+- **依赖结论注入**：每个阶段可 `depends_on` 一个或多个更早阶段（一般 DAG，去环护栏），前一阶段产出的具体结论（如含方案名/药名）以 `stage_prereq_text` 注入后一阶段 worker 输入，后一阶段在其基础上作答。
+- **分层执行**：`stage_advance` 每轮只 Send 出"全部依赖已完成"的 stage（同层可并行），层间以 Send 超步 join 为屏障推进到下一层。
+- **输出与校验**：跨阶段引用全局去重重编号后，把各阶段结论拼成**一条** `##` 分小节回答，仍走一次医疗安全校验与 1 user=1 assistant 落库；前端无需改动（阶段事件复用 `phase=stage_{stage_id}` 避免同 agent 相邻层聚合冲突）。
+- **护栏**：超限自动跳过剩余阶段并附"部分阶段未完成"说明，不会卡死整轮（env：`STAGE_MAX_STAGES`、`STAGE_MAX_WAVES`、`STAGE_TOTAL_BUDGET`、`STAGE_WORKER_TIMEOUT`）。
+- **零回归保护**：不构成依赖链的单问直接短路（零额外 LLM 开销）；LeadAgent 无 `plan_stages` 或规划抛错一律回落原子路径。
+
+关键文件：`mediZJ/lgraph/supervisor_graph.py`（plan_stages / stage_advance / worker_stage / synthesize_stage）、`mediZJ/swarm/stage_planner.py`（纯函数）、`mediZJ/swarm/lead_agent.py`（`plan_stages`）、`mediZJ/prompt/swarm/plan_stages_user.j2`、`mediZJ/lgraph/agent_subgraph.py`（`stage_prereq_text` 注入）。
 
 
 ## 🚀 从零开始运行
@@ -383,7 +418,7 @@ uv run pytest tests/ -m "not integration"
 # 集成测试（14 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
 uv run pytest tests/ -m "integration" --run-integration
 
-# 全部测试（当前基线：376 collected / 362 passed / 14 skipped）
+# 全部测试（当前基线：398 collected / 384 unit passed + 14 integration）
 uv run pytest tests/ --run-integration
 
 # 覆盖率报告
@@ -462,6 +497,7 @@ medix-agent-swarm/
 │   │   │   ├── lead_clarify_user.j2     # LeadAgent 澄清阶段用户提示词
 │   │   │   ├── synthesis.j2
 │   │   │   ├── assessment_user.j2
+│   │   │   ├── plan_stages_user.j2      # 依赖性子问题（DAG 分层）规划提示词
 │   │   │   ├── timeout_fallback.j2
 │   │   │   ├── chat_reply.j2            # 闲聊直答系统提示词
 │   │   │   └── chat_reply_user.j2       # 闲聊直答用户提示词
@@ -484,11 +520,12 @@ medix-agent-swarm/
 │   ├── swarm/                           # Swarm 协调器
 │   │   ├── events.py                    # 事件驱动通信（16 种事件类型，含 AGENT_QUESTIONNAIRE）
 │   │   ├── intent_classifier.py         # 意图识别（medical / others，失败降级 medical）
-│   │   ├── lead_agent.py                # 闲聊直答 + 澄清决策 + 任务分解 + 结果汇总
+│   │   ├── lead_agent.py                # 闲聊直答 + 澄清决策 + 任务分解 + 阶段规划 + 结果汇总
+│   │   ├── stage_planner.py             # 阶段规划纯函数（依赖链预筛/规范化/层波次/引用重编号）
 │   │   ├── shared_context.py            # 共享环境（信息素）
 │   │   └── swarm_coordinator.py         # 智能路由（clarify → decompose → route）
 │   ├── lgraph/                          # LangGraph 状态图（主链路）
-│   │   ├── supervisor_graph.py          # SupervisorGraph：intent_classify → (chat_reply | clarify_decide ⇄ clarify_ask) → retrieve_memories → assess_decompose → route
+│   │   ├── supervisor_graph.py          # SupervisorGraph：intent_classify → (chat_reply | clarify_decide ⇄ clarify_ask) → retrieve_memories → plan_stages →（dag 分层 stage_advance ⇄ worker_stage / atomic → assess_decompose）→ route
 │   │   ├── agent_subgraph.py            # AgentSubGraph：Worker Think-Act-Observe 子图
 │   │   ├── stream_adapter.py            # 流式输出适配器
 │   │   ├── supervisor_state.py          # 主图状态（含 clarify_rounds / clarify_pending）
@@ -569,7 +606,7 @@ medix-agent-swarm/
 │   ├── conftest.py                      # 共享 fixtures（mock LLM、环境变量、临时目录）
 │   ├── helpers.py                       # 测试辅助函数
 │   ├── test_core/                       # 核心模块：llm_client, skill_registry（SkillParameter）, prompt_loader, questionnaire_manager, circuit_breaker, stream_token_router
-│   ├── test_swarm/                      # Swarm：events, shared_context, intent_classifier, tool_executor, supervisor_clarify
+│   ├── test_swarm/                      # Swarm：events, shared_context, intent_classifier, tool_executor, supervisor_clarify, stage_planning, supervisor_stage
 │   ├── test_memory/                     # 记忆：short_term（含并发安全）, entropy_manager, personal_profile（用户隔离）
 │   ├── test_api/                        # API 层：chat_service 并发互斥、auth 登录
 │   ├── test_constraints/                # 约束验证
@@ -790,6 +827,12 @@ EVOLUTION_MEDICAL_EXPIRY_DAYS=180         # 高危经验过期天数
 EVOLUTION_GLOBAL_MIN_SUPPORT=3            # 全局经验发布所需的至少支持用户数
 EVOLUTION_TRUSTED_SOURCES=临床指南数据库,ICD-10疾病编码数据库  # 可信来源白名单
 EVOLUTION_TRUSTED_DOMAINS=                # 可信域名白名单（逗号分隔，可空）
+
+# 依赖性子问题（DAG 分层求解）护栏
+STAGE_MAX_STAGES=4                        # 最多阶段数（超出截断）
+STAGE_MAX_WAVES=4                         # 最多分层波次（超出跳过剩余阶段）
+STAGE_TOTAL_BUDGET=200                    # 分层求解总预算（秒），超时跳过剩余阶段并附说明
+STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），超时写占位不卡死循环
 ```
 
 ### 记忆系统配置
@@ -1199,7 +1242,7 @@ python -m mediZJ.eval.runner --score-abtest
 
 ### 设计理念
 
-- **集中管理**: 22 个 `.j2` 模板文件按功能分 6 个子文件夹，所有 prompt 一目了然
+- **集中管理**: 23 个 `.j2` 模板文件按功能分 7 个子文件夹，所有 prompt 一目了然
 - **Jinja2 模板**: 支持变量渲染（`{{ variable }}`）、条件分支（`{% if %}`）、循环（`{% for %}`）
 - **代码解耦**: Python 代码不再包含 prompt 字符串，修改 prompt 无需改动业务逻辑
 - **统一入口**: `PromptLoader` 类提供 `load()`（静态）和 `render()`（带变量）两个方法
@@ -1210,7 +1253,7 @@ python -m mediZJ.eval.runner --score-abtest
 ```
 prompt/
 ├── agents/                      # Agent 系统提示词（4 个）
-├── swarm/                       # Swarm 协调提示词（8 个）
+├── swarm/                       # Swarm 协调提示词（9 个，含 plan_stages_user.j2）
 ├── research/                    # 研究模块提示词（2 个）
 ├── memory/                      # 记忆相关提示词（4 个，含 intent_gate）
 ├── lgraph/                      # LangGraph 子图控制消息（1 个）
@@ -1252,6 +1295,7 @@ quality_eval = PromptLoader.render(
 | `agents/consultation_user_input.j2` | `question`, `session_id`, `context` | 用户输入格式化 |
 | `swarm/synthesis.j2` | `question`, `contributions_text`, `timeout_note`, `timeout_occurred` | 多 Agent 结果综合 |
 | `swarm/assessment_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | LeadAgent 任务评估（结构化分段） |
+| `swarm/plan_stages_user.j2` | `question`, `personal_profile`, `collected_info`, `recent_history`, `historical_cases` | 依赖性子问题（DAG）阶段规划判定与拆分 |
 | `swarm/lead_clarify.j2` | —（静态） | LeadAgent 澄清系统提示词 |
 | `swarm/lead_clarify_user.j2` | `question`, `context` | 澄清阶段用户输入 |
 | `swarm/chat_reply.j2` | —（静态） | 闲聊直答系统提示词 |
@@ -1512,6 +1556,8 @@ SwarmCoordinator
    │
    ├─ 记忆检索（retrieve_memories，先澄清再检索）
    │
+   ├─ 阶段规划（plan_stages）：同消息含依赖子问 → DAG 分层逐层求解；否则 → 分解
+   │
    ├─ LeadAgent.assess_and_decompose(问题 + collected_info)  ← 注入完整上下文后分解
    │
    ├─ 按子任务数量路由（统一走 AgentSubGraph + 隔离子会话）：
@@ -1579,6 +1625,14 @@ SwarmCoordinator
 │   - 稳定前缀与动态尾部分离，不进行 token 裁剪                           │
 └─────────────────────────────────────────────────────────────────────────┘
                             │
+                            ▼
+│ 阶段 1.6：依赖子问规划 (plan_stages 节点)                              │
+│ 纯函数预筛 + LLM 决策：同消息内含依赖性子问（如"这个方案如果出现         │
+│ 不良反应怎么办"）→ 走 DAG 分层循环（stage_advance ⇄ worker_stage，      │
+│ 前序结论注入后一阶段，synthesize_stage 拼分小节回答）；否则 → atomic     │
+│ 进入任务分解（见"依赖性子问题"章节）                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+                            │ (atomic)
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 2：评估与分解 (LeadAgent.assess_and_decompose)                     │

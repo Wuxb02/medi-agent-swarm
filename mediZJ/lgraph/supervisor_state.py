@@ -55,6 +55,15 @@ class SupervisorState(TypedDict, total=False):
     agent_results: Dict[str, Dict[str, Any]]    # agent_id -> LoopResult
     single_agent_answer: str
 
+    # === 依赖性子问题（DAG 分层求解） ===
+    plan_mode: str                                   # "atomic" | "dag"
+    stage_plan: List[Dict[str, Any]]                 # 规范化后的阶段列表（有序）
+    stage_status: Annotated[Dict[str, str], operator.ior]  # stage_id -> pending/running/completed/skipped
+    # 各阶段执行结果 stage_id -> {answer, references, usage, ...}（key 唯一，reducer 安全）
+    stage_results: Annotated[Dict[str, Dict[str, Any]], operator.ior]
+    current_wave_stage_ids: List[str]                # 当前层待执行阶段（层收尾用）
+    stage_wave_count: int                            # 已执行的层数（护栏）
+
     # === 引用系统 ===
     all_references: Dict[str, Dict]             # doc_id -> ref（跨 Worker 去重）
     renumber_map: Dict[str, Dict[int, int]]     # agent_id -> {old_index: new_index}

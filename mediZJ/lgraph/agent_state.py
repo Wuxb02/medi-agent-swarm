@@ -27,6 +27,10 @@ class AgentState(TypedDict, total=False):
     question: str
     memory_context: Any
 
+    # === 依赖性子问题（DAG 分层求解）注入 ===
+    # 前一阶段已产出的具体结论文本，Worker 须在其基础上回答当前阶段任务
+    stage_prereq_text: str
+
     # === 对话消息（OpenAI 格式） ===
     # 使用 LangGraph 的 add_messages reducer 自动追加
     messages: Annotated[List[Dict[str, Any]], add_messages]

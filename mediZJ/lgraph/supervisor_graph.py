@@ -10,6 +10,7 @@ SupervisorGraph — 替代 SwarmCoordinator.process() 的 LangGraph 主图
 采用 Map-Reduce 模式：Send API 并行扇出 Worker，synthesize_results 汇总。
 """
 import asyncio
+import os
 import time
 import re
 import uuid
@@ -27,6 +28,11 @@ from mediZJ.lgraph.tool_registry import ToolRegistry
 from mediZJ.swarm.events import Event, EventType
 from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.swarm.lead_agent import _QUESTION_TOOL_SCHEMA
+from mediZJ.swarm.stage_planner import (
+    looks_like_dependent_chain,
+    normalize_stage_plan,
+    unify_stage_citations,
+)
 from mediZJ.core.prompt_loader import PromptLoader
 from mediZJ.memory.context_builder import (
     MedicalMemoryContext,
@@ -173,6 +179,15 @@ def build_supervisor_graph(
             "research_agent": research_worker,
         }
         return mapping.get(agent_id)
+
+    # DAG 分层求解护栏（env 可配；外层 REQUEST_TIMEOUT 仍由 chat_service 兜底）
+    STAGE_MAX_STAGES = int(os.getenv("STAGE_MAX_STAGES", "4"))
+    STAGE_MAX_WAVES = int(os.getenv("STAGE_MAX_WAVES", "4"))
+    STAGE_TOTAL_BUDGET = float(os.getenv("STAGE_TOTAL_BUDGET", "200"))
+    STAGE_WORKER_TIMEOUT = float(os.getenv("STAGE_WORKER_TIMEOUT", "70"))
+    # "分层求解推进"事件迭代号基址：与规划块（iteration=1）、其他 decompose 块错开，
+    # 避免同 lead_agent + 同 phase 的前端/SSE 聚合误合并。
+    DAG_WAVE_ITER_BASE = 100
 
     # ===== 节点函数 =====
 
@@ -1053,6 +1068,432 @@ def build_supervisor_graph(
             "_swarm_finalized": True,
         }
 
+    # ===== 依赖性子问题（DAG 分层求解）节点 =====
+
+    def _elapsed_seconds(start_iso: str) -> float:
+        """自消息开始以来的墙钟秒数（用于阶段总预算护栏）。"""
+        try:
+            if not start_iso:
+                return 0.0
+            start = datetime.fromisoformat(start_iso)
+        except (ValueError, TypeError):
+            return 0.0
+        return (datetime.now() - start).total_seconds()
+
+    async def _plan_stages(state: SupervisorState) -> dict:
+        """节点：判断问题是否含"同消息内依赖性子问" → dag 分层 或 atomic。
+
+        先跑纯函数启发式预筛（不含回指结构时零 LLM 开销，直接 atomic，
+        与现状完全一致）；命中后再交给 LeadAgent.plan_stages 决策。
+        任何异常 / 假 LeadAgent（无 plan_stages）/ 判为 atomic 都回落原路径。
+        """
+        if not looks_like_dependent_chain(state.get("question", "")):
+            return {"plan_mode": "atomic"}
+
+        plan_method = getattr(lead_agent, "plan_stages", None)
+        if not callable(plan_method):
+            return {"plan_mode": "atomic"}
+
+        set_thinking = getattr(lead_agent, "set_on_thinking", None)
+        set_thinking_done = getattr(lead_agent, "set_on_thinking_done", None)
+        if event_callback:
+            def _on_plan(content, iteration):
+                event_callback(Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent="lead_agent",
+                    data={
+                        "content": content,
+                        "iteration": iteration,
+                        "phase": "decompose",
+                        "title": "回答阶段规划",
+                        "status": "running",
+                    },
+                ))
+
+            def _on_plan_done(iteration, elapsed_seconds):
+                event_callback(Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent="lead_agent",
+                    data={
+                        "iteration": iteration,
+                        "elapsed_seconds": elapsed_seconds,
+                        "phase": "decompose",
+                        "status": "completed",
+                    },
+                ))
+
+            if callable(set_thinking):
+                set_thinking(_on_plan)
+            if callable(set_thinking_done):
+                set_thinking_done(_on_plan_done)
+
+        enhanced_context = {
+            "personal_profile": state.get("personal_profile", ""),
+            "recent_history": state.get("recent_history", []),
+            "historical_cases": state.get("similar_memories", []),
+            "collected_info": state.get("collected_info", ""),
+            "verified_experiences": state.get("context", {}).get(
+                "verified_experiences", ""
+            ),
+            "memory_context": state.get("memory_context"),
+        }
+        try:
+            raw = await plan_method(
+                question=state["question"],
+                context=enhanced_context,
+            )
+            normalized = normalize_stage_plan(raw, max_stages=STAGE_MAX_STAGES)
+        except Exception as e:  # noqa: BLE001 - 规划失败回落原子路径
+            logger.warning(f"[SupervisorGraph] plan_stages 异常，回落 atomic: {e}")
+            normalized = {"mode": "atomic", "stages": [], "issues": [str(e)]}
+        finally:
+            if event_callback:
+                if callable(set_thinking):
+                    set_thinking(None)
+                if callable(set_thinking_done):
+                    set_thinking_done(None)
+
+        if normalized.get("mode") != "dag" or not normalized.get("stages"):
+            return {"plan_mode": "atomic"}
+
+        stages = normalized["stages"]
+        logger.info(f"[SupervisorGraph] DAG 分层规划: {len(stages)} 个阶段")
+        return {
+            "plan_mode": "dag",
+            "stage_plan": stages,
+            "stage_status": {s["stage_id"]: "pending" for s in stages},
+            "stage_results": {},
+            "current_wave_stage_ids": [],
+            "stage_wave_count": 0,
+        }
+
+    def _stage_advance(state: SupervisorState) -> dict:
+        """节点：DAG 层收尾 + 选出下一可执行层（层间屏障 / 护栏）。"""
+        plan = state.get("stage_plan", [])
+        status = dict(state.get("stage_status", {}))
+        results = state.get("stage_results", {})
+
+        # 1) 收尾上一层：running 且已有结果 → completed（worker 总会写占位结果）
+        prev_wave = state.get("current_wave_stage_ids", []) or []
+        for sid in prev_wave:
+            if status.get(sid) == "running":
+                status[sid] = "completed" if sid in results else "skipped"
+
+        wave_count = int(state.get("stage_wave_count", 0)) + 1
+        guard_hit = (
+            wave_count > STAGE_MAX_WAVES
+            or _elapsed_seconds(state.get("start_time", "")) > STAGE_TOTAL_BUDGET
+        )
+
+        # 2) 选下一层：pending 且全部依赖已完成
+        next_wave: List[str] = []
+        for st in plan:
+            sid = st["stage_id"]
+            if status.get(sid) != "pending":
+                continue
+            if guard_hit:
+                status[sid] = "skipped"
+                continue
+            deps = st.get("depends_on", []) or []
+            if all(status.get(d) == "completed" for d in deps):
+                next_wave.append(sid)
+
+        # 3) 死锁兜底：仍有 pending 但无可执行阶段 → 全部跳过
+        if not next_wave and any(
+            status.get(st["stage_id"]) == "pending" for st in plan
+        ):
+            for st in plan:
+                if status.get(st["stage_id"]) == "pending":
+                    status[st["stage_id"]] = "skipped"
+
+        # 4) 标记 running 并向前端广播分层推进
+        for sid in next_wave:
+            status[sid] = "running"
+        if event_callback and next_wave:
+            wave_titles = [
+                st.get("title", st["stage_id"])
+                for st in plan if st["stage_id"] in next_wave
+            ]
+            wave_iter = DAG_WAVE_ITER_BASE + wave_count
+            event_callback(Event(
+                type=EventType.AGENT_THINKING,
+                source_agent="lead_agent",
+                data={
+                    "content": f"第 {wave_count} 层求解启动，阶段：{'、'.join(wave_titles)}",
+                    "iteration": wave_iter,
+                    "phase": "decompose",
+                    "title": "分层求解推进",
+                    "status": "running",
+                },
+            ))
+            event_callback(Event(
+                type=EventType.AGENT_THINKING_DONE,
+                source_agent="lead_agent",
+                data={
+                    "iteration": wave_iter,
+                    "elapsed_seconds": 0.0,
+                    "phase": "decompose",
+                    "status": "completed",
+                },
+            ))
+
+        return {
+            "stage_status": status,
+            "current_wave_stage_ids": next_wave,
+            "stage_wave_count": wave_count,
+        }
+
+    async def _stage_worker_executor_node(state: Dict) -> dict:
+        """Send 目标节点：单个 stage 通过 AgentSubGraph 独立执行（Map 阶段）。"""
+        stage_id = state.get("stage_id", "")
+        agent_id = state.get("agent_id", "consultation_agent")
+        worker = _get_worker_by_id(agent_id)
+        if worker is None:
+            worker = consultation_worker
+            agent_id = worker.agent_id
+        sub_session_id = state.get("sub_session_id", "")
+
+        # 注入流式回调（phase=stage_{id}，避免相邻层/同 agent 事件聚合键冲突）
+        if event_callback:
+            _inject_worker_callbacks(
+                worker,
+                agent_id,
+                event_callback,
+                phase=f"stage_{stage_id}",
+                stream_final_content=False,
+            )
+            event_callback(Event(
+                type=EventType.SUBTASK_STARTED,
+                source_agent=agent_id,
+                data={"subtask_id": stage_id, "type": "stage"},
+            ))
+
+        _ctx = traced_span(SpanType.AGENT, name=f"{agent_id}:{stage_id}") if TRACE_AVAILABLE else None
+        if _ctx:
+            _ctx.__enter__()
+
+        timeout_occurred = False
+        try:
+            worker_memory_context = await _memory_builder(coordinator).build(
+                session_id=state.get("session_id", ""),
+                user_id=getattr(coordinator, "user_id", "default"),
+                query=state["question"],  # 阶段自包含子问（检索聚焦当前阶段）
+                agent_id=agent_id,
+                call_type=agent_id,
+                base_system_prompt=worker.get_base_system_prompt_stable(),
+                collected_info=state.get("collected_info", ""),
+                verified_experiences=state.get("verified_experiences", ""),
+            )
+            subgraph = build_agent_subgraph(
+                worker=worker,
+                tool_registry=tool_registry,
+                max_iterations=worker.config.get('max_iterations', 10),
+                max_tool_calls=2,
+                on_thinking=worker.on_thinking,
+                on_tool_step=worker.on_tool_step,
+                on_thinking_done=worker.on_thinking_done,
+                on_content_token=worker.on_content_token,
+            )
+            result = await asyncio.wait_for(
+                subgraph.ainvoke({
+                    "agent_id": agent_id,
+                    "sub_session_id": sub_session_id,
+                    "session_id": state.get("session_id", ""),
+                    "subtask_id": stage_id,
+                    "subtask_type": state.get("subtask_type", "stage"),
+                    "subtask_description": state.get("subtask_description", ""),
+                    "question": state["question"],
+                    "stage_prereq_text": state.get("stage_prereq_text", ""),
+                    "memory_context": worker_memory_context,
+                    "max_iterations": worker.config.get('max_iterations', 10),
+                    "max_tool_calls": 2,
+                }),
+                timeout=STAGE_WORKER_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Worker {agent_id} 阶段 {stage_id} 超时 ({STAGE_WORKER_TIMEOUT:.0f}s)")
+            result = {
+                "final_answer": f"[{agent_id}] 阶段求解超时，未能完成。",
+                "references": [],
+                "usage": {},
+                "message_count": 0,
+                "iterations": 0,
+            }
+            timeout_occurred = True
+        except Exception as e:  # noqa: BLE001 - 保证层间循环不卡死
+            logger.error(f"Worker {agent_id} 阶段 {stage_id} 异常: {e}")
+            result = {
+                "final_answer": f"[{agent_id}] 阶段求解失败，请重试。",
+                "references": [],
+                "usage": {},
+                "message_count": 0,
+                "iterations": 0,
+            }
+            timeout_occurred = True
+        finally:
+            if _ctx:
+                _ctx.__exit__(None, None, None)
+            if event_callback:
+                _cleanup_worker_callbacks(worker)
+
+        if event_callback:
+            event_callback(Event(
+                type=EventType.SUBTASK_COMPLETED,
+                source_agent=agent_id,
+                data={
+                    "subtask_id": stage_id,
+                    "answer_preview": result.get("final_answer", "")[:200],
+                },
+            ))
+
+        return {
+            "stage_results": {
+                stage_id: {
+                    "answer": result.get("final_answer", ""),
+                    "references": result.get("references", []),
+                    "usage": result.get("usage", {}),
+                    "message_count": result.get("message_count", 0),
+                    "iterations": result.get("iterations", 0),
+                    "agent_id": agent_id,
+                    "timeout_occurred": timeout_occurred,
+                }
+            },
+        }
+
+    async def _synthesize_stage_results(state: SupervisorState) -> dict:
+        """节点：跨阶段统一引用后，把各阶段结论拼成一条分小节 final_answer。"""
+        plan = state.get("stage_plan", [])
+        status = state.get("stage_status", {})
+        results = state.get("stage_results", {})
+        session_id = state["session_id"]
+
+        # 按拓扑序收集已完成的阶段条目
+        entries: List[Dict[str, Any]] = []
+        for st in plan:
+            sid = st["stage_id"]
+            r = results.get(sid)
+            if not r:
+                continue
+            if status.get(sid) != "completed":
+                continue
+            entries.append({
+                "stage_id": sid,
+                "title": st.get("title") or sid,
+                "text": r.get("answer", ""),
+                "references": r.get("references", []),
+                "agent_id": r.get("agent_id", st.get("assigned_agent", "")),
+            })
+
+        # 跨阶段引用统一重编号（纯函数）
+        texts, citations = unify_stage_citations(entries)
+
+        parts: List[str] = []
+        for entry, text in zip(entries, texts):
+            if text:
+                parts.append(f"## {entry['title']}\n{text}")
+
+        skipped = [
+            st for st in plan if status.get(st["stage_id"]) != "completed"
+        ]
+        if skipped:
+            skipped_titles = "、".join(
+                st.get("title", st["stage_id"]) for st in skipped
+            )
+            parts.append(
+                f"（以下阶段因超时或依赖未完成而未求解：{skipped_titles}，"
+                "如需请补充提问。）"
+            )
+
+        final_answer = "\n\n".join(parts) if parts else ""
+        if citations:
+            ref_section = coordinator.format_references_section(citations)
+            if ref_section:
+                final_answer += "\n" + ref_section
+
+        # 合并各阶段子会话到主会话 + 记录用户消息（对齐原子 swarm synthesize）
+        for entry, text in zip(entries, texts):
+            agent_id = entry["agent_id"]
+            sub_session_id = f"{session_id}:{agent_id}:{entry['stage_id']}"
+            coordinator.short_term_memory.merge_sub_session(
+                main_session_id=session_id,
+                sub_session_id=sub_session_id,
+                summary_text=f"[{agent_id}] {text}" if text else "",
+                role="assistant",
+            )
+        await coordinator.short_term_memory.add_message(
+            session_id=session_id,
+            role="user",
+            content=state["question"],
+        )
+
+        # 累计各阶段 token
+        totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_prompt_tokens": 0,
+        }
+        agents: List[str] = []
+        for entry in entries:
+            r = results.get(entry["stage_id"], {}) or {}
+            u = r.get("usage", {}) or {}
+            for key in totals:
+                totals[key] += u.get(key, 0)
+            if entry["agent_id"] and entry["agent_id"] not in agents:
+                agents.append(entry["agent_id"])
+        totals["cache_hit_ratio"] = (
+            totals["cached_prompt_tokens"] / totals["prompt_tokens"]
+            if totals["prompt_tokens"]
+            else None
+        )
+
+        timeout_occurred = bool(skipped)
+
+        # 汇总输出行：广播最终汇总（复用 synthesize 阶段，前端展示在最后一行）
+        if event_callback:
+            synth_content = (
+                f"已将 {len(entries)} 个阶段的结果按顺序整合为一条完整回答"
+                + ("（部分阶段未完成）" if timeout_occurred else "（引用已统一编号）")
+                + "。"
+            )
+            event_callback(Event(
+                type=EventType.AGENT_THINKING,
+                source_agent="lead_agent",
+                data={
+                    "content": synth_content,
+                    "iteration": 1,
+                    "phase": "synthesize",
+                    "title": "汇总输出",
+                    "status": "running",
+                },
+            ))
+            event_callback(Event(
+                type=EventType.AGENT_THINKING_DONE,
+                source_agent="lead_agent",
+                data={
+                    "iteration": 1,
+                    "elapsed_seconds": 0.0,
+                    "phase": "synthesize",
+                    "status": "completed",
+                },
+            ))
+
+        return {
+            "final_answer": final_answer,
+            "citations": citations,
+            "usage": totals,
+            "agents_involved": agents,
+            "swarm_enabled": True,
+            "mode": "swarm",
+            "suggestions": coordinator.extract_suggestions(final_answer),
+            "timeout_occurred": timeout_occurred,
+            "swarm_metadata": {
+                "num_stages": len(plan),
+                "num_stages_completed": len(entries),
+                "timeout": timeout_occurred,
+            },
+        }
+
     # ===== 条件路由函数 =====
 
     def _route_clarify(state: SupervisorState) -> str:
@@ -1097,6 +1538,59 @@ def build_supervisor_graph(
 
         return sends
 
+    def _route_after_plan(state: SupervisorState) -> str:
+        """阶段规划路由：dag → 分层执行；否则 → 原任务分解路径"""
+        return "stage_advance" if state.get("plan_mode") == "dag" else "assess_decompose"
+
+    def _stage_fanout(state: SupervisorState):
+        """DAG 分层扇出：有待执行层 → 返回 Send 列表；否则 → synthesize_stage。
+
+        依赖结论（前序阶段 answer）在组装 Send 时快照传入，不入父状态。
+        """
+        wave = state.get("current_wave_stage_ids", []) or []
+        if not wave:
+            return "synthesize_stage"
+
+        session_id = state["session_id"]
+        plan_by_id = {s["stage_id"]: s for s in state.get("stage_plan", [])}
+        results = state.get("stage_results", {})
+
+        sends = []
+        for sid in wave:
+            st = plan_by_id.get(sid, {})
+            agent_id = st.get("assigned_agent", "consultation_agent")
+            sub_session_id = f"{session_id}:{agent_id}:{sid}"
+
+            # 组装该阶段的前序结论文本（depends_on 的已完成阶段 answer）
+            prereq_parts = []
+            for dep in st.get("depends_on", []) or []:
+                dep_result = results.get(dep, {})
+                dep_answer = dep_result.get("answer", "")
+                if dep_answer:
+                    dep_title = plan_by_id.get(dep, {}).get("title", dep)
+                    prereq_parts.append(f"【阶段 {dep_title}】\n{dep_answer}")
+            stage_prereq_text = "\n".join(prereq_parts) if prereq_parts else ""
+
+            sends.append(Send(
+                node="worker_stage",
+                arg={
+                    "stage_id": sid,
+                    "agent_id": agent_id,
+                    "sub_session_id": sub_session_id,
+                    "session_id": session_id,
+                    "question": st.get("question") or state["question"],
+                    "subtask_description": st.get("description", ""),
+                    "subtask_type": st.get("type", "stage"),
+                    "stage_prereq_text": stage_prereq_text,
+                    "collected_info": state.get("collected_info", ""),
+                    "verified_experiences": state.get("context", {}).get(
+                        "verified_experiences", ""
+                    ),
+                    "memory_context": state.get("memory_context"),
+                }
+            ))
+        return sends
+
     # ===== 构建图 =====
 
     builder = StateGraph(SupervisorState)
@@ -1107,6 +1601,10 @@ def build_supervisor_graph(
     builder.add_node("clarify_decide", _clarify_decide)
     builder.add_node("clarify_ask", _clarify_ask)
     builder.add_node("retrieve_memories", _retrieve_memories)
+    builder.add_node("plan_stages", _plan_stages)
+    builder.add_node("stage_advance", _stage_advance)
+    builder.add_node("worker_stage", _stage_worker_executor_node)
+    builder.add_node("synthesize_stage", _synthesize_stage_results)
     builder.add_node("assess_decompose", _assess_decompose)
     builder.add_node("single_agent", _single_agent_node)
     builder.add_node("send_workers", _send_workers_node)
@@ -1140,8 +1638,18 @@ def build_supervisor_graph(
 
     builder.add_edge("chat_reply", "finalize")
 
-    # 先澄清完成 → 再检索记忆 → 最后任务分解
-    builder.add_edge("retrieve_memories", "assess_decompose")
+    # 澄清完成 → 检索记忆 → 阶段规划（依赖性子问判定）
+    builder.add_edge("retrieve_memories", "plan_stages")
+
+    # 阶段规划路由：dag → 分层执行；atomic → 原任务分解路径
+    builder.add_conditional_edges(
+        "plan_stages",
+        _route_after_plan,
+        {
+            "assess_decompose": "assess_decompose",
+            "stage_advance": "stage_advance",
+        }
+    )
 
     # 条件路由：single / swarm / fallback
     builder.add_conditional_edges(
@@ -1167,6 +1675,19 @@ def build_supervisor_graph(
     # Worker 完成 → synthesize
     builder.add_edge("worker_executor", "synthesize_results")
     builder.add_edge("synthesize_results", "finalize")
+
+    # DAG 分层循环：stage_advance 按就绪层扇出 worker_stage，
+    # 超步全部完成后 join 回 stage_advance 进入下一层
+    builder.add_conditional_edges(
+        "stage_advance",
+        _stage_fanout,
+        {
+            "worker_stage": "worker_stage",
+            "synthesize_stage": "synthesize_stage",
+        }
+    )
+    builder.add_edge("worker_stage", "stage_advance")
+    builder.add_edge("synthesize_stage", "finalize")
     builder.add_edge("finalize", END)
 
     # 编译：仅当启用 HITL（流式问卷）时才引入 checkpointer —— 按需引入 checkpoint
@@ -1267,13 +1788,22 @@ def _inject_worker_callbacks(
     agent_id: str,
     event_callback: Callable,
     stream_final_content: bool = False,
+    phase: Optional[str] = None,
 ):
-    """为 Worker 注入流式回调"""
+    """为 Worker 注入流式回调
+
+    phase：DAG 分层求解时给阶段 worker 的事件打上 stage_{id} 标记，
+    避免同 agent 相邻阶段层的 thinking 事件在 SSE/前端聚合时被并入一块。
+    原子路径不传，行为与原来完全一致。
+    """
     def _on_thinking(content, iteration):
+        data = {"content": content, "iteration": iteration}
+        if phase:
+            data["phase"] = phase
         event_callback(Event(
             type=EventType.AGENT_THINKING,
             source_agent=agent_id,
-            data={"content": content, "iteration": iteration},
+            data=data,
         ))
 
     def _on_tool_step(tool_name, arguments, result, iteration, success):
@@ -1291,10 +1821,13 @@ def _inject_worker_callbacks(
         ))
 
     def _on_thinking_done(iteration, elapsed_seconds):
+        data = {"iteration": iteration, "elapsed_seconds": elapsed_seconds}
+        if phase:
+            data["phase"] = phase
         event_callback(Event(
             type=EventType.AGENT_THINKING_DONE,
             source_agent=agent_id,
-            data={"iteration": iteration, "elapsed_seconds": elapsed_seconds},
+            data=data,
         ))
 
     def _on_content_token(token):

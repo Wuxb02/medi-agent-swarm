@@ -321,6 +321,148 @@ class LeadAgent:
                 "reason": f"评估失败：{e}"
             }
 
+    async def plan_stages(
+        self,
+        question: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """判断问题是否需要"同消息内依赖性子问题（DAG）"分层求解。
+
+        返回：
+        - mode: "dag"（含多个有依赖的子问，需逐层求解）或 "atomic"（一次求解）
+        - stages: dag 时的阶段列表，每项含 stage_id/title/question/
+          description/assigned_agent/depends_on；atomic 时为空
+        - reason: 判断依据
+
+        规划失败的兜底一律返回 atomic，把行为降级为现有单轮路径。
+        """
+        iteration = 1
+        think_start = time.monotonic()
+        if self.on_thinking:
+            self.on_thinking(
+                content=f"正在判断该提问是否需要分阶段求解：「{question[:200]}」",
+                iteration=iteration,
+            )
+
+        user_prompt = PromptLoader.render(
+            "swarm/plan_stages_user.j2",
+            question=question,
+            personal_profile=(context or {}).get("personal_profile"),
+            collected_info=(context or {}).get("collected_info"),
+            recent_history=(context or {}).get("recent_history"),
+            historical_cases=(context or {}).get("historical_cases"),
+        )
+        memory_context = (context or {}).get("memory_context")
+        if memory_context is not None:
+            messages = memory_context.prompt_messages(question=user_prompt)
+        else:
+            messages = [
+                {"role": "system", "content": self._get_system_prompt()},
+                {"role": "user", "content": user_prompt},
+            ]
+
+        try:
+            if self.on_thinking:
+                response = await self.llm_client.chat_with_tools_stream(
+                    messages=messages,
+                    tools=None,
+                    response_format={"type": "json_object"},
+                    on_reasoning_token=lambda token: self.on_thinking(
+                        content=token,
+                        iteration=iteration,
+                    ),
+                )
+                content = response.content or ""
+            else:
+                content = await self.llm_client.chat(
+                    messages,
+                    response_format={"type": "json_object"},
+                )
+
+            logger.debug(f"LeadAgent plan_stages: {content[:200]}...")
+
+            import json
+
+            result = content
+            if isinstance(content, str):
+                result = json.loads(content)
+            if not isinstance(result, dict):
+                result = {"mode": "atomic", "stages": [], "reason": "非 dict"}
+
+            # 统一补默认字段，交由 graph 内的 normalize_stage_plan 做白名单/去环
+            mode = result.get("mode", "atomic")
+            stages = result.get("stages")
+            if not isinstance(stages, list):
+                stages = []
+            clean_stages = []
+            for item in stages:
+                if not isinstance(item, dict):
+                    continue
+                clean_stages.append({
+                    "stage_id": item.get("stage_id", ""),
+                    "title": item.get("title", ""),
+                    "question": item.get("question", ""),
+                    "description": item.get("description", ""),
+                    "assigned_agent": item.get("assigned_agent", ""),
+                    "depends_on": item.get("depends_on") or [],
+                    "type": item.get("type", "stage"),
+                })
+            result = {
+                "mode": mode if mode in ("dag", "atomic") else "atomic",
+                "reason": result.get("reason", ""),
+                "stages": clean_stages,
+            }
+
+            # 以可读文本描述规划结果
+            if self.on_thinking:
+                if result["mode"] == "dag":
+                    agent_name_map = {
+                        "consultation_agent": "健康咨询",
+                        "diagnostic_agent": "症状诊断",
+                        "research_agent": "医学研究",
+                    }
+                    thinking_parts = [f"检测到依赖性子问题，按 {len(clean_stages)} 个阶段依次求解："]
+                    for i, st in enumerate(clean_stages, 1):
+                        agent_display = agent_name_map.get(
+                            st.get("assigned_agent", ""),
+                            st.get("assigned_agent", "未知"),
+                        )
+                        dep_txt = (
+                            f"（依赖 {','.join(st.get('depends_on', []))}）"
+                            if st.get("depends_on")
+                            else ""
+                        )
+                        thinking_parts.append(
+                            f"{i}. {st.get('title', '') or f'阶段{i}'} —— "
+                            f"{agent_display} Agent {dep_txt}"
+                        )
+                    if result.get("reason"):
+                        thinking_parts.append(f"\n规划依据：{result['reason']}")
+                    self.on_thinking(content="\n".join(thinking_parts), iteration=iteration)
+                else:
+                    self.on_thinking(
+                        content="该提问不包含需逐层求解的依赖性子问题，将一次性求解。",
+                        iteration=iteration,
+                    )
+
+            # 发射 thinking_done
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"LeadAgent plan_stages error: {e}")
+            if self.on_thinking_done:
+                elapsed = round(time.monotonic() - think_start, 1)
+                self.on_thinking_done(iteration=iteration, elapsed_seconds=elapsed)
+            return {
+                "mode": "atomic",
+                "stages": [],
+                "reason": f"阶段规划失败：{e}",
+            }
+
     def create_subtasks(
         self,
         decomposition_result: Dict[str, Any],

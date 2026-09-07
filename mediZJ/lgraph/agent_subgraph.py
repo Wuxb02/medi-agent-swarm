@@ -99,6 +99,15 @@ def build_agent_subgraph(
             question = f"## 背景信息（由系统提供）\n{original_question}\n\n## 当前任务\n{subtask_desc}"
         else:
             question = subtask_desc or original_question or ""
+
+        # 依赖性子问题（DAG 分层求解）：把前序阶段结论作为给定事实注入。
+        # 普通/原子路径不传该字段，输出与改动前完全一致。
+        stage_prereq = state.get("stage_prereq_text") or ""
+        if stage_prereq:
+            question = (
+                "## 前置结论（由前一阶段求得，须在此具体方案/结论的基础上回答当前阶段）\n"
+                f"{stage_prereq}\n\n{question}"
+            )
         user_input = worker.format_user_input({
             "question": question,
             "subtask_id": state.get("subtask_id", ""),

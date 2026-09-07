@@ -1,0 +1,56 @@
+问题：{{ question }}
+
+{% if personal_profile and personal_profile != "暂无" %}## 用户档案
+{{ personal_profile }}
+{% endif %}{% if collected_info %}## 用户补充信息（已收集）
+{{ collected_info }}
+{% endif %}{% if recent_history %}## 近期对话历史
+{% for msg in recent_history %}[{{ msg.role }}] {{ msg.content }}
+{% endfor %}{% endif %}{% if historical_cases %}## 历史情景摘要（不可作为医学证据）
+{% for case in historical_cases %}- {{ case.summary }}
+{% endfor %}{% endif %}
+
+## 你的任务
+判断"问题"中是否含有【同一条消息内、且后一问必须建立在前一问产出的具体结论之上】的
+依赖性子问题。若没有，模式必须是 atomic（一次求解即可，不要强行拆分）。
+
+只有出现"回指上一问的具体结论"时才判为 dag，例如：
+- "xx 病最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"
+  → 阶段 1 必须先给出含具体方案名/药名的明确结论，阶段 2 才能基于它谈不良反应。
+- "高血压目前首选药物有哪些？上述方案长期服用的主要副作用是什么？"
+- "孩子发烧可以先吃退烧药吗？如果吃了这个药还反复发热该怎么办？"
+
+独立的多个并列子问【不】算 dag（如"头疼怎么办？发烧怎么办？"），
+因为它们互不依赖，一次并行分解即可。
+
+## dag 模式的拆分要求
+1. 拆成 2~4 个阶段，每个阶段解决一个子问题，只能交给一个 Agent。
+2. 阶段必须按依赖顺序给出：每个阶段可以 depends_on 更早阶段的 stage_id，
+   禁止引用自己或之后的阶段（禁止成环）。
+3. 为了让后一阶段能真正引用前一阶段产物：
+   - 前一阶段的 description 必须写明"需给出具体、明确的方案结论（含具体方案名/药名/剂型或诊疗路径）"；
+   - 后一阶段可在 description 中写明"在阶段 sX（标题）给出的具体方案基础上……"。
+4. question 字段填该阶段要回答的子问（尽量用用户的原始表述，使其在不看整段消息时也能理解）。
+
+可用 Agent（assigned_agent 只能取其一）：
+- consultation_agent：健康咨询、用药/生活方式、护理与随诊类
+- research_agent：医学研究、权威指南/最新方案、循证文献检索类
+- diagnostic_agent：症状诊断、鉴别诊断、风险评估类
+
+## 输出格式
+请严格按照以下 JSON 格式输出，不要输出其他内容（不要用 Markdown 代码块包裹）：
+{
+  "mode": "atomic | dag",
+  "reason": "判断依据的简要说明",
+  "stages": [
+    {
+      "stage_id": "s1",
+      "title": "阶段短标题",
+      "question": "该阶段要回答的子问题",
+      "description": "该阶段执行说明（须产出自包含、可被后续阶段引用的结论）",
+      "assigned_agent": "research_agent | consultation_agent | diagnostic_agent",
+      "depends_on": []
+    }
+  ]
+}
+mode 为 atomic 时，stages 返回空数组 []。
