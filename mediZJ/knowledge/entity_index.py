@@ -41,13 +41,22 @@ class MedicalEntityIndex:
     def __init__(self):
         # entity → {doc_id, ...}
         self.entity_to_docs: Dict[str, Set[str]] = defaultdict(set)
+        # doc_id → {entity, ...}，反向映射，用于精确移除与替换写入
+        self._doc_entities: Dict[str, Set[str]] = {}
         # entity → 文档频率（出现在多少个文档中）
         self._entity_df: Dict[str, int] = {}
         self._doc_count = 0
 
+    def _sync_stats(self) -> None:
+        """重建文档频率与文档总数，增删文档后调用"""
+        self._entity_df = {
+            entity: len(doc_ids) for entity, doc_ids in self.entity_to_docs.items()
+        }
+        self._doc_count = len(self._doc_entities)
+
     def build_from_kb(self, documents: List[Dict]):
         """
-        从知识库文档中抽取医学实体构建倒排索引。
+        从知识库文档中抽取医学实体构建倒排索引（全量重建）。
 
         Args:
             documents: 文档列表，每项含 ``doc_id`` 与 ``text`` 字段
@@ -57,16 +66,17 @@ class MedicalEntityIndex:
             return
 
         self.entity_to_docs.clear()
+        self._doc_entities.clear()
         for doc in documents:
-            entities = self._extract_entities(doc.get("text", ""))
             doc_id = doc.get("doc_id", "")
             if not doc_id:
                 continue
+            entities = self._extract_entities(doc.get("text", ""))
+            self._doc_entities[doc_id] = set(entities)
             for entity in entities:
                 self.entity_to_docs[entity].add(doc_id)
 
-        self._doc_count = len(documents)
-        self._entity_df = {entity: len(doc_ids) for entity, doc_ids in self.entity_to_docs.items()}
+        self._sync_stats()
         logger.info(
             f"Entity index built: {len(self.entity_to_docs)} unique entities "
             f"from {self._doc_count} documents"
@@ -127,22 +137,26 @@ class MedicalEntityIndex:
         return {k: v / max_score for k, v in doc_scores.items()}
 
     def add_document(self, doc_id: str, text: str):
-        """增量添加单个文档的实体索引"""
+        """增量写入单个文档的实体索引；同一 doc_id 重复写入为替换语义"""
+        if not doc_id:
+            return
+        self.remove_document(doc_id)
         entities = self._extract_entities(text)
+        self._doc_entities[doc_id] = set(entities)
         for entity in entities:
             self.entity_to_docs[entity].add(doc_id)
-        # 更新文档频率
-        self._entity_df = {e: len(docs) for e, docs in self.entity_to_docs.items()}
-        self._doc_count += 1
+        self._sync_stats()
 
     def remove_document(self, doc_id: str):
-        """移除单个文档的实体索引"""
-        for entity, doc_ids in self.entity_to_docs.items():
+        """精确移除单个文档的实体索引"""
+        entities = self._doc_entities.pop(doc_id, None)
+        if not entities:
+            return
+        for entity in entities:
+            doc_ids = self.entity_to_docs.get(entity)
+            if not doc_ids:
+                continue
             doc_ids.discard(doc_id)
-        # 清理空集合
-        self.entity_to_docs = defaultdict(
-            set, {k: v for k, v in self.entity_to_docs.items() if v}
-        )
-        # 同步清理文档频率（空实体已不存在于 entity_to_docs）
-        self._entity_df = {e: len(docs) for e, docs in self.entity_to_docs.items()}
-        self._doc_count = max(0, self._doc_count - 1)
+            if not doc_ids:
+                del self.entity_to_docs[entity]
+        self._sync_stats()

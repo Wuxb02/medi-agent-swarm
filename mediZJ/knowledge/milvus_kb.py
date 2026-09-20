@@ -166,7 +166,7 @@ class MedicalKnowledgeBase:
             rows = self.milvus_client.query(
                 collection_name=self.collection_name,
                 filter="id >= 0",
-                output_fields=["doc_id", "text"],
+                output_fields=["doc_id", "document_id", "text"],
                 limit=16384,
             )
         except Exception as e:
@@ -176,20 +176,43 @@ class MedicalKnowledgeBase:
         if not rows:
             return
 
-        # 按 doc_id 聚合所有 chunk 文本（避免仅取 chunk_0 遗漏关键实体）
+        # 按逻辑 document_id 聚合所有 chunk 文本（与检索侧 entity_boost 的 key 一致），
+        # 避免仅取 chunk_0 遗漏关键实体
         docs_by_id: dict = {}
         for row in rows:
-            doc_id = row.get("doc_id", "")
+            document_id = row.get("document_id") or row.get("doc_id", "")
             text = row.get("text", "")
-            if doc_id and text:
-                if doc_id not in docs_by_id:
-                    docs_by_id[doc_id] = text
+            if document_id and text:
+                if document_id not in docs_by_id:
+                    docs_by_id[document_id] = text
                 else:
-                    docs_by_id[doc_id] += "\n" + text
+                    docs_by_id[document_id] += "\n" + text
 
         docs = [{"doc_id": k, "text": v} for k, v in docs_by_id.items()]
 
         self.entity_index.build_from_kb(docs)
+
+    def _index_document(self, document_id: str) -> None:
+        """
+        按逻辑文档重建实体索引。
+
+        同一逻辑文档可能对应多个物理版本，删除单个版本后其余版本仍应提供
+        实体加权，因此这里从 Milvus 重新聚合并整篇替换。
+        """
+        if not document_id:
+            return
+        rows = self.milvus_client.query(
+            collection_name=self.collection_name,
+            filter=f'document_id == "{document_id}"',
+            output_fields=["text"],
+            limit=16384,
+        )
+        if not rows:
+            self.entity_index.remove_document(document_id)
+            return
+        self.entity_index.add_document(
+            document_id, "\n".join(row.get("text", "") for row in rows),
+        )
 
     @staticmethod
     def _chunk_text(text: str, chunk_size: int = 1024, overlap: int = 100) -> List[str]:
@@ -280,13 +303,9 @@ class MedicalKnowledgeBase:
 
         # 完全删除了原来庞大的库内 query 全量拉取并 fit/save 离线 pkl 的代码，彻底根治延迟高/崩溃隐患
 
-        # 增量更新实体索引
-        seen_doc_ids: set = set()
-        for chunk in all_chunks:
-            doc_id = chunk["doc_id"]
-            if doc_id not in seen_doc_ids:
-                seen_doc_ids.add(doc_id)
-                self.entity_index.add_document(doc_id, chunk["text"])
+        # 增量更新实体索引：按逻辑文档聚合全部 chunk，key 与检索侧 entity_boost 一致
+        for document_id in {chunk["document_id"] for chunk in all_chunks}:
+            self._index_document(document_id)
 
         return len(data)
 
@@ -631,6 +650,8 @@ class MedicalKnowledgeBase:
         if not chunks:
             return 0
 
+        document_id = chunks[0].get("metadata", {}).get("document_id") or doc_id
+
         filter_expr = f'doc_id == "{doc_id}"'
         try:
             self.milvus_client.delete(
@@ -642,8 +663,8 @@ class MedicalKnowledgeBase:
             logger.error(f"Failed to delete document {doc_id}: {e}")
             return 0
 
-        # 同步更新实体索引
-        self.entity_index.remove_document(doc_id)
+        # 同步更新实体索引（按逻辑文档重建，同一逻辑文档可能还有其它版本）
+        self._index_document(document_id)
         return len(chunks)
 
     @_serialized

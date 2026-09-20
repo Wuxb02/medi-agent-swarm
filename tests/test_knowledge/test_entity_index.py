@@ -211,10 +211,33 @@ class TestEdgeCases:
     def test_nonexistent_doc_removal(self):
         idx = MedicalEntityIndex()
         idx.add_document("D1", "高血压")
-        # 删除不存在的文档不应崩溃
+        # 删除不存在的文档不应崩溃，也不应影响已有文档的计数
         idx.remove_document("D_nonexistent")
-        assert idx._doc_count == 0
+        assert idx._doc_count == 1
         assert "D1" in idx.entity_to_docs.get("高血压", set())
+
+    def test_add_document_replaces_existing(self):
+        """同一 doc_id 重复写入为替换语义：不重复计数、旧实体不残留"""
+        idx = MedicalEntityIndex()
+        idx.add_document("D1", "高血压 ACEI")
+        idx.add_document("D1", "糖尿病 二甲双胍")
+
+        assert idx._doc_count == 1
+        assert idx.search("高血压") == {}
+        assert idx.search("糖尿病") == {"D1": pytest.approx(1.0)}
+        assert all(v for v in idx.entity_to_docs.values())
+
+    def test_add_document_updates_df(self):
+        """替换写入后 IDF 依赖的文档频率应与索引一致"""
+        idx = MedicalEntityIndex()
+        idx.add_document("D1", "高血压 罕见病X")
+        idx.add_document("D2", "高血压")
+        idx.add_document("D1", "高血压")
+
+        assert "罕见病X" not in idx.entity_to_docs
+        assert "罕见病X" not in idx._entity_df
+        assert idx._entity_df["高血压"] == 2
+        assert idx._doc_count == 2
 
 
 class TestMedicalCodeRegex:
