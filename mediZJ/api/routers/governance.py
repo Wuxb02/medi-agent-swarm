@@ -43,31 +43,3 @@ async def retry_lifecycle_job(
         return await DataLifecycleService().retry(job_id, admin["user_id"])
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.get("/conflicts")
-async def list_conflicts(
-    status: str | None = None,
-    _admin: dict = Depends(require_admin),
-):
-    allowed = {None, "pending", "confirmed", "dismissed", "resolved"}
-    if status not in allowed:
-        raise HTTPException(status_code=422, detail="非法冲突状态")
-    return {"items": KnowledgeCatalog().list_conflicts(status)}
-
-
-@router.post("/conflicts/{conflict_id}/{action}")
-async def review_conflict(
-    conflict_id: str,
-    action: str,
-    admin: dict = Depends(require_admin),
-):
-    try:
-        updated = KnowledgeCatalog().review_conflict(
-            conflict_id, action, admin["user_id"]
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if not updated:
-        raise HTTPException(status_code=404, detail="冲突记录不存在")
-    return {"updated": True}

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from mediZJ.knowledge.catalog import KnowledgeCatalog
-from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
 from mediZJ.memory.lineage import MemoryLineageStore
 from mediZJ.memory.session_db import SessionDB
 from mediZJ.memory.session_summary import DEFAULT_SESSION_SUMMARY_DIR
@@ -94,25 +93,12 @@ class DataLifecycleService:
 
     async def prune_expired(self, actor_id: str) -> dict[str, Any]:
         job_id = self.catalog.create_job("prune_expired", "", actor_id)
-        retention_days = int(os.getenv("KNOWLEDGE_ARCHIVE_RETENTION_DAYS", "365"))
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=retention_days)
-        ).isoformat()
-        removed = 0
         try:
-            kb = MedicalKnowledgeBase()
-            for version in self.catalog.archived_before(cutoff):
-                kb.delete_document(version["version_id"])
-                if self.catalog.delete_version_record(version["version_id"]):
-                    removed += 1
-            result = {
-                "knowledge_versions": removed,
-                **self._prune_memory_rows(),
-            }
+            result = self._prune_memory_rows()
             self.catalog.finish_job(job_id, "completed", result)
             self.catalog.audit("prune_expired", actor_id, "", result)
         except Exception as exc:
-            self.catalog.finish_job(job_id, "failed", {"knowledge_versions": removed}, str(exc))
+            self.catalog.finish_job(job_id, "failed", {}, str(exc))
         return self.catalog.get_job(job_id) or {"job_id": job_id}
 
     async def retry(self, job_id: str, actor_id: str) -> dict[str, Any]:

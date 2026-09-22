@@ -96,11 +96,6 @@ class CitationValidator:
                     "validation_status": "valid",
                 }
             )
-            item["conflicts"] = self.catalog.list_conflicts(
-                "pending", [version["version_id"]]
-            ) + self.catalog.list_conflicts(
-                "confirmed", [version["version_id"]]
-            )
             valid.append(item)
         for index, item in enumerate(valid, 1):
             item["index"] = index
@@ -232,10 +227,6 @@ class MedicalAnswerVerifier:
             violations.append("存在失效或无法核验的引用")
         if _NUMERIC_MEDICAL.search(answer) and not validated_citations:
             violations.append("数值性医学主张缺少有效来源")
-        if any(item.get("conflicts") for item in validated_citations) and not any(
-            term in answer for term in ("冲突", "差异", "适用人群", "专业医生")
-        ):
-            violations.append("未说明引用来源之间尚存未解决差异")
         return violations
 
     async def _semantic_verify(

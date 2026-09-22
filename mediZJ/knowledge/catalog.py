@@ -73,7 +73,7 @@ class KnowledgeCatalog:
                     value TEXT NOT NULL
                 );
                 INSERT OR IGNORE INTO knowledge_schema_meta VALUES
-                    ('schema_version', '1');
+                    ('schema_version', '2');
 
                 CREATE TABLE IF NOT EXISTS knowledge_documents (
                     version_id TEXT PRIMARY KEY,
@@ -102,25 +102,6 @@ class KnowledgeCatalog:
                 CREATE INDEX IF NOT EXISTS idx_knowledge_version_status
                     ON knowledge_documents(status, version_id);
 
-                CREATE TABLE IF NOT EXISTS knowledge_conflicts (
-                    conflict_id TEXT PRIMARY KEY,
-                    left_version_id TEXT NOT NULL,
-                    left_chunk_uid TEXT NOT NULL,
-                    right_version_id TEXT NOT NULL,
-                    right_chunk_uid TEXT NOT NULL,
-                    conflict_type TEXT NOT NULL,
-                    similarity_score REAL NOT NULL DEFAULT 0,
-                    confidence REAL NOT NULL DEFAULT 0,
-                    explanation TEXT NOT NULL DEFAULT '',
-                    detection_status TEXT NOT NULL DEFAULT 'completed',
-                    review_status TEXT NOT NULL DEFAULT 'pending',
-                    error TEXT,
-                    reviewer TEXT,
-                    reviewed_at TEXT,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(left_chunk_uid, right_chunk_uid, conflict_type)
-                );
-
                 CREATE TABLE IF NOT EXISTS lifecycle_jobs (
                     job_id TEXT PRIMARY KEY,
                     job_type TEXT NOT NULL,
@@ -140,6 +121,10 @@ class KnowledgeCatalog:
                     result TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 );
+
+                DROP TABLE IF EXISTS knowledge_conflicts;
+                UPDATE knowledge_schema_meta
+                SET value = '2' WHERE key = 'schema_version';
                 """
             )
 
@@ -249,23 +234,6 @@ class KnowledgeCatalog:
                 (error[:1000], version_id),
             )
 
-    def archive_document(self, document_id: str) -> Optional[dict[str, Any]]:
-        with self._connection() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM knowledge_documents
-                WHERE document_id = ? AND status = 'active'
-                """,
-                (document_id,),
-            ).fetchone()
-            if not row:
-                return None
-            conn.execute(
-                "UPDATE knowledge_documents SET status = 'archived' WHERE version_id = ?",
-                (row["version_id"],),
-            )
-            return dict(row)
-
     def active_version(self, document_id: str) -> Optional[dict[str, Any]]:
         with self._connection() as conn:
             row = conn.execute(
@@ -302,11 +270,87 @@ class KnowledgeCatalog:
                 dict(row) for row in conn.execute(
                     """
                     SELECT * FROM knowledge_documents
+                    WHERE document_id = ?
+                      AND status IN ('active', 'archived')
+                    ORDER BY version DESC
+                    """,
+                    (document_id,),
+                ).fetchall()
+            ]
+
+    def previous_version(self, document_id: str) -> Optional[dict[str, Any]]:
+        """返回当前唯一可回滚的上一版。"""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM knowledge_documents
+                WHERE document_id = ? AND status = 'archived'
+                ORDER BY version DESC LIMIT 1
+                """,
+                (document_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def versions_to_prune(
+        self,
+        document_id: str,
+        keep_version_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """列出切换前应清理的旧归档版本。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM knowledge_documents
+                WHERE document_id = ? AND status = 'archived'
+                ORDER BY version DESC
+                """,
+                (document_id,),
+            ).fetchall()
+        return [
+            dict(row) for row in rows
+            if row["version_id"] not in keep_version_ids
+        ]
+
+    def document_versions(self, document_id: str) -> list[dict[str, Any]]:
+        """返回逻辑文档的全部物理版本。"""
+        with self._connection() as conn:
+            return [
+                dict(row) for row in conn.execute(
+                    """
+                    SELECT * FROM knowledge_documents
                     WHERE document_id = ? ORDER BY version DESC
                     """,
                     (document_id,),
                 ).fetchall()
             ]
+
+    def retention_cleanup_candidates(self) -> list[dict[str, Any]]:
+        """列出两版本模型不再保留的归档版本。"""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM knowledge_documents
+                WHERE status IN ('active', 'archived')
+                ORDER BY document_id, version DESC
+                """
+            ).fetchall()
+        active_documents = {
+            row["document_id"] for row in rows if row["status"] == "active"
+        }
+        kept_archived: set[str] = set()
+        candidates = []
+        for row in rows:
+            if row["status"] != "archived":
+                continue
+            document_id = row["document_id"]
+            if (
+                document_id in active_documents
+                and document_id not in kept_archived
+            ):
+                kept_archived.add(document_id)
+                continue
+            candidates.append(dict(row))
+        return candidates
 
     def list_active(self) -> list[dict[str, Any]]:
         with self._connection() as conn:
@@ -319,18 +363,6 @@ class KnowledgeCatalog:
                 ).fetchall() if self._is_effective(row)
             ]
 
-    def archived_before(self, cutoff: str) -> list[dict[str, Any]]:
-        with self._connection() as conn:
-            return [
-                dict(row) for row in conn.execute(
-                    """
-                    SELECT * FROM knowledge_documents
-                    WHERE status = 'archived' AND created_at < ?
-                    """,
-                    (cutoff,),
-                ).fetchall()
-            ]
-
     def delete_version_record(self, version_id: str) -> bool:
         with self._connection() as conn:
             cursor = conn.execute(
@@ -341,6 +373,15 @@ class KnowledgeCatalog:
                 (version_id,),
             )
             return cursor.rowcount > 0
+
+    def delete_document_records(self, document_id: str) -> int:
+        """删除逻辑文档的全部目录记录。"""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM knowledge_documents WHERE document_id = ?",
+                (document_id,),
+            )
+            return cursor.rowcount
 
     def register_legacy(self, metadata: dict[str, Any]) -> None:
         document_id = str(metadata.get("doc_id", ""))
@@ -459,77 +500,3 @@ class KnowledgeCatalog:
                     _now(),
                 ),
             )
-
-    def upsert_conflict(self, conflict: dict[str, Any]) -> None:
-        with self._connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO knowledge_conflicts (
-                    conflict_id, left_version_id, left_chunk_uid,
-                    right_version_id, right_chunk_uid, conflict_type,
-                    similarity_score, confidence, explanation,
-                    detection_status, review_status, error, reviewer,
-                    reviewed_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(left_chunk_uid, right_chunk_uid, conflict_type)
-                DO UPDATE SET similarity_score = excluded.similarity_score,
-                    confidence = excluded.confidence,
-                    explanation = excluded.explanation,
-                    detection_status = excluded.detection_status,
-                    error = excluded.error
-                """,
-                (
-                    conflict["conflict_id"], conflict["left_version_id"],
-                    conflict["left_chunk_uid"], conflict["right_version_id"],
-                    conflict["right_chunk_uid"], conflict["conflict_type"],
-                    conflict.get("similarity_score", 0),
-                    conflict.get("confidence", 0),
-                    conflict.get("explanation", ""),
-                    conflict.get("detection_status", "completed"),
-                    conflict.get("review_status", "pending"),
-                    conflict.get("error"), conflict.get("reviewer"),
-                    conflict.get("reviewed_at"),
-                    conflict.get("created_at", _now()),
-                ),
-            )
-
-    def list_conflicts(
-        self,
-        review_status: Optional[str] = None,
-        version_ids: Optional[list[str]] = None,
-    ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM knowledge_conflicts WHERE 1 = 1"
-        params: list[Any] = []
-        if review_status:
-            sql += " AND review_status = ?"
-            params.append(review_status)
-        if version_ids:
-            placeholders = ",".join("?" for _ in version_ids)
-            sql += (
-                f" AND (left_version_id IN ({placeholders})"
-                f" OR right_version_id IN ({placeholders}))"
-            )
-            params.extend(version_ids)
-            params.extend(version_ids)
-        sql += " ORDER BY created_at DESC"
-        with self._connection() as conn:
-            return [dict(row) for row in conn.execute(sql, params).fetchall()]
-
-    def review_conflict(
-        self,
-        conflict_id: str,
-        status: str,
-        reviewer: str,
-    ) -> bool:
-        if status not in {"confirmed", "dismissed", "resolved"}:
-            raise ValueError("非法冲突审核状态")
-        with self._connection() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE knowledge_conflicts
-                SET review_status = ?, reviewer = ?, reviewed_at = ?
-                WHERE conflict_id = ?
-                """,
-                (status, reviewer, _now(), conflict_id),
-            )
-            return cursor.rowcount > 0

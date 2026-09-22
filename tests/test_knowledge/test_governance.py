@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mediZJ.knowledge.catalog import KnowledgeCatalog
-from mediZJ.knowledge.conflict_detector import MedicalConflictDetector
+from mediZJ.api.services import knowledge_service
 from mediZJ.memory.lifecycle import DataLifecycleService
 from mediZJ.memory import lifecycle as lifecycle_module
 from mediZJ.memory.lineage import MemoryLineageStore
@@ -57,6 +57,9 @@ def test_failed_version_does_not_replace_active(catalog):
 
     assert catalog.active_version("doc")["version_id"] == active["version_id"]
     assert catalog.get_version(failed["version_id"])["status"] == "failed"
+    assert [item["version_id"] for item in catalog.list_versions("doc")] == [
+        active["version_id"]
+    ]
 
 
 def test_future_effective_version_is_not_active_for_retrieval(catalog):
@@ -79,8 +82,13 @@ def test_citation_validator_rejects_archived_and_enriches_active(catalog):
     assert valid[0]["version_id"] == active["version_id"]
     assert valid[0]["validation_status"] == "valid"
 
-    catalog.archive_document("doc")
-    assert validator.validate([{"index": 1, "doc_id": "doc"}]) == []
+    replacement = catalog.begin_version("doc", "hash-2", _metadata())
+    catalog.activate(replacement["version_id"])
+    assert validator.validate([{
+        "index": 1,
+        "doc_id": "doc",
+        "version_id": active["version_id"],
+    }]) == []
 
 
 @pytest.mark.asyncio
@@ -204,141 +212,145 @@ def test_memory_lineage_validates_source_and_expiry(tmp_path):
     assert store.is_valid("u1", "profile", "unregistered")
 
 
-def test_conflict_requires_explicit_admin_review(catalog):
-    conflict = {
-        "conflict_id": "conflict-1",
-        "left_version_id": "left",
-        "left_chunk_uid": "left:0",
-        "right_version_id": "right",
-        "right_chunk_uid": "right:0",
-        "conflict_type": "threshold_difference",
-        "confidence": 0.8,
-        "explanation": "两条血压阈值不一致",
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    catalog.upsert_conflict(conflict)
-
-    assert catalog.list_conflicts("pending")[0]["conflict_id"] == "conflict-1"
-    assert catalog.review_conflict("conflict-1", "confirmed", "admin")
-    reviewed = catalog.list_conflicts("confirmed")[0]
-    assert reviewed["reviewer"] == "admin"
-
-    with pytest.raises(ValueError, match="非法冲突"):
-        catalog.review_conflict("conflict-1", "active", "admin")
-
-
-def test_catalog_jobs_and_archived_cleanup_candidates(catalog):
-    version = catalog.begin_version("doc", "hash", _metadata())
-    catalog.activate(version["version_id"])
-    catalog.archive_document("doc")
-
-    assert catalog.archived_before("9999-01-01T00:00:00+00:00")
+def test_catalog_jobs_and_schema_migration(catalog):
     job_id = catalog.create_job("prune_expired", "", "admin")
-    catalog.finish_job(job_id, "completed", {"knowledge_versions": 1})
-    assert catalog.get_job(job_id)["result"]["knowledge_versions"] == 1
+    catalog.finish_job(job_id, "completed", {"memory_usage": 1})
+    assert catalog.get_job(job_id)["result"]["memory_usage"] == 1
     catalog.audit("prune_expired", "admin", "", {"count": 1})
-    assert catalog.delete_version_record(version["version_id"])
-    assert not catalog.delete_version_record("missing")
+    with sqlite3.connect(catalog.db_path) as conn:
+        assert conn.execute(
+            "SELECT value FROM knowledge_schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "2"
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'knowledge_conflicts'"
+        ).fetchone() is None
 
 
-@pytest.mark.asyncio
-async def test_conflict_detector_creates_review_candidate():
-    left_version = {
-        "version_id": "left",
-        "disease": "高血压",
-        "doc_type": "clinical_guideline",
-    }
-    right_version = {
-        "version_id": "right",
-        "disease": "高血压",
-        "doc_type": "clinical_guideline",
-    }
-
-    class FakeCatalog:
-        def __init__(self):
-            self.saved = []
-
-        def get_version(self, version_id):
-            return left_version if version_id == "left" else None
-
-        def active_by_version(self, version_id):
-            return right_version if version_id == "right" else None
-
-        def upsert_conflict(self, conflict):
-            self.saved.append(conflict)
+def test_activation_keeps_only_active_and_previous(catalog):
+    first = catalog.begin_version("doc", "hash-1", _metadata())
+    catalog.activate(first["version_id"])
+    second = catalog.begin_version("doc", "hash-2", _metadata())
+    catalog.activate(second["version_id"])
+    third = catalog.begin_version("doc", "hash-3", _metadata())
 
     class FakeKnowledgeBase:
-        def get_document_chunks(self, version_id):
-            if version_id == "left":
-                return [{
-                    "content": "目标血压低于 130 mmHg",
-                    "metadata": {"chunk_uid": "left:0"},
-                }]
-            return [{
-                "content": "目标血压低于 140 mmHg",
-                "metadata": {"chunk_uid": "right:0"},
-            }]
-
-        def search(self, _query, top_k):
-            assert top_k == 12
-            return [{
-                "score": 0.9,
-                "metadata": {"version_id": "right"},
-            }]
-
-    catalog = FakeCatalog()
-    detector = MedicalConflictDetector(
-        catalog=catalog,
-        knowledge_base=FakeKnowledgeBase(),
-    )
-    conflicts = await detector.detect_version("left")
-
-    assert conflicts[0]["review_status"] == "pending"
-    assert conflicts[0]["left_chunk_uid"] == "left:0"
-    assert catalog.saved == conflicts
-
-
-@pytest.mark.asyncio
-async def test_conflict_detector_records_failure():
-    class BrokenCatalog:
         def __init__(self):
-            self.saved = []
+            self.deleted = []
 
-        def get_version(self, _version_id):
-            return {"version_id": "left"}
+        def delete_document(self, version_id):
+            self.deleted.append(version_id)
+            return 1
 
-        def upsert_conflict(self, conflict):
-            self.saved.append(conflict)
-
-    class BrokenKnowledgeBase:
-        def get_document_chunks(self, _version_id):
-            raise RuntimeError("vector unavailable")
-
-    catalog = BrokenCatalog()
-    detector = MedicalConflictDetector(
-        catalog=catalog,
-        knowledge_base=BrokenKnowledgeBase(),
+    knowledge_base = FakeKnowledgeBase()
+    knowledge_service._prune_versions_before_activation(
+        knowledge_base,
+        catalog,
+        "doc",
+        third["version_id"],
     )
-    conflicts = await detector.detect_version("left")
+    catalog.activate(third["version_id"])
 
-    assert conflicts[0]["detection_status"] == "failed"
-    assert "vector unavailable" in conflicts[0]["error"]
+    versions = catalog.list_versions("doc")
+    assert [item["version_id"] for item in versions] == [
+        third["version_id"],
+        second["version_id"],
+    ]
+    assert knowledge_base.deleted == [first["version_id"]]
+
+
+def test_ingest_cleanup_failure_preserves_active(catalog, monkeypatch):
+    first = catalog.begin_version("doc", "hash-1", _metadata())
+    catalog.activate(first["version_id"])
+    second = catalog.begin_version("doc", "hash-2", _metadata())
+    catalog.activate(second["version_id"])
+
+    class FakeKnowledgeBase:
+        def __init__(self):
+            self.pending_id = ""
+            self.deleted = []
+
+        def add_documents(self, documents):
+            self.pending_id = documents[0]["id"]
+            return 1
+
+        def delete_document(self, version_id):
+            self.deleted.append(version_id)
+            if version_id == first["version_id"]:
+                raise RuntimeError("cleanup failed")
+            return 1
+
+    knowledge_base = FakeKnowledgeBase()
+    monkeypatch.setattr(
+        knowledge_service,
+        "MedicalKnowledgeBase",
+        lambda: knowledge_base,
+    )
+    monkeypatch.setattr(
+        knowledge_service,
+        "_catalog_with_legacy",
+        lambda _kb: catalog,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        knowledge_service._ingest_version(
+            "doc",
+            "new content",
+            {**_metadata(), "content_hash": "hash-3"},
+        )
+
+    assert catalog.active_version("doc")["version_id"] == second["version_id"]
+    assert catalog.get_version(knowledge_base.pending_id)["status"] == "failed"
+    assert knowledge_base.deleted[-1] == knowledge_base.pending_id
+
+
+def test_document_delete_removes_all_versions(catalog, monkeypatch):
+    first = catalog.begin_version("doc", "hash-1", _metadata())
+    catalog.activate(first["version_id"])
+    second = catalog.begin_version("doc", "hash-2", _metadata())
+    catalog.activate(second["version_id"])
+
+    class FakeKnowledgeBase:
+        def __init__(self):
+            self.deleted = []
+
+        def delete_document(self, version_id):
+            self.deleted.append(version_id)
+            return 2
+
+    knowledge_base = FakeKnowledgeBase()
+    monkeypatch.setattr(
+        knowledge_service,
+        "MedicalKnowledgeBase",
+        lambda: knowledge_base,
+    )
+    monkeypatch.setattr(
+        knowledge_service,
+        "_catalog_with_legacy",
+        lambda _kb: catalog,
+    )
+    monkeypatch.setattr(
+        "mediZJ.memory.lineage.MemoryLineageStore.invalidate_document",
+        lambda _self, _document_id, _reason: 0,
+    )
+
+    result = knowledge_service.delete_document("doc")
+
+    assert result.chunks_deleted == 4
+    assert catalog.document_versions("doc") == []
+    assert set(knowledge_base.deleted) == {
+        first["version_id"],
+        second["version_id"],
+    }
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_prunes_archived_versions(monkeypatch):
+async def test_lifecycle_prunes_memory_only():
     class FakeCatalog:
         def __init__(self):
             self.finished = None
 
         def create_job(self, *_args):
             return "job-1"
-
-        def archived_before(self, _cutoff):
-            return [{"version_id": "old"}]
-
-        def delete_version_record(self, version_id):
-            return version_id == "old"
 
         def finish_job(self, *args):
             self.finished = args
@@ -349,24 +361,14 @@ async def test_lifecycle_prunes_archived_versions(monkeypatch):
         def get_job(self, _job_id):
             return {"job_id": "job-1", "status": "completed"}
 
-    class FakeKnowledgeBase:
-        def __init__(self):
-            self.deleted = []
-
-        def delete_document(self, version_id):
-            self.deleted.append(version_id)
-
     fake_catalog = FakeCatalog()
-    fake_kb = FakeKnowledgeBase()
-    monkeypatch.setattr(
-        "mediZJ.memory.lifecycle.MedicalKnowledgeBase", lambda: fake_kb
-    )
     service = DataLifecycleService(catalog=fake_catalog)
+    service._prune_memory_rows = lambda: {"memory_usage": 2}
     job = await service.prune_expired("admin")
 
     assert job["status"] == "completed"
-    assert fake_kb.deleted == ["old"]
     assert fake_catalog.finished[1] == "completed"
+    assert fake_catalog.finished[2] == {"memory_usage": 2}
 
 
 @pytest.mark.asyncio

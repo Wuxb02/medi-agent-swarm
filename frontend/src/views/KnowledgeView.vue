@@ -9,21 +9,13 @@ import {
   updateDocument,
   activateDocumentVersion,
   getDocumentVersions,
-  getKnowledgeConflicts,
-  reviewKnowledgeConflict,
   pruneExpiredData,
   deleteUserData,
 } from '../api/knowledge'
-import type {
-  ChunkDetail,
-  DocumentSummary,
-  DocumentVersion,
-  KnowledgeConflict,
-  KnowledgeItem,
-} from '../types'
+import type { ChunkDetail, DocumentSummary, DocumentVersion, KnowledgeItem } from '../types'
 
 // Tab 控制
-type TabKey = 'search' | 'documents' | 'upload' | 'conflicts'
+type TabKey = 'search' | 'documents' | 'upload'
 const activeTab = ref<TabKey>('search')
 
 // ========== 搜索 Tab ==========
@@ -132,24 +124,8 @@ async function activateVersion(versionId: string) {
   await loadDocuments()
 }
 
-const conflicts = ref<KnowledgeConflict[]>([])
-const conflictLoading = ref(false)
 const cleanupUserId = ref('')
 const cleanupResult = ref<string | null>(null)
-
-async function loadConflicts() {
-  conflictLoading.value = true
-  try {
-    conflicts.value = await getKnowledgeConflicts()
-  } finally {
-    conflictLoading.value = false
-  }
-}
-
-async function reviewConflict(conflictId: string, action: 'confirmed' | 'dismissed' | 'resolved') {
-  await reviewKnowledgeConflict(conflictId, action)
-  await loadConflicts()
-}
 
 async function pruneData() {
   const job = await pruneExpiredData()
@@ -204,7 +180,6 @@ function copyChunk(content: string) {
 // 监听 tab 切换，加载文档列表
 watch(activeTab, (tab) => {
   if (tab === 'documents') loadDocuments()
-  if (tab === 'conflicts') loadConflicts()
 })
 
 // ========== 上传 Tab ==========
@@ -312,7 +287,6 @@ const selectedDoc = computed(() => documents.value.find((d) => d.doc_id === sele
 const tabs = [
   { key: 'search' as TabKey, label: '搜索' },
   { key: 'documents' as TabKey, label: '文档管理' },
-  { key: 'conflicts' as TabKey, label: '知识冲突' },
   { key: 'upload' as TabKey, label: '上传文件' },
 ]
 </script>
@@ -421,6 +395,29 @@ const tabs = [
       <div v-if="activeTab === 'documents'" class="flex gap-6">
         <!-- 文档列表 -->
         <div :class="selectedDocId ? 'w-2/5' : 'w-full'" class="transition-all">
+          <div class="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+            <h3 class="mb-3 text-sm font-semibold text-slate-700">数据生命周期</h3>
+            <div class="flex flex-wrap items-center gap-2">
+              <button class="rounded bg-blue-600 px-3 py-1.5 text-xs text-white" @click="pruneData">
+                清理过期数据
+              </button>
+              <input
+                v-model="cleanupUserId"
+                class="rounded border border-slate-300 px-2 py-1.5 text-xs"
+                placeholder="用户 ID"
+              />
+              <button
+                class="rounded bg-red-600 px-3 py-1.5 text-xs text-white disabled:bg-slate-300"
+                :disabled="!cleanupUserId.trim()"
+                @click="removeUserData"
+              >
+                删除用户数据
+              </button>
+            </div>
+            <p v-if="cleanupResult" class="mt-2 text-xs text-slate-500">
+              {{ cleanupResult }}
+            </p>
+          </div>
           <div class="flex items-center justify-between mb-4">
             <h3 class="text-sm font-semibold text-slate-700">文档列表 ({{ documents.length }})</h3>
             <button
@@ -638,72 +635,6 @@ const tabs = [
                   >{{ chunk.content }}</pre>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ====== 知识冲突 Tab ====== -->
-      <div v-if="activeTab === 'conflicts'" class="space-y-3">
-        <div class="rounded-xl border border-slate-200 bg-white p-4">
-          <h3 class="mb-3 text-sm font-semibold text-slate-700">数据生命周期</h3>
-          <div class="flex flex-wrap items-center gap-2">
-            <button class="rounded bg-blue-600 px-3 py-1.5 text-xs text-white" @click="pruneData">
-              清理过期数据
-            </button>
-            <input
-              v-model="cleanupUserId"
-              class="rounded border border-slate-300 px-2 py-1.5 text-xs"
-              placeholder="用户 ID"
-            />
-            <button
-              class="rounded bg-red-600 px-3 py-1.5 text-xs text-white disabled:bg-slate-300"
-              :disabled="!cleanupUserId.trim()"
-              @click="removeUserData"
-            >
-              删除用户数据
-            </button>
-          </div>
-          <p v-if="cleanupResult" class="mt-2 text-xs text-slate-500">{{ cleanupResult }}</p>
-        </div>
-        <div class="flex items-center justify-between">
-          <p class="text-sm text-slate-600">冲突候选仅供人工复核，系统不会自动裁决医学事实。</p>
-          <button class="text-xs text-blue-600" @click="loadConflicts">刷新</button>
-        </div>
-        <div v-if="conflictLoading" class="py-12 text-center text-slate-400">加载中...</div>
-        <div v-else-if="!conflicts.length" class="py-12 text-center text-slate-400">
-          暂无冲突记录
-        </div>
-        <div
-          v-for="conflict in conflicts"
-          v-else
-          :key="conflict.conflict_id"
-          class="rounded-xl border border-slate-200 bg-white p-4"
-        >
-          <div class="mb-2 flex items-center gap-2">
-            <span class="rounded bg-amber-50 px-2 py-0.5 text-xs text-amber-700">
-              {{ conflict.conflict_type }}
-            </span>
-            <span class="text-xs text-slate-400">{{ conflict.review_status }}</span>
-            <span v-if="conflict.detection_status === 'failed'" class="text-xs text-red-600"
-              >检测失败</span
-            >
-          </div>
-          <p class="text-sm text-slate-700">
-            {{ conflict.explanation || conflict.error || '暂无说明' }}
-          </p>
-          <div v-if="conflict.review_status === 'pending'" class="mt-3 flex gap-2">
-            <button
-              class="rounded bg-amber-500 px-3 py-1 text-xs text-white"
-              @click="reviewConflict(conflict.conflict_id, 'confirmed')"
-            >
-              确认冲突
-            </button>
-            <button
-              class="rounded bg-slate-200 px-3 py-1 text-xs text-slate-700"
-              @click="reviewConflict(conflict.conflict_id, 'dismissed')"
-            >
-              驳回
-            </button>
           </div>
         </div>
       </div>

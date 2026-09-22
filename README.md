@@ -18,11 +18,10 @@
 - **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
 - **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
-- **📚 知识版本治理**: SQLite Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、历史版本恢复、归档和过期过滤 ✅
+- **📚 知识版本治理**: SQLite Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、上一版恢复和过期过滤 ✅
 - **🛡️ 医疗回答安全验证**: 回答返回前统一检查红旗症状、诊断越界、处方、医学数值、引用有效性及语义一致性；最多重写一次，失败时安全降级 ✅
 - **🔗 可追溯引用**: 引用绑定文档版本和唯一 chunk，拒绝伪造、错版本、归档及过期引用，历史会话保留引用快照 ✅
 - **🧹 数据生命周期**: 结构化记忆具备来源、授权、时效、修订、用量记录、审计和用户删除治理 ✅
-- **⚖️ 医学知识冲突审核**: 新版本激活后异步发现阈值、禁忌、适用人群和指南差异，由管理员人工确认，不自动裁决医学事实 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
@@ -35,7 +34,7 @@
 
 ## 🛡️ 可信 RAG、知识治理与回答安全
 
-本项目的可信 RAG 不仅是“向量检索 + 引用编号”，而是覆盖 **知识准入、版本发布、混合检索、证据传递、引用校验、冲突审核和安全降级** 的完整链路。
+本项目的可信 RAG 不仅是“向量检索 + 引用编号”，而是覆盖 **知识准入、两版本原子发布、混合检索、证据传递、引用校验和安全降级** 的完整链路。
 
 ### 可信边界
 
@@ -57,10 +56,11 @@
 创建 indexing 版本
   → 分块并写入 Milvus
   → 校验全部 chunk 写入成功
+  → 清理 Active 和待激活版本以外的旧 chunk
   → SQLite 事务内激活新版本并归档旧版本
 ```
 
-任何分块写入失败都会清理新版本 chunk 并将版本标记为 `failed`，旧 active 版本继续服务，禁止部分索引上线。在线检索同时过滤非 active、尚未到 `effective_at` 或已过 `expires_at` 的版本。
+任何分块写入或旧版本清理失败都会清理新版本 chunk 并将版本标记为 `failed`，旧 active 版本继续服务。每份文档最多保留当前 Active 和唯一上一版；在线检索同时过滤非 active、尚未到 `effective_at` 或已过 `expires_at` 的版本。
 
 ### 证据检索与传递
 
@@ -87,10 +87,6 @@
 ```
 
 验证器拒绝伪造 chunk、错误版本、归档版本、过期版本以及非本轮知识证据产生的引用。有效引用以版本快照保存到 `messages.citations`，保证知识库更新后仍能还原历史回答的证据。
-
-### 知识冲突与人工治理
-
-新版本激活后，`MedicalConflictDetector` 对阈值、禁忌、适用人群和指南差异生成冲突候选，但不自动裁决医学事实。管理员可确认、驳回或标记解决；未解决冲突进入在线 Verifier，要求回答披露来源版本和适用条件，无法安全解释时给出就医建议。
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -843,7 +839,7 @@ STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），�
 
 | 记忆层 | 权威存储 | 主要内容 | 注入位置 | 可否引用 |
 | --- | --- | --- | --- | --- |
-| 医学知识事实 | KnowledgeCatalog SQLite + Milvus | 文档版本、chunk、向量、权威、时效和冲突 | 本轮动态证据 | **是** |
+| 医学知识事实 | KnowledgeCatalog SQLite + Milvus | 文档版本、chunk、向量、权威和时效 | 本轮动态证据 | **是** |
 | 用户语义记忆 | SQLite `user_memory_items` | 个人资料、过敏史、用药史、既往史和候选项 | 用户稳定前缀 | 否 |
 | 工作记忆 | Redis `ShortTermMemory` | 当前会话消息、已确认实体、澄清结果和 chunk ID | 追加式会话历史/动态尾部 | 否 |
 | 情景记忆 | SQLite `episodic_summaries` | 跨会话摘要、已解析实体和来源会话 | 本轮动态背景 | 否 |
@@ -962,7 +958,7 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 #### 情景记忆与医学事实
 
 - `episodic_summaries` 保存跨会话摘要、已解析实体和来源会话，默认保留 180 天，只作为动态背景。
-- 医学事实继续由 KnowledgeCatalog + Milvus 管理版本、权威、`effective_at`、过期、冲突和引用。
+- 医学事实继续由 KnowledgeCatalog + Milvus 管理版本、权威、`effective_at`、过期和引用。
 - Mem0 已从运行时、依赖、配置、Dashboard 和用户删除链路中下线；历史数据不自动导入或删除。
 
 #### 安全校验后的记忆候选提取
@@ -1512,7 +1508,7 @@ SQLite (messages.citations) / JSON 事件文件
 - **clinical-guideline**：`format_guideline` 追加 `相关度: XX%`
 - **deep-research**：`format_research_report` 来源列表逐条展示分数
 
-> `score` 只表示查询与 chunk 的检索相关度，不等于医学真实性或来源权威。可信性由 KnowledgeCatalog 状态、版本、权威、时效、冲突状态与最终引用验证综合决定。
+> `score` 只表示查询与 chunk 的检索相关度，不等于医学真实性或来源权威。可信性由 KnowledgeCatalog 状态、版本、权威、时效与最终引用验证综合决定。
 
 ### 可信 RAG 验收边界
 
@@ -1522,7 +1518,7 @@ SQLite (messages.citations) / JSON 事件文件
 - active、`effective_at`、`expires_at` 过滤
 - 伪造引用、非本轮 chunk、错版本、归档版本和过期版本拒绝
 - Verifier 一次有限重写与再次失败的固定安全回答
-- 冲突候选创建、人工确认/驳回/解决及在线披露
+- 只保留 Active 和上一版，回滚后两者互换
 - 用户画像、当前自述、情景摘要和 evolution 策略不能成为 citation
 
 ## 🤝 技术架构

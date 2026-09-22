@@ -287,7 +287,6 @@ export interface Citation {
   effective_at?: string | null
   authority_level?: string
   validation_status?: string
-  conflicts?: KnowledgeConflict[]
 }
 
 export interface DocumentSummary {
@@ -310,17 +309,6 @@ export interface DocumentVersion {
   created_at: string
   activated_at?: string | null
   error?: string | null
-}
-
-export interface KnowledgeConflict {
-  conflict_id: string
-  conflict_type: string
-  confidence: number
-  explanation: string
-  detection_status: 'completed' | 'failed'
-  review_status: 'pending' | 'confirmed' | 'dismissed' | 'resolved'
-  error?: string | null
-  created_at: string
 }
 
 export interface ChunkDetail {

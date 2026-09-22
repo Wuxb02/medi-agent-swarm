@@ -1,5 +1,5 @@
 """知识库路由"""
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from mediZJ.api.models.knowledge import (
     KnowledgeSearchRequest,
@@ -60,7 +60,7 @@ async def get_versions(
     doc_id: str,
     _admin: dict = Depends(require_admin),
 ):
-    """列出文档的全部版本。"""
+    """列出文档的 Active 和唯一上一版。"""
     return {"items": list_document_versions(doc_id)}
 
 
@@ -85,15 +85,14 @@ async def remove_document(
     _admin: dict = Depends(require_admin),
 ):
     """删除文档"""
-    result = delete_document(doc_id)
-    if result.chunks_deleted == 0:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return result
+    try:
+        return delete_document(doc_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_file(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     doc_type: str = Form("general"),
     disease: str = Form(""),
@@ -126,7 +125,6 @@ async def upload_file(
             disease=disease,
             source=source,
         )
-        background_tasks.add_task(_detect_conflicts, result.version_id)
         return result
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -136,7 +134,6 @@ async def upload_file(
 async def update_doc(
     doc_id: str,
     request: DocumentUpdateRequest,
-    background_tasks: BackgroundTasks,
     _admin: dict = Depends(require_admin),
 ):
     """更新文档内容"""
@@ -148,15 +145,6 @@ async def update_doc(
             disease=request.disease,
             source=request.source,
         )
-        background_tasks.add_task(_detect_conflicts, result.version_id)
         return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-
-
-async def _detect_conflicts(version_id: str) -> None:
-    """后台检测新激活版本的疑似冲突。"""
-    from mediZJ.core.llm_client import LLMClient
-    from mediZJ.knowledge.conflict_detector import MedicalConflictDetector
-
-    await MedicalConflictDetector(llm_client=LLMClient()).detect_version(version_id)

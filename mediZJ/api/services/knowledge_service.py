@@ -127,18 +127,23 @@ def get_document_chunks(doc_id: str) -> DocumentChunksResponse:
 
 
 def delete_document(doc_id: str) -> DocumentDeleteResponse:
-    """归档文档，保留历史版本和引用快照。"""
+    """彻底删除逻辑文档及其全部物理版本。"""
     kb = MedicalKnowledgeBase()
     catalog = _catalog_with_legacy(kb)
-    version = catalog.active_version(doc_id)
-    count = len(kb.get_document_chunks(version["version_id"])) if version else 0
-    catalog.archive_document(doc_id)
-    if version:
-        from mediZJ.memory.lineage import MemoryLineageStore
+    versions = catalog.document_versions(doc_id)
+    if not versions:
+        raise LookupError(f"Document not found: {doc_id}")
 
-        MemoryLineageStore().invalidate_document(doc_id, "document_archived")
+    count = 0
+    for version in versions:
+        count += kb.delete_document(version["version_id"])
+    catalog.delete_document_records(doc_id)
+
+    from mediZJ.memory.lineage import MemoryLineageStore
+
+    MemoryLineageStore().invalidate_document(doc_id, "document_deleted")
     return DocumentDeleteResponse(
-        doc_id=doc_id, chunks_deleted=count, message="archived"
+        doc_id=doc_id, chunks_deleted=count, message="deleted"
     )
 
 
@@ -195,6 +200,8 @@ def update_document(
         "filename": active["filename"],
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "authority_level": active["authority_level"],
+        "effective_at": active["effective_at"],
+        "expires_at": active["expires_at"],
     }
     chunks_added, version = _ingest_version(doc_id, content, metadata)
     return DocumentUploadResponse(
@@ -214,13 +221,18 @@ def list_document_versions(doc_id: str) -> list[dict]:
 
 
 def activate_document_version(doc_id: str, version_id: str) -> dict:
-    """激活已完整入库的历史版本。"""
-    catalog = _catalog_with_legacy(MedicalKnowledgeBase())
+    """回滚到当前文档的唯一上一版。"""
+    kb = MedicalKnowledgeBase()
+    catalog = _catalog_with_legacy(kb)
     version = catalog.get_version(version_id)
     if not version or version["document_id"] != doc_id:
         raise LookupError("文档版本不存在")
-    if version["status"] in {"failed", "indexing"}:
-        raise ValueError("未完成入库的版本不能激活")
+    if version["status"] != "archived":
+        raise ValueError("只能回滚到上一版")
+    previous = catalog.previous_version(doc_id)
+    if not previous or previous["version_id"] != version_id:
+        raise LookupError("上一版不存在")
+    _prune_versions_before_activation(kb, catalog, doc_id, version_id)
     return catalog.activate(version_id)
 
 
@@ -242,6 +254,12 @@ def _ingest_version(
         chunks_added = kb.add_documents(
             [{"id": pending["version_id"], "content": content, "metadata": version_metadata}]
         )
+        _prune_versions_before_activation(
+            kb,
+            catalog,
+            document_id,
+            pending["version_id"],
+        )
         active = catalog.activate(pending["version_id"])
         if pending.get("supersedes_version_id"):
             from mediZJ.memory.lineage import MemoryLineageStore
@@ -256,10 +274,31 @@ def _ingest_version(
     return chunks_added, active
 
 
+def _prune_versions_before_activation(
+    kb: MedicalKnowledgeBase,
+    catalog: KnowledgeCatalog,
+    document_id: str,
+    target_version_id: str,
+) -> None:
+    """切换前删除 Active 和目标版本以外的旧 chunk。"""
+    active = catalog.active_version(document_id)
+    keep_ids = {target_version_id}
+    if active:
+        keep_ids.add(active["version_id"])
+    for version in catalog.versions_to_prune(document_id, keep_ids):
+        kb.delete_document(version["version_id"])
+        if not catalog.delete_version_record(version["version_id"]):
+            raise RuntimeError("旧知识版本目录清理失败")
+
+
 def _catalog_with_legacy(kb: MedicalKnowledgeBase) -> KnowledgeCatalog:
     catalog = KnowledgeCatalog()
     for document in kb.list_documents():
         catalog.register_legacy(document)
+    for version in catalog.retention_cleanup_candidates():
+        kb.delete_document(version["version_id"])
+        if not catalog.delete_version_record(version["version_id"]):
+            raise RuntimeError("旧知识版本迁移失败")
     return catalog
 
 
