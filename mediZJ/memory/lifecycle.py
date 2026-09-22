@@ -166,6 +166,7 @@ class DataLifecycleService:
                 (audit_cutoff,),
             )
             result["memory_usage"] = cursor.rowcount
+        result["knowledge_documents"] = self.catalog.expire_documents(now)
         return result
 
     @staticmethod

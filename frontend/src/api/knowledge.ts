@@ -41,12 +41,16 @@ export async function uploadDocument(
   docType: string = 'general',
   disease: string = '',
   source: string = '用户上传',
+  effectiveAt?: string,
+  expiresAt?: string,
 ): Promise<{ doc_id: string; filename: string; chunks_added: number }> {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('doc_type', docType)
   formData.append('disease', disease)
   formData.append('source', source)
+  if (effectiveAt) formData.append('effective_at', effectiveAt)
+  if (expiresAt) formData.append('expires_at', expiresAt)
 
   const { data } = await api.post('/knowledge/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -60,12 +64,16 @@ export async function updateDocument(
   docType?: string,
   disease?: string,
   source?: string,
+  effectiveAt?: string,
+  expiresAt?: string,
 ): Promise<{ doc_id: string; chunks_added: number }> {
   const { data } = await api.put(`/knowledge/documents/${encodeURIComponent(docId)}`, {
     content,
     type: docType,
     disease,
     source,
+    effective_at: effectiveAt,
+    expires_at: expiresAt,
   })
   return data
 }

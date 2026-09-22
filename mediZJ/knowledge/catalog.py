@@ -66,21 +66,29 @@ class KnowledgeCatalog:
 
     def _init_schema(self) -> None:
         with self._connection() as conn:
-            conn.executescript(
+            conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS knowledge_schema_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
-                );
+                )
+                """
+            )
+            current = self._schema_version(conn)
+            if 0 < current < 3:
+                self._migrate_status_check(conn)
+
+            conn.executescript(
+                """
                 INSERT OR IGNORE INTO knowledge_schema_meta VALUES
-                    ('schema_version', '2');
+                    ('schema_version', '3');
 
                 CREATE TABLE IF NOT EXISTS knowledge_documents (
                     version_id TEXT PRIMARY KEY,
                     document_id TEXT NOT NULL,
                     version INTEGER NOT NULL,
                     status TEXT NOT NULL CHECK (
-                        status IN ('indexing', 'active', 'archived', 'failed')
+                        status IN ('indexing', 'active', 'archived', 'failed', 'expired')
                     ),
                     supersedes_version_id TEXT,
                     content_hash TEXT NOT NULL,
@@ -124,9 +132,66 @@ class KnowledgeCatalog:
 
                 DROP TABLE IF EXISTS knowledge_conflicts;
                 UPDATE knowledge_schema_meta
-                SET value = '2' WHERE key = 'schema_version';
+                SET value = '3' WHERE key = 'schema_version';
                 """
             )
+
+    @staticmethod
+    def _schema_version(conn: sqlite3.Connection) -> int:
+        """读取当前 schema 版本，表或记录不存在时返回 0。"""
+        row = conn.execute(
+            "SELECT value FROM knowledge_schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if not row:
+            return 0
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return 0
+
+    def _migrate_status_check(self, conn: sqlite3.Connection) -> None:
+        """重建 knowledge_documents，将 status CHECK 放宽以容纳 expired 状态。"""
+        conn.execute("ALTER TABLE knowledge_documents RENAME TO knowledge_documents_old")
+        conn.execute(
+            """
+            CREATE TABLE knowledge_documents (
+                version_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('indexing', 'active', 'archived', 'failed', 'expired')
+                ),
+                supersedes_version_id TEXT,
+                content_hash TEXT NOT NULL,
+                filename TEXT NOT NULL DEFAULT '',
+                doc_type TEXT NOT NULL DEFAULT 'general',
+                disease TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                authority_level TEXT NOT NULL DEFAULT 'user',
+                effective_at TEXT,
+                expires_at TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                activated_at TEXT,
+                UNIQUE(document_id, version)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO knowledge_documents (
+                version_id, document_id, version, status, supersedes_version_id,
+                content_hash, filename, doc_type, disease, source, authority_level,
+                effective_at, expires_at, error, created_at, activated_at
+            )
+            SELECT
+                version_id, document_id, version, status, supersedes_version_id,
+                content_hash, filename, doc_type, disease, source, authority_level,
+                effective_at, expires_at, error, created_at, activated_at
+            FROM knowledge_documents_old
+            """
+        )
+        conn.execute("DROP TABLE knowledge_documents_old")
 
     def begin_version(
         self,
@@ -150,7 +215,8 @@ class KnowledgeCatalog:
             previous = conn.execute(
                 """
                 SELECT * FROM knowledge_documents
-                WHERE document_id = ? AND status = 'active'
+                WHERE document_id = ? AND status IN ('active', 'expired')
+                ORDER BY version DESC LIMIT 1
                 """,
                 (document_id,),
             ).fetchone()
@@ -205,7 +271,8 @@ class KnowledgeCatalog:
             conn.execute(
                 """
                 UPDATE knowledge_documents SET status = 'archived'
-                WHERE document_id = ? AND status = 'active' AND version_id != ?
+                WHERE document_id = ? AND status IN ('active', 'expired')
+                  AND version_id != ?
                 """,
                 (row["document_id"], version_id),
             )
@@ -271,7 +338,7 @@ class KnowledgeCatalog:
                     """
                     SELECT * FROM knowledge_documents
                     WHERE document_id = ?
-                      AND status IN ('active', 'archived')
+                      AND status IN ('active', 'archived', 'expired')
                     ORDER BY version DESC
                     """,
                     (document_id,),
@@ -352,6 +419,20 @@ class KnowledgeCatalog:
             candidates.append(dict(row))
         return candidates
 
+    def expire_documents(self, now: str) -> int:
+        """将已到期但仍为 active 的版本标记为 expired，返回更新数量。"""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE knowledge_documents
+                SET status = 'expired'
+                WHERE status = 'active' AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                """,
+                (now,),
+            )
+            return cursor.rowcount
+
     def list_active(self) -> list[dict[str, Any]]:
         with self._connection() as conn:
             return [
@@ -362,6 +443,29 @@ class KnowledgeCatalog:
                     """
                 ).fetchall() if self._is_effective(row)
             ]
+
+    def list_active_and_expired(self) -> list[dict[str, Any]]:
+        """返回现行版本（有效或已过期）供管理端展示。
+
+        包含 status='expired' 的全部记录，以及 status='active' 的记录；
+        对 active 记录复用 _is_effective 判断，将已到期但尚未被作业标记的
+        版本在展示层映射为 expired，使列表实时反映真实效力。
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM knowledge_documents
+                WHERE status IN ('active', 'expired')
+                ORDER BY document_id, version DESC
+                """
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            if item["status"] == "active" and not self._is_effective(row):
+                item["status"] = "expired"
+            result.append(item)
+        return result
 
     def delete_version_record(self, version_id: str) -> bool:
         with self._connection() as conn:
@@ -389,8 +493,11 @@ class KnowledgeCatalog:
             return
         with self._connection() as conn:
             exists = conn.execute(
-                "SELECT 1 FROM knowledge_documents WHERE document_id = ?",
-                (document_id,),
+                """
+                SELECT 1 FROM knowledge_documents
+                WHERE version_id = ? OR document_id = ?
+                """,
+                (document_id, document_id),
             ).fetchone()
             if exists:
                 return

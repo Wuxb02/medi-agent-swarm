@@ -240,6 +240,7 @@ LeadAgent 基于 RAG 结果生成回答时，检索 chunk 的句尾自动附加 
 
 - 非自进化记忆统一记录 `user_reported`、`model_inferred`、`conversation_summary` 或 `authoritative_document` 来源；只有权威文档来源可以支撑医学事实。
 - 文档归档、过期或撤销时，关联的非自进化记忆转为 stale，注入 Agent 前会重新校验来源状态。
+- 知识文档支持 `effective_at`/`expires_at` 时间范围（上传/更新接口可设，均为可选）；`expires_at` 到期后由 `DataLifecycleService` 每日作业把 `active` 标记为 `expired`（非 active），读取侧仍以 `_is_effective()` 实时判断兜底。`expired` 是「现行但已失效」的中间态，保留物理数据与版本链，待新版本顶替时转为 `archived`。
 - `DataLifecycleService` 以持久化作业协调会话、摘要、checkpoint、向量、结构化用户记忆和用户关联 Trace 清理；审计不保存医疗正文。
 - `MedicalConflictDetector` 在版本激活后异步生成冲突候选。管理员可确认、驳回或标记解决；未解决冲突会进入在线 Verifier，上层回答必须披露版本与适用条件。
 - 上述治理流程明确排除自进化评审、失败案例、learned experiences、发布版本和观察实验，不写入或触发进化经验。

@@ -1,6 +1,7 @@
 """知识库服务：封装 MedicalKnowledgeBase 搜索"""
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 from loguru import logger
@@ -38,6 +39,35 @@ KNOWLEDGE_TYPES = [
         description="临床诊疗指南和专家共识"
     ),
 ]
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _validate_time_range(
+    effective_at: Optional[str],
+    expires_at: Optional[str],
+) -> None:
+    """校验生效/失效时间范围，时间须为 ISO 8601 格式。"""
+    if effective_at and expires_at:
+        try:
+            eff = _parse_iso(effective_at)
+            exp = _parse_iso(expires_at)
+        except ValueError as exc:
+            raise ValueError("时间格式无效，需为 ISO 8601 格式") from exc
+        if exp <= eff:
+            raise ValueError("失效时间必须晚于生效时间")
+    if expires_at:
+        try:
+            exp = _parse_iso(expires_at)
+        except ValueError as exc:
+            raise ValueError("时间格式无效，需为 ISO 8601 格式") from exc
+        if exp <= datetime.now(timezone.utc):
+            raise ValueError("失效时间必须晚于当前时间")
 
 
 def search_knowledge(
@@ -95,11 +125,11 @@ def get_knowledge_base_size() -> int:
 
 
 def list_all_documents() -> DocumentListResponse:
-    """获取知识库文档列表"""
+    """获取知识库文档列表（含当前有效与已过期）。"""
     kb = MedicalKnowledgeBase()
     catalog = _catalog_with_legacy(kb)
     summaries = []
-    for version in catalog.list_active():
+    for version in catalog.list_active_and_expired():
         chunks = kb.get_document_chunks(version["version_id"])
         summaries.append(
             DocumentSummary(
@@ -112,6 +142,8 @@ def list_all_documents() -> DocumentListResponse:
                 version_id=version["version_id"],
                 document_version=str(version["version"]),
                 status=version["status"],
+                effective_at=version["effective_at"],
+                expires_at=version["expires_at"],
             )
         )
     return DocumentListResponse(documents=summaries, total=len(summaries))
@@ -153,8 +185,11 @@ def upload_document(
     doc_type: str = "general",
     disease: str = "",
     source: str = "用户上传",
+    effective_at: Optional[str] = None,
+    expires_at: Optional[str] = None,
 ) -> DocumentUploadResponse:
     """上传文档到知识库"""
+    _validate_time_range(effective_at, expires_at)
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     safe_name = re.sub(r'[^\w]', '_', Path(filename).stem)
     doc_id = f"{doc_type}_{safe_name}"
@@ -166,6 +201,8 @@ def upload_document(
         "filename": filename,
         "content_hash": content_hash,
         "authority_level": "authoritative" if doc_type == "clinical_guideline" else "user",
+        "effective_at": effective_at,
+        "expires_at": expires_at,
     }
     chunks_added, version = _ingest_version(doc_id, content, metadata)
 
@@ -185,8 +222,11 @@ def update_document(
     doc_type: Optional[str] = None,
     disease: Optional[str] = None,
     source: Optional[str] = None,
+    effective_at: Optional[str] = None,
+    expires_at: Optional[str] = None,
 ) -> DocumentUploadResponse:
     """更新知识库文档"""
+    _validate_time_range(effective_at, expires_at)
     kb = MedicalKnowledgeBase()
     catalog = _catalog_with_legacy(kb)
     active = catalog.active_version(doc_id)
@@ -200,8 +240,8 @@ def update_document(
         "filename": active["filename"],
         "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
         "authority_level": active["authority_level"],
-        "effective_at": active["effective_at"],
-        "expires_at": active["expires_at"],
+        "effective_at": effective_at if effective_at is not None else active["effective_at"],
+        "expires_at": expires_at if expires_at is not None else active["expires_at"],
     }
     chunks_added, version = _ingest_version(doc_id, content, metadata)
     return DocumentUploadResponse(

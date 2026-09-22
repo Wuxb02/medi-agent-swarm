@@ -187,6 +187,8 @@ const uploadFile = ref<File | null>(null)
 const uploadDocType = ref('general')
 const uploadDisease = ref('')
 const uploadSource = ref('用户上传')
+const uploadEffectiveAt = ref('')
+const uploadExpiresAt = ref('')
 const uploading = ref(false)
 const uploadResult = ref<string | null>(null)
 const uploadError = ref<string | null>(null)
@@ -234,16 +236,27 @@ async function handleUpload() {
       uploadDocType.value,
       uploadDisease.value,
       uploadSource.value,
+      uploadEffectiveAt.value || undefined,
+      uploadExpiresAt.value || undefined,
     )
     uploadResult.value = `上传成功：${data.filename}，生成 ${data.chunks_added} 个分块`
     uploadFile.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
     uploadDisease.value = ''
+    uploadEffectiveAt.value = ''
+    uploadExpiresAt.value = ''
   } catch (e: any) {
     uploadError.value = e?.response?.data?.detail || '上传失败'
   } finally {
     uploading.value = false
   }
+}
+
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 // 通用
@@ -459,11 +472,27 @@ const tabs = [
                     >
                       {{ getTypeLabel(doc.type) }}
                     </span>
+                    <span
+                      v-if="doc.status === 'expired'"
+                      class="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-600"
+                    >
+                      已过期
+                    </span>
                     <span class="text-xs text-slate-400">{{ doc.chunk_count }} 个分块</span>
                   </div>
                   <p class="text-sm font-medium text-slate-800 truncate">{{ doc.filename }}</p>
                   <p class="text-xs text-slate-400 mt-0.5 truncate">
                     {{ getDiseaseLabel(doc.disease) }} · {{ doc.source }}
+                  </p>
+                  <p
+                    v-if="doc.effective_at || doc.expires_at"
+                    class="text-xs text-slate-400 mt-0.5 truncate"
+                  >
+                    <template v-if="doc.effective_at">生效 {{ formatDate(doc.effective_at) }}</template>
+                    <template v-if="doc.effective_at && doc.expires_at"> · </template>
+                    <template v-if="doc.expires_at">
+                      {{ doc.status === 'expired' ? '已失效 ' : '失效 ' }}{{ formatDate(doc.expires_at) }}
+                    </template>
                   </p>
                 </div>
                 <div class="flex gap-1 ml-2 shrink-0">
@@ -706,6 +735,22 @@ const tabs = [
             <input
               v-model="uploadSource"
               placeholder="例如：用户上传"
+              class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">生效时间（可选）</label>
+            <input
+              v-model="uploadEffectiveAt"
+              type="datetime-local"
+              class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1">失效时间（可选）</label>
+            <input
+              v-model="uploadExpiresAt"
+              type="datetime-local"
               class="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>

@@ -299,6 +299,8 @@ export interface DocumentSummary {
   version_id?: string
   document_version?: string
   status?: string
+  effective_at?: string | null
+  expires_at?: string | null
 }
 
 export interface DocumentVersion {

@@ -220,7 +220,7 @@ def test_catalog_jobs_and_schema_migration(catalog):
     with sqlite3.connect(catalog.db_path) as conn:
         assert conn.execute(
             "SELECT value FROM knowledge_schema_meta WHERE key = 'schema_version'"
-        ).fetchone()[0] == "2"
+        ).fetchone()[0] == "3"
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = 'knowledge_conflicts'"
         ).fetchone() is None
@@ -483,3 +483,120 @@ def test_lifecycle_deletes_summary_files(tmp_path, monkeypatch):
 
     assert not summary.exists()
     assert unrelated.exists()
+
+
+def _expired_metadata() -> dict:
+    meta = _metadata()
+    meta["expires_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=1)
+    ).isoformat()
+    return meta
+
+
+def test_expire_documents_marks_expired(catalog):
+    version = catalog.begin_version("doc", "hash-1", _expired_metadata())
+    catalog.activate(version["version_id"])
+
+    assert catalog.expire_documents(datetime.now(timezone.utc).isoformat()) == 1
+    assert catalog.active_version("doc") is None
+    assert catalog.get_version(version["version_id"])["status"] == "expired"
+
+    visible = catalog.list_active_and_expired()
+    assert any(
+        item["version_id"] == version["version_id"] and item["status"] == "expired"
+        for item in visible
+    )
+
+
+def test_version_chain_when_active_expired(catalog):
+    v1 = catalog.begin_version("doc", "hash-1", _metadata())
+    catalog.activate(v1["version_id"])
+    v2 = catalog.begin_version("doc", "hash-2", _expired_metadata())
+    catalog.activate(v2["version_id"])
+
+    catalog.expire_documents(datetime.now(timezone.utc).isoformat())
+    assert catalog.get_version(v2["version_id"])["status"] == "expired"
+
+    # 过期后上传新版，应继承过期版作为前任
+    v3 = catalog.begin_version("doc", "hash-3", _metadata())
+    assert v3["supersedes_version_id"] == v2["version_id"]
+
+    # 激活新版后，过期版转 archived
+    catalog.activate(v3["version_id"])
+    assert catalog.get_version(v2["version_id"])["status"] == "archived"
+    assert catalog.get_version(v3["version_id"])["status"] == "active"
+
+
+def test_citation_validator_rejects_expired(catalog):
+    version = catalog.begin_version("doc", "hash-1", _expired_metadata())
+    catalog.activate(version["version_id"])
+    catalog.expire_documents(datetime.now(timezone.utc).isoformat())
+
+    validator = CitationValidator(catalog=catalog, knowledge_base=None)
+    assert validator.validate([{
+        "index": 1,
+        "doc_id": "doc",
+        "version_id": version["version_id"],
+    }]) == []
+
+
+def test_schema_migration_v2_to_v3_preserves_data(tmp_path):
+    db = tmp_path / "catalog.db"
+    with sqlite3.connect(db) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE knowledge_schema_meta (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+            );
+            INSERT INTO knowledge_schema_meta VALUES ('schema_version', '2');
+            CREATE TABLE knowledge_documents (
+                version_id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('indexing', 'active', 'archived', 'failed')
+                ),
+                supersedes_version_id TEXT,
+                content_hash TEXT NOT NULL,
+                filename TEXT NOT NULL DEFAULT '',
+                doc_type TEXT NOT NULL DEFAULT 'general',
+                disease TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT '',
+                authority_level TEXT NOT NULL DEFAULT 'user',
+                effective_at TEXT,
+                expires_at TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                activated_at TEXT,
+                UNIQUE(document_id, version)
+            );
+            INSERT INTO knowledge_documents
+                (version_id, document_id, version, status, content_hash,
+                 filename, created_at)
+                VALUES ('kv_old', 'doc', 1, 'active', 'hash', 'a.txt',
+                        '2024-01-01T00:00:00+00:00');
+            """
+        )
+
+    KnowledgeCatalog.reset()
+    catalog = KnowledgeCatalog(db)
+
+    row = catalog.get_version("kv_old")
+    assert row["document_id"] == "doc"
+    assert row["status"] == "active"
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT value FROM knowledge_schema_meta WHERE key = 'schema_version'"
+        ).fetchone()[0] == "3"
+        # 迁移后的 CHECK 应允许 expired 状态
+        conn.execute(
+            """
+            INSERT INTO knowledge_documents
+                (version_id, document_id, version, status, content_hash,
+                 filename, created_at)
+                VALUES ('kv_expired', 'doc2', 1, 'expired', 'hash2', 'b.txt',
+                        '2024-01-01T00:00:00+00:00')
+            """
+        )
+        conn.commit()

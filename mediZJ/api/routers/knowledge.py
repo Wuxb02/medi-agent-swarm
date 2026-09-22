@@ -1,4 +1,6 @@
 """知识库路由"""
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 
 from mediZJ.api.models.knowledge import (
@@ -97,6 +99,8 @@ async def upload_file(
     doc_type: str = Form("general"),
     disease: str = Form(""),
     source: str = Form("用户上传"),
+    effective_at: Optional[str] = Form(None),
+    expires_at: Optional[str] = Form(None),
     _admin: dict = Depends(require_admin),
 ):
     """上传文件到知识库"""
@@ -124,6 +128,8 @@ async def upload_file(
             doc_type=doc_type,
             disease=disease,
             source=source,
+            effective_at=effective_at,
+            expires_at=expires_at,
         )
         return result
     except ValueError as e:
@@ -144,6 +150,8 @@ async def update_doc(
             doc_type=request.type,
             disease=request.disease,
             source=request.source,
+            effective_at=request.effective_at,
+            expires_at=request.expires_at,
         )
         return result
     except ValueError as e:

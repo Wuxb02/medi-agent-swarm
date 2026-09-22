@@ -47,6 +47,8 @@ class DocumentSummary(BaseModel):
     version_id: str = ""
     document_version: str = ""
     status: str = "active"
+    effective_at: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class DocumentListResponse(BaseModel):
@@ -94,3 +96,5 @@ class DocumentUpdateRequest(BaseModel):
     type: Optional[str] = None
     disease: Optional[str] = None
     source: Optional[str] = None
+    effective_at: Optional[str] = None
+    expires_at: Optional[str] = None
