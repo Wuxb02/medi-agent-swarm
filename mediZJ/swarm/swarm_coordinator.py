@@ -10,8 +10,6 @@ SwarmCoordinator：Swarm 入口和智能路由
 
 处理链路：统一走 LangGraph SupervisorGraph + Send API（Map-Reduce）。
 """
-import asyncio
-import json
 import os
 import re
 import uuid
@@ -20,8 +18,7 @@ from typing import Dict, Any, Optional, List, Callable
 from loguru import logger
 
 from mediZJ.core import LLMClient
-from mediZJ.core.prompt_loader import PromptLoader
-from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
+from mediZJ.memory.dual_extraction import DualMemoryExtractor
 from mediZJ.swarm.lead_agent import LeadAgent
 from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.lgraph.worker import create_worker, Worker
@@ -32,14 +29,6 @@ from mediZJ.memory import (
     MedicalMemoryContextBuilder,
     PersonalProfile,
 )
-
-# Trace 惰性导入
-try:
-    from mediZJ.trace.context import traced_span
-    from mediZJ.trace.models import SpanType, AgentAttributes
-    _TRACE = True
-except ImportError:
-    _TRACE = False
 
 # LangGraph 依赖
 try:
@@ -433,147 +422,14 @@ class SwarmCoordinator:
 
     # ===== 记忆评估与保存 =====
 
-    async def _evaluate_and_extract_memory(
-        self, session_id: str, question: str, answer: str
-    ) -> Optional[Dict[str, Any]]:
-        """使用 LLM 评估对话质量并提取信息。
-
-        Returns:
-            {"stable_info": [...], "medical_records": [...],
-             "reusable_facts": [...], "score": N, "reason": "..."}
-            或 None（降级）
-        """
-        # 1. 获取已有信息
-        existing_personal_text = self.personal_profile.to_text()
-
-        session = self.short_term_memory.get_session(session_id)
-        existing_facts = []
-        if session:
-            existing_facts = session.metadata.get("extracted_facts", [])
-
-        if existing_facts:
-            existing_facts_text = "\n".join(
-                f"- [{f.get('category', '')}] {f.get('fact', '')}"
-                for f in existing_facts
-            )
-        else:
-            existing_facts_text = "暂无"
-
-        # 2. 渲染 prompt
-        prompt = PromptLoader.render(
-            "memory/quality_eval.j2",
-            existing_personal=existing_personal_text,
-            existing_facts=existing_facts_text,
-            current_question=question,
-            current_answer=answer[:2000],
-        )
-
-        # 3. 异步调用 LLM（60 秒超时）
-        try:
-            response = await asyncio.wait_for(
-                self.llm_client.chat(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": PromptPrefixAssembler.global_prefix(
-                                "你是医疗用户记忆候选提取器。"
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.2,
-                    max_tokens=2048,
-                    response_format={'type': 'json_object'},
-                ),
-                timeout=60.0,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Memory eval LLM timeout (60s), session={session_id}")
-            return None
-        except Exception as e:
-            logger.warning(f"Memory eval LLM failed: {e}, session={session_id}")
-            return None
-
-        # 4. 解析 JSON（response_format 已保证合法 JSON 输出）
-        try:
-            result = json.loads(response)
-        except json.JSONDecodeError as e:
-            logger.warning(f"Memory eval JSON parse failed: {e}, session={session_id}")
-            return None
-
-        # 5. 兼容旧格式（只有 facts / personal_info 字段）
-        if "reusable_facts" not in result and "facts" in result:
-            result["reusable_facts"] = result.pop("facts")
-        # 旧字段名 personal_info → stable_info
-        if "stable_info" not in result and "personal_info" in result:
-            result["stable_info"] = result.pop("personal_info")
-        if "stable_info" not in result:
-            result["stable_info"] = []
-        if "medical_records" not in result:
-            result["medical_records"] = []
-
-        # 6. 将新可复用事实追加到 session metadata
-        new_facts = result.get("reusable_facts", [])
-        if session and new_facts:
-            existing_facts.extend(new_facts)
-            session.metadata["extracted_facts"] = existing_facts
-
-        return result
-
     async def _save_memory_candidates(self, session_id, question, answer, metadata):
-        """仅保存经评估的待确认结构化记忆。"""
+        """最终回答后并行提取两类待审核候选。"""
+        turn_id = metadata.get("trace_id") or session_id
+        extractor = DualMemoryExtractor(self.llm_client, self.personal_profile)
         try:
-            eval_result = await self._evaluate_and_extract_memory(
-                session_id, question, answer
-            )
-
-            if eval_result is not None:
-                score = eval_result.get("score", 0)
-                stable_info = eval_result.get("stable_info", [])
-                medical_records = eval_result.get("medical_records", [])
-
-                # 稳定信息 → 暂存区（score >= 3 才写入，过滤寒暄）
-                if stable_info and score >= 3:
-                    self.personal_profile.add_pending(stable_info)
-                    for item in stable_info:
-                        logger.info(f"  [Pending-Info] {item['key']}：{item['value']}")
-
-                # 病史记录 → 暂存区（所有提取到的病史都进暂存区）
-                if medical_records:
-                    self.personal_profile.add_pending_records(medical_records)
-                    for rec in medical_records:
-                        logger.info(f"  [Pending-Record] [{rec.get('date', '')}] {rec.get('description', '')}")
-
-                logger.info(
-                    "Structured memory candidates: score={} info={} records={} session={}",
-                    score,
-                    len(stable_info),
-                    len(medical_records),
-                    session_id,
-                )
-            else:
-                logger.warning(
-                    "记忆评估未完成，本轮不写入长期记忆: session={}",
-                    session_id,
-                )
-                return
-
-            # 打印本轮存储摘要
-            session = self.short_term_memory.get_session(session_id)
-            msg_count = len(session.messages) if session else 0
-            if eval_result:
-                info_count = len(eval_result.get("stable_info", []))
-                records_count = len(eval_result.get("medical_records", []))
-            else:
-                info_count = 0
-                records_count = 0
-            logger.info(
-                f"Memory turn summary — short_term={msg_count} msgs | "
-                f"pending_info={info_count} pending_records={records_count} | "
-                "structured=RECORDED"
-            )
-        except Exception as e:
-            logger.error(f"Structured memory save failed (session={session_id}): {e}")
+            await extractor.process(turn_id, self.user_id, question, answer)
+        finally:
+            await extractor.jev.close()
 
     # ===== 会话摘要 =====
 

@@ -2,6 +2,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel
 
 from mediZJ.api.models.knowledge import (
     KnowledgeSearchRequest,
@@ -20,8 +21,93 @@ from mediZJ.api.services.knowledge_service import (
     activate_document_version, list_document_versions,
 )
 from mediZJ.api.auth import require_admin
+from mediZJ.knowledge.candidate_service import KnowledgeCandidateService
+from mediZJ.core.llm_client import LLMClient
+from mediZJ.memory.dual_extraction import DualMemoryExtractor
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
+
+
+class TrustedSourceRequest(BaseModel):
+    source_url: str
+
+
+@router.post("/documents/{doc_id:path}/trust")
+async def trust_document(
+    doc_id: str,
+    body: TrustedSourceRequest,
+    admin: dict = Depends(require_admin),
+):
+    """管理员核实当前文档版本的来源后标记为可信。"""
+    try:
+        return KnowledgeCandidateService().trust_source(
+            doc_id, body.source_url, admin["user_id"]
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/candidates")
+async def list_candidates(_admin: dict = Depends(require_admin)):
+    return {"items": KnowledgeCandidateService().list_candidates()}
+
+
+@router.get("/candidates/{candidate_id}")
+async def get_candidate(
+    candidate_id: str, _admin: dict = Depends(require_admin)
+):
+    try:
+        return KnowledgeCandidateService().get_candidate(candidate_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/candidates/{candidate_id}/approve")
+async def approve_candidate(
+    candidate_id: str, admin: dict = Depends(require_admin)
+):
+    try:
+        return KnowledgeCandidateService().approve(
+            candidate_id, admin["user_id"]
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/candidates/{candidate_id}/recheck")
+async def recheck_candidate(
+    candidate_id: str, _admin: dict = Depends(require_admin)
+):
+    """对新增或更新的可信库内来源重新核对候选。"""
+    service = KnowledgeCandidateService()
+    try:
+        candidate = service.get_candidate(candidate_id)
+        hits = service.evidence_hits(candidate["claim"])
+        extractor = DualMemoryExtractor(LLMClient(), None, candidates=service)
+        evidence = await extractor._judge_evidence(candidate["claim"], hits)
+        return service.update_evidence(candidate_id, evidence)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/candidates/{candidate_id}/reject")
+async def reject_candidate(
+    candidate_id: str, admin: dict = Depends(require_admin)
+):
+    try:
+        return KnowledgeCandidateService().reject(
+            candidate_id, admin["user_id"]
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/search", response_model=KnowledgeSearchResponse)

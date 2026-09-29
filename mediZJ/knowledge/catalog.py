@@ -130,6 +130,46 @@ class KnowledgeCatalog:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS trusted_knowledge_sources (
+                    version_id TEXT PRIMARY KEY,
+                    document_id TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    verified_by TEXT NOT NULL,
+                    verified_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS knowledge_candidates (
+                    candidate_id TEXT PRIMARY KEY,
+                    turn_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    claim_hash TEXT NOT NULL,
+                    claim TEXT NOT NULL,
+                    source_text TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL CHECK (status IN (
+                        'unverified', 'conflict', 'pending_review',
+                        'approved', 'rejected'
+                    )),
+                    document_id TEXT,
+                    reviewed_by TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(turn_id, claim_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_candidates_status
+                    ON knowledge_candidates(status, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_candidates_claim
+                    ON knowledge_candidates(claim_hash)
+                    WHERE status != 'rejected';
+                CREATE TABLE IF NOT EXISTS memory_extraction_runs (
+                    turn_id TEXT NOT NULL,
+                    lane TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(turn_id, lane)
+                );
+
                 DROP TABLE IF EXISTS knowledge_conflicts;
                 UPDATE knowledge_schema_meta
                 SET value = '3' WHERE key = 'schema_version';

@@ -1,5 +1,7 @@
-# Vue 3 + TypeScript + Vite
+# MediZJ 前端
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 + TypeScript + Vite 界面，提供医疗问答、个人档案、知识管理和会话记录。
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+知识管理页的“知识审核”Tab 供管理员查看对话提取的医学知识候选及库内证据，并执行重新核对、批准或驳回。文档详情中可为已人工核实来源的当前有效版本登记来源 URL。缺少可信支持证据或存在冲突的候选不能批准；普通用户无权调用审核接口。
+
+本地运行：`npm install` 后执行 `npm run dev`。验证前端改动使用 `npm run build` 和 `npm test -- --run`。

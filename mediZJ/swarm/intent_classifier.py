@@ -8,9 +8,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
-import httpx
 from loguru import logger
 
+from mediZJ.core.jev_client import JevClient
 from mediZJ.core.llm_client import LLMClient
 from mediZJ.core.prompt_loader import PromptLoader
 from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
@@ -37,34 +37,14 @@ _JEV_QUESTION = {
 }
 
 
-class JevIntentClient:
+class JevIntentClient(JevClient):
     """TypeSafe 的意图识别 HTTP 客户端。"""
 
     def __init__(self, api_key: str, model: str = "jev-1.13.0") -> None:
-        self.api_key = api_key
-        self.model = model
-        self._client: httpx.AsyncClient | None = None
+        super().__init__(api_key, model)
 
     async def classify(self, question: str, timeout: float) -> dict[str, Any]:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=timeout)
-        response = await self._client.post(
-            "https://api.typesafe.ai/v1/systemone",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "state": question,
-                "model": self.model,
-                "questions": _JEV_QUESTION,
-            },
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        return response.json()
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        return await self.ask(question, _JEV_QUESTION, timeout)
 
 
 @dataclass

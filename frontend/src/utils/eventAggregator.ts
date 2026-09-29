@@ -45,11 +45,10 @@ export function createEventAggregator(isRealtime = false): {
         const intent = d.intent === 'others' ? '非医疗对话' : '医疗咨询'
         const confidence = Number(d.confidence || 0)
         const route = d.intent === 'others' ? '进入直接回答' : '进入信息澄清与医疗分析'
-        const reason = (d.reason as string) || '未提供额外理由'
         thinkingBlocks.push({
           id: (data.id as string) || genId(),
           agentId: 'lead_agent',
-          thinking: `识别结果：${intent}\n置信度：${(confidence * 100).toFixed(0)}%\n判断理由：${reason}\n后续路由：${route}`,
+          thinking: `识别结果：${intent}\n置信度：${(confidence * 100).toFixed(0)}%\n后续路由：${route}`,
           iteration: 0,
           phase: 'intent',
           title: '意图识别',

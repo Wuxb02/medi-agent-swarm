@@ -101,3 +101,49 @@ export async function deleteUserData(userId: string) {
   )
   return data
 }
+
+export interface KnowledgeEvidence {
+  document_id: string
+  version_id: string
+  source_url: string
+  excerpt: string
+  verdict: 'support' | 'conflict'
+  quote: string
+}
+
+export interface KnowledgeCandidate {
+  candidate_id: string
+  turn_id: string
+  claim: string
+  source_text: string
+  evidence: KnowledgeEvidence[]
+  status: 'unverified' | 'conflict' | 'pending_review' | 'approved' | 'rejected'
+  error: string | null
+  created_at: string
+}
+
+export async function getKnowledgeCandidates(): Promise<KnowledgeCandidate[]> {
+  const { data } = await api.get('/knowledge/candidates')
+  return data.items
+}
+
+export async function approveKnowledgeCandidate(id: string): Promise<void> {
+  await api.post(`/knowledge/candidates/${encodeURIComponent(id)}/approve`)
+}
+
+export async function rejectKnowledgeCandidate(id: string): Promise<void> {
+  await api.post(`/knowledge/candidates/${encodeURIComponent(id)}/reject`)
+}
+
+export async function recheckKnowledgeCandidate(id: string): Promise<void> {
+  await api.post(`/knowledge/candidates/${encodeURIComponent(id)}/recheck`)
+}
+
+export async function trustKnowledgeDocument(
+  docId: string,
+  sourceUrl: string,
+): Promise<void> {
+  await api.post(`/knowledge/documents/${encodeURIComponent(docId)}/trust`, {
+    source_url: sourceUrl,
+  })
+}

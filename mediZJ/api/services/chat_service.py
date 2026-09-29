@@ -280,7 +280,7 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
     result = await _verify_final_result(question, result)
     # 仅从已通过医疗安全校验的最终回答提取记忆候选。
     memory_saver = getattr(coordinator, "_save_memory_candidates", None)
-    if result.get("intent") != "others" and callable(memory_saver):
+    if callable(memory_saver):
         try:
             await asyncio.wait_for(
                 memory_saver(
@@ -288,6 +288,7 @@ async def _chat_non_stream_locked(request: ChatRequest, session_id: str) -> Chat
                     question,
                     result.get("answer", ""),
                     {
+                        "trace_id": trace_id,
                         "mode": result.get("mode", "langgraph"),
                         "total_tokens": result.get("usage", {}).get(
                             "total_tokens", 0
@@ -755,13 +756,14 @@ async def _chat_stream_impl(
 
     memory_task = None
     memory_saver = getattr(coordinator, "_save_memory_candidates", None)
-    if result.get("intent") != "others" and callable(memory_saver):
+    if callable(memory_saver):
         memory_task = asyncio.create_task(
             memory_saver(
                 session_id,
                 question,
                 result.get("answer", ""),
                 {
+                    "trace_id": trace_id,
                     "mode": result.get("mode", "langgraph"),
                     "total_tokens": result.get("usage", {}).get(
                         "total_tokens", 0

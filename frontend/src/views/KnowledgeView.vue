@@ -11,12 +11,63 @@ import {
   getDocumentVersions,
   pruneExpiredData,
   deleteUserData,
+  getKnowledgeCandidates,
+  approveKnowledgeCandidate,
+  rejectKnowledgeCandidate,
+  recheckKnowledgeCandidate,
+  trustKnowledgeDocument,
 } from '../api/knowledge'
+import type { KnowledgeCandidate } from '../api/knowledge'
 import type { ChunkDetail, DocumentSummary, DocumentVersion, KnowledgeItem } from '../types'
 
 // Tab 控制
-type TabKey = 'search' | 'documents' | 'upload'
+type TabKey = 'search' | 'documents' | 'upload' | 'review'
 const activeTab = ref<TabKey>('search')
+const candidates = ref<KnowledgeCandidate[]>([])
+const reviewError = ref('')
+const trustedSourceUrl = ref('')
+
+async function loadCandidates() {
+  try {
+    candidates.value = await getKnowledgeCandidates()
+    reviewError.value = ''
+  } catch (error) {
+    reviewError.value = String(error)
+  }
+}
+
+async function reviewCandidate(id: string, approve: boolean) {
+  try {
+    if (approve) await approveKnowledgeCandidate(id)
+    else await rejectKnowledgeCandidate(id)
+    await loadCandidates()
+  } catch (error) {
+    reviewError.value = String(error)
+  }
+}
+
+async function recheckCandidate(id: string) {
+  try {
+    await recheckKnowledgeCandidate(id)
+    await loadCandidates()
+  } catch (error) {
+    reviewError.value = String(error)
+  }
+}
+
+async function markTrusted(docId: string) {
+  try {
+    await trustKnowledgeDocument(docId, trustedSourceUrl.value)
+    trustedSourceUrl.value = ''
+    reviewError.value = ''
+  } catch (error) {
+    reviewError.value = String(error)
+  }
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'review') void loadCandidates()
+})
 
 // ========== 搜索 Tab ==========
 const query = ref('')
@@ -301,6 +352,7 @@ const tabs = [
   { key: 'search' as TabKey, label: '搜索' },
   { key: 'documents' as TabKey, label: '文档管理' },
   { key: 'upload' as TabKey, label: '上传文件' },
+  { key: 'review' as TabKey, label: '知识审核' },
 ]
 </script>
 
@@ -625,6 +677,27 @@ const tabs = [
             </div>
           </div>
 
+          <div class="border-b border-slate-200 px-4 py-3">
+            <label class="block text-xs font-semibold text-slate-600 mb-2">
+              核实当前版本的医学来源后标记可信
+            </label>
+            <div class="flex gap-2">
+              <input
+                v-model="trustedSourceUrl"
+                type="url"
+                placeholder="来源网址 https://..."
+                class="flex-1 min-w-0 border border-slate-300 rounded px-2 py-1 text-xs"
+              />
+              <button
+                :disabled="!trustedSourceUrl.trim()"
+                class="px-2 py-1 text-xs bg-blue-500 text-white rounded disabled:bg-slate-300"
+                @click="markTrusted(selectedDocId!)"
+              >
+                标记可信
+              </button>
+            </div>
+          </div>
+
           <div class="flex-1 overflow-y-auto p-4">
             <!-- 编辑模式 -->
             <div v-if="editing">
@@ -666,6 +739,46 @@ const tabs = [
             </div>
           </div>
         </div>
+      </div>
+
+      <div v-if="activeTab === 'review'" class="space-y-4">
+        <p class="text-sm text-slate-600">
+          只有具备当前有效可信库内证据且无冲突的候选可以批准入库。
+        </p>
+        <p v-if="reviewError" class="text-sm text-red-600">{{ reviewError }}</p>
+        <p v-if="!candidates.length" class="text-sm text-slate-400">暂无知识候选</p>
+        <article
+          v-for="candidate in candidates"
+          :key="candidate.candidate_id"
+          class="bg-white border border-slate-200 rounded-lg p-4 space-y-3"
+        >
+          <div class="flex justify-between gap-4">
+            <strong class="text-sm text-slate-800">{{ candidate.claim }}</strong>
+            <span class="text-xs text-slate-500">{{ candidate.status }}</span>
+          </div>
+          <p class="text-xs text-slate-500">对话原文：{{ candidate.source_text }}</p>
+          <div v-for="item in candidate.evidence" :key="item.version_id" class="text-xs border-l-2 border-blue-200 pl-3">
+            <div>{{ item.verdict }} · {{ item.document_id }} · {{ item.version_id }}</div>
+            <p class="my-1">{{ item.quote }}</p>
+            <a :href="item.source_url" target="_blank" rel="noopener noreferrer" class="text-blue-600">
+              查看来源
+            </a>
+          </div>
+          <p v-if="candidate.error" class="text-xs text-red-600">{{ candidate.error }}</p>
+          <div v-if="candidate.status !== 'approved' && candidate.status !== 'rejected'" class="flex gap-3">
+            <button class="text-sm text-slate-600" @click="recheckCandidate(candidate.candidate_id)">
+              重新核对
+            </button>
+            <button
+              :disabled="candidate.status !== 'pending_review'"
+              class="text-sm text-blue-600 disabled:text-slate-400"
+              @click="reviewCandidate(candidate.candidate_id, true)"
+            >批准入库</button>
+            <button class="text-sm text-red-600" @click="reviewCandidate(candidate.candidate_id, false)">
+              驳回
+            </button>
+          </div>
+        </article>
       </div>
 
       <!-- ====== 上传 Tab ====== -->

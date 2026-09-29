@@ -17,11 +17,12 @@
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 使用隔离子会话执行并通过统一 ContextBuilder 获取受控上下文，路由由 LeadAgent 评估自动决定 ✅
 - **🧭 意图识别**: 默认由 JEV 区分 `medical` / `others`；仅高置信度 `others` 进入闲聊路径，调用失败或判断不确定时进入医疗流程 ✅
 - **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
+- **🧩 双轨记忆提取**: 最终回答通过校验后，由 JEV 分别判断个人信息和通用医学知识候选；个人信息待用户确认，医学知识经可信库内证据核对和管理员审核后入库 ✅
 - **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
 - **📚 知识版本治理**: SQLite Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、上一版恢复、有效期时间范围与过期标记 ✅
 - **🛡️ 医疗回答安全验证**: 回答返回前统一检查红旗症状、诊断越界、处方、医学数值、引用有效性及语义一致性；最多重写一次，失败时安全降级 ✅
-- **🔗 可追溯引用**: 引用绑定文档版本和唯一 chunk，拒绝伪造、错版本、归档及过期引用，历史会话保留引用快照 ✅
+- **🔗 可追溯引用**: 校验文档版本与有效期；引用提供 `chunk_uid` 时进一步核验唯一 chunk，历史会话保留引用快照 ✅
 - **🧹 数据生命周期**: 结构化记忆具备来源、授权、时效、修订、用量记录、审计和用户删除治理 ✅
 - **⚡ Claude Code Skills**: 10个预定义技能，一键调用医疗助手 ✅
 - **🏗️ Harness Engineering**: 约束驱动 + 熵管理，系统自动验证和优化，保证安全、简洁、高质量 ✅
@@ -48,6 +49,18 @@
 | evolution 程序性策略 | 是，仅影响路由、检索和表达 | 否 |
 
 提示词中的位置与事实权威分开治理：用户画像虽放在稳定前缀中以提高 KV Cache 命中，但其权威不高于有效医学证据。
+
+### 每轮最终回答后的双轨提取
+
+每次最终回答通过医疗安全校验后，个人信息和医学知识两条提取任务并行运行。`JevClient` 统一调用 TypeSafe JEV；两条任务分别判断是否有候选，失败时记录该轮轨道状态，不影响回答或另一条任务。JEV 只做候选门控，具体内容由主 LLM 提取。
+
+两条轨道按本轮 `trace_id` 记录 `running`、`done` 或 `failed`；重复调用提取器时跳过已完成的轨道，并允许失败轨道重试。
+
+- **个人信息**：仅从用户原话提取本人稳定事实与病史，要求提取结果带有能在原话中找到的片段；与已确认和待确认条目去重后写入 `user_memory_items` 的 `pending` 状态。用户通过个人中心确认后才进入画像或病史；一般医学咨询、他人经历和助手回答不能作为本人事实。
+- **医学知识**：从本轮对话提取可核验的通用主张，单独保存到 `knowledge_candidates`，不进入在线知识检索。仅检索管理员已核实来源、标记可信且当前有效的库内文档；记录支持或冲突的文档版本、片段和来源 URL。无可信支持证据的候选为 `unverified`，有冲突的为 `conflict`，两者都不能批准。
+- **审核入库**：管理员可将当前有效文档版本标记为可信来源，对候选重新核对、批准或驳回。仅 `pending_review` 候选可批准；批准时再次检查来源版本与 URL，现有知识入库成功后才标记 `approved`。新版本替换或过期后，原版本不再作为候选的有效证据。
+
+可信标记表示管理员对库内文档来源的人工核实；系统不自动访问或验证外部医学站点。原有上传/更新知识文档接口仍按现有流程直接发布，双轨审核规则只适用于对话生成的知识候选。
 
 ### 知识准入与原子发布
 
@@ -89,7 +102,7 @@
   → 通过后才持久化并发送客户端
 ```
 
-验证器拒绝伪造 chunk、错误版本、归档版本、过期版本以及非本轮知识证据产生的引用。有效引用以版本快照保存到 `messages.citations`，保证知识库更新后仍能还原历史回答的证据。
+验证器拒绝错误版本、归档版本、过期版本以及非本轮知识证据产生的结构化引用；当引用带有 `chunk_uid` 时，还会核验该唯一 chunk 是否存在。有效引用以版本快照保存到 `messages.citations`，保证知识库更新后仍能还原历史回答的证据。`chunk_uid` 目前是可选字段，正文中的 `[N]` 标记也未与结构化引用逐一确定性匹配，因此不能宣称所有伪造引用都会被拦截。
 
 ## 🎯 Skill + Tool 双层架构
 
@@ -357,7 +370,7 @@ LLM_MODEL_NAME=your-model-name
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
-# 意图识别（默认通过 TypeSafe API 调用 JEV）
+# 意图识别和双轨记忆提取（共用 TypeSafe JEV 配置）
 INTENT_CLASSIFIER_MODE=jev
 TYPESAFE_API_KEY=your-typesafe-api-key
 JEV_MODEL=jev-1.13.0
@@ -393,6 +406,8 @@ WORKING_MEMORY_STORAGE=redis
 ```
 
 `INTENT_CLASSIFIER_MODE` 可设为 `jev`（默认）、`llm`（原有 LLM 分类）或 `shadow`。默认模式会将当前问句发送至 TypeSafe API，部署前须配置有效的 `TYPESAFE_API_KEY` 并确认数据处理要求。`shadow` 始终使用 LLM 结果路由，只有调用方显式允许时才会额外发送问句给 JEV；业务主链路目前未开启该许可。JEV 结果无效、超时或 `others` 置信度低于 0.9 时，意图按 `medical` 处理，不跳过医疗流程。
+
+双轨记忆提取也使用 `TYPESAFE_API_KEY` 和 `JEV_MODEL`，且独立于 `INTENT_CLASSIFIER_MODE`。它会分别发送用户原话和本轮对话给 JEV；部署前应将这一数据处理范围纳入评估。未配置密钥或 JEV 调用失败时，该轨道记录失败并跳过提取，不会自动写入画像或知识库。
 
 ### 4. 初始化知识库
 
@@ -514,7 +529,6 @@ medix-agent-swarm/
 │   │   ├── memory/                      # 记忆相关提示词
 │   │   │   ├── compression_system.j2
 │   │   │   ├── compression_user.j2
-│   │   │   ├── quality_eval.j2          # 质量评估 + 信息分类
 │   │   │   └── intent_gate.j2           # LLM 基线意图识别门控
 │   │   ├── lgraph/                      # LangGraph 子图控制消息
 │   │   │   └── force_answer.j2          # 强制收尾
@@ -748,6 +762,12 @@ SharedContext.on_event_callback → 事件推送
 | DELETE | `/api/knowledge/documents/{doc_id}` | 删除文档 |
 | POST | `/api/knowledge/upload` | 上传文件（.txt） |
 | PUT | `/api/knowledge/documents/{doc_id}` | 更新文档内容 |
+| POST | `/api/knowledge/documents/{doc_id}/trust` | 管理员标记当前有效版本的可信来源，提交 `source_url` |
+| GET | `/api/knowledge/candidates` | 管理员查看知识候选列表 |
+| GET | `/api/knowledge/candidates/{candidate_id}` | 管理员查看候选及证据详情 |
+| POST | `/api/knowledge/candidates/{candidate_id}/recheck` | 管理员用当前可信库内来源重新核对 |
+| POST | `/api/knowledge/candidates/{candidate_id}/approve` | 管理员批准有有效支持证据、无冲突的候选入库 |
+| POST | `/api/knowledge/candidates/{candidate_id}/reject` | 管理员驳回候选 |
 | GET | `/api/sessions` | 会话列表 |
 | GET | `/api/sessions/{session_id}` | 会话详情 |
 | DELETE | `/api/sessions/{session_id}` | 删除会话 |
@@ -798,7 +818,7 @@ LLM_MODEL_NAME=gpt-4o
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
-# 意图识别
+# 意图识别和双轨记忆提取
 INTENT_CLASSIFIER_MODE=jev
 TYPESAFE_API_KEY=your-typesafe-api-key
 JEV_MODEL=jev-1.13.0
@@ -1282,7 +1302,7 @@ prompt/
 ├── agents/                      # Agent 系统提示词（4 个）
 ├── swarm/                       # Swarm 协调提示词（9 个，含 plan_stages_user.j2）
 ├── research/                    # 研究模块提示词（2 个）
-├── memory/                      # 记忆相关提示词（4 个，含 intent_gate）
+├── memory/                      # 记忆相关提示词（3 个，含 intent_gate）
 ├── lgraph/                      # LangGraph 子图控制消息（1 个）
 ├── validation/                  # 输出验证模板（2 个）
 └── _language_rule.j2            # 统一中文语言规则
@@ -1305,14 +1325,6 @@ user_msg = PromptLoader.render(
     historical_cases=[{"summary": "...", "score": 0.95}]
 )
 
-# 带变量渲染其它模板（如质量评估）
-quality_eval = PromptLoader.render(
-    "memory/quality_eval.j2",
-    existing_personal="年龄：28岁",
-    existing_facts=[],
-    current_question="头疼怎么办？",
-    current_answer="建议就医..."
-)
 ```
 
 ### 模板变量说明
@@ -1330,7 +1342,6 @@ quality_eval = PromptLoader.render(
 | `research/evidence_synthesis.j2` | `query`, `web_results`, `kb_results` | 证据综合（含 for 循环） |
 | `research/query_planning.j2` | `question` | 查询拆解 |
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
-| `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
 | `memory/intent_gate.j2` | `question` | LLM 基线意图识别门控；默认 JEV 使用代码中定义的 Choice 问题 |
 | `lgraph/force_answer.j2` | —（静态） | 强制收尾 |
 | `validation/high_risk_warning.j2` | —（静态） | 高危症状警告 |
@@ -1349,11 +1360,12 @@ quality_eval = PromptLoader.render(
 
 ### 知识库管理功能
 
-Web 界面的知识库页面提供三个 Tab：
+Web 界面的知识库页面提供四个 Tab：
 
 - **搜索**: 语义搜索，按 `doc_id` 去重，返回完整文档内容
 - **文档管理**: 查看所有文档列表、每个文档的 chunk 详情、编辑和删除文档，列表展示生效/失效时间与过期状态
 - **上传文件**: 拖拽上传 `.txt` 文件，选择文档类型、元数据和可选的生效/失效时间范围
+- **知识审核**: 管理员查看对话知识候选及证据，重新核对后批准或驳回；文档详情可标记当前版本的可信来源
 
 ### 数据去重
 
