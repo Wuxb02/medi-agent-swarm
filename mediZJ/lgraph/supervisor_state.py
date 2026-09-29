@@ -35,7 +35,7 @@ class SupervisorState(TypedDict, total=False):
     # === 意图识别（检索门控） ===
     intent: str                     # medical | others
     intent_confidence: float        # 0.0 ~ 1.0
-    intent_source: str              # "llm" | "fallback"
+    intent_source: str              # "llm" | "jev" | "fallback"
     skip_long_term_retrieval: bool  # 是否跳过医疗情景记忆检索
     chat_mode: bool                 # others 意图时直接聊天回应，跳过任务分解
 

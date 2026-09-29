@@ -1,33 +1,30 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## 项目结构与模块
 
-`mediZJ/` contains the Python application. Orchestration lives in `core/`, Swarm coordination in `swarm/`, LangGraph workflows in `lgraph/` (including the lightweight `Worker` spec that replaces the former `agents/` package), and API routes and services in `api/`. The `memory/` package owns Redis working memory, SQLite user/episodic memory, deterministic prompt-prefix assembly, unified context construction, migration, and non-evolution lifecycle management. Versioned medical evidence and conflict detection live in `knowledge/`; only active KnowledgeCatalog evidence may support citations. Answer/citation safety checks live in `validation/`, self-improvement in `evolution/` (procedural strategies only), and Jinja prompts in `prompt/`. Backend tests mirror these areas under `tests/`. The Vue 3 client is in `frontend/src/`, organized into `components/`, `views/`, `stores/`, `composables/`, `api/`, `router/`, `types/`, and `utils/`; colocated frontend tests use `__tests__/`. Documentation belongs in `docs/`, while utilities live in `scripts/`.
+`mediZJ/` 是 Python 后端：`api/` 提供 FastAPI 路由与服务，`swarm/` 和 `lgraph/` 组织多智能体流程，`knowledge/` 管理医学知识，`validation/` 校验回答，`prompt/` 保存提示词模板。`tests/` 按后端模块分组；Vue 3 前端位于 `frontend/src/`，组件、页面和 API 分别放在 `components/`、`views/`、`api/`，测试放在相邻的 `__tests__/`。静态资源位于 `mediZJ/assets/` 和 `frontend/src/assets/`；开发脚本位于 `scripts/`。
 
-## Build, Test, and Development Commands
+## 构建、测试与本地运行
 
-- `uv sync --extra dev`: install Python runtime and development dependencies.
-- `uv run python mediZJ/api_main.py`: start the FastAPI backend locally.
-- `uv run pytest`: run the backend test suite with configured strict markers.
-- `uv run pytest --cov=mediZJ --cov-report=term-missing`: measure backend coverage.
-- `uv run ruff check .` and `uv run mypy mediZJ`: run Python linting and type checks.
-- `cd frontend && npm install`: install locked frontend dependencies.
-- `cd frontend && npm run dev`: start the Vite development server.
-- `cd frontend && npm run build`: type-check and build the production client.
-- `cd frontend && npm run lint && npm test`: lint and run Vitest once.
+- `uv sync --extra dev`：安装后端及开发依赖。
+- `uv run python mediZJ/api_main.py`：启动本地 API。
+- `uv run pytest tests/ -m "not integration"`：运行无需外部服务的后端测试。
+- `uv run pytest tests/ --cov=mediZJ --cov-report=term-missing`：检查后端覆盖率；需要外部服务的用例按 `tests/conftest.py` 的选项配置。
+- `cd frontend && npm install && npm run dev`：安装前端依赖并启动 Vite。
+- `cd frontend && npm run build`：类型检查并构建；`npm test` 运行 Vitest。
 
-## Coding Style & Naming Conventions
+## 编码风格与命名
 
-Follow PEP 8 with four-space indentation for Python. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and type annotations on public interfaces. Keep prompts in `.j2` templates rather than embedding long strings. For Vue and TypeScript, use Prettier and ESLint; name components `PascalCase.vue`, composables `useFeature.ts`, and stores by domain. Do not commit generated `dist/`, caches, logs, databases, or secrets.
+Python 遵循 PEP 8、四空格缩进；模块、函数和变量用 `snake_case`，类用 `PascalCase`。公开接口添加类型标注，注释简洁且默认使用中文。后端使用 Ruff 和 mypy 检查；前端使用 ESLint、Prettier，Vue 组件命名为 `PascalCase.vue`。避免无必要的兜底或兼容层，直接定位并修复错误。
 
-## Testing Guidelines
+## 测试规范
 
-Pytest discovers `test_*.py`, `Test*`, and `test_*`; mark external-service tests as `integration` and real-LLM tests as `slow`. Keep unit tests deterministic and mock LLM, Milvus, Redis, and network boundaries. Frontend specs use `*.spec.ts`. New or changed behavior should target at least 80% coverage and include failure, concurrency, and boundary cases where relevant. For knowledge-governance changes, cover atomic version activation, failed indexing rollback, active/expiry filtering, citation rejection, verifier rewrite/fallback, lifecycle retry, and conflict-review boundaries.
+Pytest 文件、函数分别命名为 `test_*.py`、`test_*`；外部服务测试标记 `integration`，真实 LLM 慢测试标记 `slow`。单元测试应模拟 LLM、数据库和网络边界，覆盖成功、失败及关键边界情况；新改代码以至少 80% 覆盖率为目标。前端测试使用 `*.spec.ts`，运行 `cd frontend && npm run test:coverage` 查看覆盖率。
 
-## Commit & Pull Request Guidelines
+## 提交与拉取请求
 
-Use Angular-style commits seen in history, such as `feat(concurrency): isolate user profiles` or `fix(agent-loop): prevent tool-limit loops`. Keep each commit focused. Pull requests should summarize behavior changes, list verification commands, link related issues, call out configuration or migration impacts, and include screenshots for UI changes.
+近期提交主要采用 Angular 格式，如 `feat(knowledge): 支持文档有效期时间范围与过期标记`。提交信息写为 `<type>(<scope>): <subject>`，保持改动聚焦；由维护者自行执行提交。拉取请求需说明行为变化、关联问题、验证命令和配置或迁移影响；界面改动附截图。
 
-## Security & Configuration
+## 安全与配置
 
-Copy `.env.example` to `.env` for local setup. Never commit API keys, credentials, patient data, or production endpoints. Preserve medical safety warnings and validation constraints when changing prompts or agent routing. Knowledge updates must write chunks under an `indexing` version before activation and must never expose non-active or expired versions. Every chat path must pass through the shared citation and medical-answer verifier before persistence or client delivery. Data lifecycle operations must exclude evolution reviews, failures, learned experiences, releases, and observation experiments unless an evolution change is explicitly requested.
+以 `.env.example` 为模板配置本地 `.env`，不要提交密钥、患者数据或运行日志。修改知识检索与回答链路时，保留有效期过滤、可核验引用及医学回答校验。

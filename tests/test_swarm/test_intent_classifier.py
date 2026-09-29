@@ -26,7 +26,7 @@ class TestIntentClassifierLLM:
     @pytest.mark.asyncio
     async def test_others_skips_long_term(self, mock_llm_client):
         _set_llm_response(mock_llm_client, {"intent": "others", "confidence": 0.95, "reason": "寒暄"})
-        classifier = IntentClassifier(llm_client=mock_llm_client)
+        classifier = IntentClassifier(llm_client=mock_llm_client, mode="llm")
         result = await classifier.classify("你好")
         assert result.intent == "others"
         assert result.source == "llm"
@@ -35,7 +35,7 @@ class TestIntentClassifierLLM:
     @pytest.mark.asyncio
     async def test_medical_does_not_skip(self, mock_llm_client):
         _set_llm_response(mock_llm_client, {"intent": "medical", "confidence": 0.98, "reason": "症状咨询"})
-        classifier = IntentClassifier(llm_client=mock_llm_client)
+        classifier = IntentClassifier(llm_client=mock_llm_client, mode="llm")
         result = await classifier.classify("我头痛怎么办")
         assert result.intent == "medical"
         assert result.skip_long_term is False
@@ -44,7 +44,7 @@ class TestIntentClassifierLLM:
     async def test_composite_greeting_with_medical_does_not_skip(self, mock_llm_client):
         # 寒暄开头 + 医疗诉求 → medical，不跳过
         _set_llm_response(mock_llm_client, {"intent": "medical", "confidence": 0.9, "reason": "寒暄开头但含医疗诉求"})
-        classifier = IntentClassifier(llm_client=mock_llm_client)
+        classifier = IntentClassifier(llm_client=mock_llm_client, mode="llm")
         result = await classifier.classify("你好，我最近头晕")
         assert result.intent == "medical"
         assert result.skip_long_term is False
@@ -52,14 +52,14 @@ class TestIntentClassifierLLM:
     @pytest.mark.asyncio
     async def test_confidence_clamped_to_range(self, mock_llm_client):
         _set_llm_response(mock_llm_client, {"intent": "medical", "confidence": 1.5})
-        result = await IntentClassifier(llm_client=mock_llm_client).classify("测试")
+        result = await IntentClassifier(llm_client=mock_llm_client, mode="llm").classify("测试")
         assert result.confidence == 1.0
 
     @pytest.mark.asyncio
     async def test_prompt_rendered_with_question(self, mock_llm_client):
         create_mock = AsyncMock(return_value=make_mock_openai_response(content=json.dumps({"intent": "medical"})))
         mock_llm_client.client.chat.completions.create = create_mock
-        await IntentClassifier(llm_client=mock_llm_client).classify("我肚子疼")
+        await IntentClassifier(llm_client=mock_llm_client, mode="llm").classify("我肚子疼")
         call_args = create_mock.call_args
         assert call_args.kwargs["temperature"] == 0
         assert call_args.kwargs["response_format"] == {"type": "json_object"}
@@ -75,7 +75,7 @@ class TestIntentClassifierFallback:
         mock_llm_client.client.chat.completions.create = AsyncMock(
             return_value=make_mock_openai_response(content="not-a-json")
         )
-        result = await IntentClassifier(llm_client=mock_llm_client).classify("你好")
+        result = await IntentClassifier(llm_client=mock_llm_client, mode="llm").classify("你好")
         assert result.intent == "medical"
         assert result.source == "fallback"
         assert result.skip_long_term is False
@@ -86,7 +86,7 @@ class TestIntentClassifierFallback:
             await asyncio.sleep(10)
 
         mock_llm_client.client.chat.completions.create = _slow
-        classifier = IntentClassifier(llm_client=mock_llm_client, timeout=0.01)
+        classifier = IntentClassifier(llm_client=mock_llm_client, timeout=0.01, mode="llm")
         result = await classifier.classify("你好")
         assert result.intent == "medical"
         assert result.source == "fallback"
@@ -96,14 +96,14 @@ class TestIntentClassifierFallback:
         mock_llm_client.client.chat.completions.create = AsyncMock(
             side_effect=RuntimeError("network down")
         )
-        result = await IntentClassifier(llm_client=mock_llm_client).classify("你好")
+        result = await IntentClassifier(llm_client=mock_llm_client, mode="llm").classify("你好")
         assert result.intent == "medical"
         assert result.source == "fallback"
 
     @pytest.mark.asyncio
     async def test_unknown_intent_normalized_to_medical(self, mock_llm_client):
         _set_llm_response(mock_llm_client, {"intent": "chitchat"})  # 未知值 → 保守 medical
-        result = await IntentClassifier(llm_client=mock_llm_client).classify("你好")
+        result = await IntentClassifier(llm_client=mock_llm_client, mode="llm").classify("你好")
         assert result.intent == "medical"
         assert result.source == "fallback"
         assert result.skip_long_term is False

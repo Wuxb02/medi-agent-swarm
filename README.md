@@ -15,6 +15,7 @@
 - **🔧 Skill + Tool 双层架构**: 10个原子 Skills（指令+工具）与底层 Tool 调用明确分层，activate_skill 激活后注入指令并动态加载工具 ✅
 - **🤖 LangGraph Agent 子图**: LLM 驱动的 Skill 调用循环（AgentSubGraph），Worker 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 使用隔离子会话执行并通过统一 ContextBuilder 获取受控上下文，路由由 LeadAgent 评估自动决定 ✅
+- **🧭 意图识别**: 默认由 JEV 区分 `medical` / `others`；仅高置信度 `others` 进入闲聊路径，调用失败或判断不确定时进入医疗流程 ✅
 - **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
 - **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
@@ -356,6 +357,12 @@ LLM_MODEL_NAME=your-model-name
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
+# 意图识别（默认通过 TypeSafe API 调用 JEV）
+INTENT_CLASSIFIER_MODE=jev
+TYPESAFE_API_KEY=your-typesafe-api-key
+JEV_MODEL=jev-1.13.0
+JEV_OTHERS_THRESHOLD=0.9
+
 # 并发与超时配置
 LLM_MAX_CONCURRENCY=16
 LLM_TIMEOUT=60
@@ -384,6 +391,8 @@ BASELINE_LLM_MODEL_NAME=gpt-4o
 # Redis 工作记忆（默认）
 WORKING_MEMORY_STORAGE=redis
 ```
+
+`INTENT_CLASSIFIER_MODE` 可设为 `jev`（默认）、`llm`（原有 LLM 分类）或 `shadow`。默认模式会将当前问句发送至 TypeSafe API，部署前须配置有效的 `TYPESAFE_API_KEY` 并确认数据处理要求。`shadow` 始终使用 LLM 结果路由，只有调用方显式允许时才会额外发送问句给 JEV；业务主链路目前未开启该许可。JEV 结果无效、超时或 `others` 置信度低于 0.9 时，意图按 `medical` 处理，不跳过医疗流程。
 
 ### 4. 初始化知识库
 
@@ -506,7 +515,7 @@ medix-agent-swarm/
 │   │   │   ├── compression_system.j2
 │   │   │   ├── compression_user.j2
 │   │   │   ├── quality_eval.j2          # 质量评估 + 信息分类
-│   │   │   └── intent_gate.j2           # 意图识别门控
+│   │   │   └── intent_gate.j2           # LLM 基线意图识别门控
 │   │   ├── lgraph/                      # LangGraph 子图控制消息
 │   │   │   └── force_answer.j2          # 强制收尾
 │   │   ├── evolution/                   # 自进化评审提示词
@@ -517,7 +526,7 @@ medix-agent-swarm/
 │   │   └── _language_rule.j2            # 统一中文语言规则
 │   ├── swarm/                           # Swarm 协调器
 │   │   ├── events.py                    # 事件驱动通信（16 种事件类型，含 AGENT_QUESTIONNAIRE）
-│   │   ├── intent_classifier.py         # 意图识别（medical / others，失败降级 medical）
+│   │   ├── intent_classifier.py         # JEV 默认意图识别（可选 LLM / shadow，失败按 medical 路由）
 │   │   ├── lead_agent.py                # 闲聊直答 + 澄清决策 + 任务分解 + 阶段规划 + 结果汇总
 │   │   ├── stage_planner.py             # 阶段规划纯函数（依赖链预筛/规范化/层波次/引用重编号）
 │   │   ├── shared_context.py            # 共享环境（信息素）
@@ -577,6 +586,8 @@ medix-agent-swarm/
 │   │   └── web_search.py
 │   ├── eval/                            # 评估框架
 │   │   ├── runner.py                    # 评估统一入口
+│   │   ├── intent_cases.py              # 合成中文意图识别样本
+│   │   ├── intent_comparison.py         # LLM 与 JEV 对照实验
 │   │   ├── evaluators/                  # 各维度评估器
 │   │   ├── data/                        # 评估数据集
 │   │   └── reports/                     # 评估报告
@@ -787,6 +798,12 @@ LLM_MODEL_NAME=gpt-4o
 LLM_TEMPERATURE=0.7
 LLM_MAX_TOKENS=8192
 
+# 意图识别
+INTENT_CLASSIFIER_MODE=jev
+TYPESAFE_API_KEY=your-typesafe-api-key
+JEV_MODEL=jev-1.13.0
+JEV_OTHERS_THRESHOLD=0.9
+
 # 并发与超时配置
 LLM_MAX_CONCURRENCY=16   # LLM 全局并发上限（信号量，保护上游 API 配额）
 LLM_TIMEOUT=60           # 单次 LLM 请求超时（秒）
@@ -832,6 +849,8 @@ STAGE_MAX_WAVES=4                         # 最多分层波次（超出跳过剩
 STAGE_TOTAL_BUDGET=200                    # 分层求解总预算（秒），超时跳过剩余阶段并附说明
 STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），超时写占位不卡死循环
 ```
+
+意图识别使用固定 JEV 模型版本；`llm` 可用于回退到原有分类器。`shadow` 模式须由调用方显式授权发送问句，且始终由 LLM 决定路由。配置变更后需重启后端进程。
 
 ### 记忆系统配置
 
@@ -1221,6 +1240,16 @@ python -m mediZJ.eval.runner --metrics routing,retrieval
 python -m mediZJ.eval.runner --score-abtest
 ```
 
+意图分类对照实验独立于上述 Agent 路由评估。配置有效的 `LLM_API_KEY`、`LLM_BASE_URL` 和 `TYPESAFE_API_KEY` 后执行：
+
+```bash
+uv run python -m mediZJ.eval.intent_comparison
+```
+
+实验对 260 条人工合成、无患者信息的中文问句，让原 LLM 与 JEV 各判断 3 次；按基础问句分组划分调参与留出集，在调参集选择阈值，仅在留出集评估结果。命令向标准输出打印混淆矩阵、`others` 识别率、失败率、P50/P95 延迟、token 用量及估算成本，不生成报告文件。若要比较成本，另需配置 `INTENT_LLM_INPUT_USD_PER_M`、`INTENT_LLM_OUTPUT_USD_PER_M`；JEV 估算使用实验脚本中的单价。
+
+2026-09-29 的一次留出集运行结果（每模型 156 次调用）：`deepseek-v4-flash` 和 `jev-1.13.0` 的 `medical → others` 均为 0；`others` 识别率分别为 47/48 和 48/48；P95 延迟分别约 1182 ms 和 507 ms。调参集选择阈值 0.5，但项目运行配置保持更保守的 0.9。合成样本与重复调用不能代表真实流量，也不能据此证明医疗场景中误判率为零。
+
 ### 评估报告
 
 运行后自动生成：
@@ -1302,7 +1331,7 @@ quality_eval = PromptLoader.render(
 | `research/query_planning.j2` | `question` | 查询拆解 |
 | `memory/compression_user.j2` | `dialogue_text` | 对话压缩 |
 | `memory/quality_eval.j2` | `existing_personal`, `existing_facts`, `current_question`, `current_answer` | 质量评分 + 信息分类提取 |
-| `memory/intent_gate.j2` | `question` | 意图识别门控 |
+| `memory/intent_gate.j2` | `question` | LLM 基线意图识别门控；默认 JEV 使用代码中定义的 Choice 问题 |
 | `lgraph/force_answer.j2` | —（静态） | 强制收尾 |
 | `validation/high_risk_warning.j2` | —（静态） | 高危症状警告 |
 | `validation/truncation_notice.j2` | —（静态） | 截断提示 |
@@ -1599,7 +1628,7 @@ SwarmCoordinator
                             ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ 阶段 0：意图识别 (intent_classify 节点)                                  │
-│ IntentClassifier 判断意图：                                              │
+│ IntentClassifier 默认由 JEV 判断意图（失败或不确定时按 medical 处理）：   │
 │   - others（寒暄/无关）→ chat_reply 闲聊直答（内部检索近期历史）         │
 │   - medical → 进入澄清流程                                               │
 └─────────────────────────────────────────────────────────────────────────┘
