@@ -3,6 +3,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import uuid
 from typing import Dict, Any, Optional, AsyncGenerator, List
 from datetime import datetime
@@ -53,10 +54,42 @@ async def _verify_final_result(
         result.get("answer", ""),
         result.get("citations", []),
     )
+    answer, citations = _keep_cited_references(
+        answer, verification.validated_citations
+    )
+    verification.validated_citations = citations
     result["answer"] = answer
-    result["citations"] = verification.validated_citations
+    result["citations"] = citations
     result["verification"] = verification.to_dict()
     return result
+
+
+def _keep_cited_references(
+    answer: str,
+    citations: List[Dict[str, Any]],
+) -> tuple[str, List[Dict[str, Any]]]:
+    """仅展示最终正文中出现过编号的参考资料。"""
+    body = re.split(r"(?m)^## 参考资料[ \t]*$", answer, maxsplit=1)[0].rstrip()
+    markers = re.findall(r"\[(\d+(?:[,\-]\d+)*)\]", body)
+    used_indices = set()
+    for marker in markers:
+        for part in marker.split(","):
+            if "-" in part:
+                start, end = (int(number) for number in part.split("-"))
+                used_indices.update(
+                    citation["index"] for citation in citations
+                    if start <= citation["index"] <= end
+                )
+            else:
+                used_indices.add(int(part))
+
+    cited = [
+        citation for citation in citations
+        if citation.get("index") in used_indices
+    ]
+    if cited:
+        body += "\n" + SwarmCoordinator.format_references_section(cited)
+    return body, cited
 
 
 def _get_session_vectors() -> SessionVectorStore:

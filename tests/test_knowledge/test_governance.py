@@ -91,6 +91,19 @@ def test_citation_validator_rejects_archived_and_enriches_active(catalog):
     }]) == []
 
 
+def test_citation_validator_keeps_body_reference_index(catalog):
+    version = catalog.begin_version("doc", "hash-index", _metadata())
+    catalog.activate(version["version_id"])
+    validator = CitationValidator(catalog=catalog)
+
+    valid = validator.validate([
+        {"index": 1, "doc_id": "missing"},
+        {"index": 4, "doc_id": "doc"},
+    ])
+
+    assert [item["index"] for item in valid] == [4]
+
+
 @pytest.mark.asyncio
 async def test_verifier_blocks_risky_diagnosis_without_care_advice(catalog):
     verifier = MedicalAnswerVerifier(

@@ -97,8 +97,6 @@ class CitationValidator:
                 }
             )
             valid.append(item)
-        for index, item in enumerate(valid, 1):
-            item["index"] = index
         return valid
 
 
