@@ -43,6 +43,11 @@ async def launch(tmp_path, delay="0", crash="0"):
         "LEASE_SECONDS": "30",
         "BACKGROUND_LLM_LIMIT": "1",
     }
+    # 子进程会被强制退出，无法保存覆盖率；避免采集拖慢 jieba 等模块导入。
+    # 主测试进程仍正常采集覆盖率并执行 CI 的覆盖率门槛。
+    for key in tuple(environment):
+        if key.startswith("COV_CORE_"):
+            environment.pop(key)
     for key in (
         "ALL_PROXY",
         "HTTP_PROXY",
