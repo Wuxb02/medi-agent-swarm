@@ -121,6 +121,7 @@ function toggleExpand(id: string) {
 // ========== 文档管理 Tab ==========
 const documents = ref<DocumentSummary[]>([])
 const docLoading = ref(false)
+const documentsLoaded = ref(false)
 const selectedDocId = ref<string | null>(null)
 const chunks = ref<ChunkDetail[]>([])
 const chunkLoading = ref(false)
@@ -133,12 +134,15 @@ const editContent = ref('')
 const editSaving = ref(false)
 
 async function loadDocuments() {
+  if (docLoading.value) return
   docLoading.value = true
   try {
     const data = await getDocuments()
     documents.value = data.documents || []
+    documentsLoaded.value = true
   } catch (e) {
     console.error('Load documents error:', e)
+    documentsLoaded.value = false
     documents.value = []
   } finally {
     docLoading.value = false
@@ -230,7 +234,7 @@ function copyChunk(content: string) {
 
 // 监听 tab 切换，加载文档列表
 watch(activeTab, (tab) => {
-  if (tab === 'documents') loadDocuments()
+  if (tab === 'documents' && !documentsLoaded.value) void loadDocuments()
 })
 
 // ========== 上传 Tab ==========
@@ -291,6 +295,7 @@ async function handleUpload() {
       uploadExpiresAt.value || undefined,
     )
     uploadResult.value = `上传成功：${data.filename}，生成 ${data.chunks_added} 个分块`
+    documentsLoaded.value = false
     uploadFile.value = null
     if (fileInputRef.value) fileInputRef.value.value = ''
     uploadDisease.value = ''
