@@ -25,10 +25,14 @@ async def search_history(session_id: str, limit: int = 10) -> Dict[str, Any]:
 
     try:
         # 导入记忆系统
-        from memory.short_term import ShortTermMemory
+        from mediZJ.memory.short_term import ShortTermMemory
 
         # 获取短期记忆实例
-        memory = ShortTermMemory(storage_type="memory")
+        from mediZJ.infrastructure.context import get_identity
+        user_id, current_session = get_identity()
+        if session_id != current_session:
+            raise PermissionError('只能检索当前会话')
+        memory = ShortTermMemory(user_id=user_id)
 
         # 获取历史消息
         messages = await memory.get_recent_messages(session_id, limit=limit * 2)  # 每轮包含user+assistant

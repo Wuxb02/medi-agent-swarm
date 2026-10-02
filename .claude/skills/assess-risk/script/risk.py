@@ -13,7 +13,7 @@ def get_knowledge_base():
     """获取知识库单例"""
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -32,7 +32,7 @@ async def assess_risk(symptoms: str) -> Dict[str, Any]:
             "recommendation": "就医建议"
         }
     """
-    logger.info(f"Assessing risk: symptoms={symptoms}")
+    logger.info('执行医学检索工具')
 
     # 将症状字符串转换为列表
     symptom_list = [s.strip() for s in symptoms.split(",") if s.strip()]
@@ -80,7 +80,7 @@ async def assess_risk(symptoms: str) -> Dict[str, Any]:
         kb = get_knowledge_base()
         # 根据风险等级查询相关医学知识
         risk_query = f"{symptoms} 紧急程度 风险评估 就医建议"
-        results = kb.search(
+        results = await kb.search(
             query=risk_query,
             top_k=1,
             filter_type=None

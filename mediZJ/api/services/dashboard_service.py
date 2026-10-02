@@ -1,13 +1,14 @@
 """仪表盘服务：统计数据聚合"""
+
 from typing import Dict, List, Optional
 from mediZJ.api.services.session_service import list_sessions, get_session_detail
 from mediZJ.api.services.knowledge_service import get_knowledge_base_size
 from mediZJ.api.models.dashboard import DashboardStats
 
 
-def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
+async def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
     """获取仪表盘统计数据"""
-    sessions = list_sessions(limit=200, user_id=user_id)
+    sessions = await list_sessions(limit=200, user_id=user_id)
 
     total_sessions = len(sessions)
     swarm_sessions = sum(1 for s in sessions if s.mode == "swarm")
@@ -20,7 +21,7 @@ def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
     response_times: List[float] = []
 
     for s in sessions:
-        detail = get_session_detail(s.session_id, user_id=user_id)
+        detail = await get_session_detail(s.session_id, user_id=user_id)
         if detail:
             # 按实际参与的 Agent 统计
             for agent in detail.agents_involved:
@@ -32,10 +33,16 @@ def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
         else:
             # 降级：无法获取详情时按模式推断
             if s.mode == "swarm":
-                for agent in ["consultation_agent", "diagnostic_agent", "research_agent"]:
+                for agent in [
+                    "consultation_agent",
+                    "diagnostic_agent",
+                    "research_agent",
+                ]:
                     agents_usage[agent] = agents_usage.get(agent, 0) + 1
             else:
-                agents_usage["consultation_agent"] = agents_usage.get("consultation_agent", 0) + 1
+                agents_usage["consultation_agent"] = (
+                    agents_usage.get("consultation_agent", 0) + 1
+                )
 
     avg_response_time = (
         sum(response_times) / len(response_times) if response_times else 0.0
@@ -63,7 +70,7 @@ def get_dashboard_stats(user_id: Optional[str] = None) -> DashboardStats:
         single_sessions=single_sessions,
         avg_response_time=round(avg_response_time, 2),
         agents_usage=agents_usage,
-        knowledge_base_size=get_knowledge_base_size(),
+        knowledge_base_size=(await get_knowledge_base_size()),
         recent_sessions=recent_sessions,
         total_tokens=total_tokens,
         avg_parallel_efficiency=round(avg_pe, 4),

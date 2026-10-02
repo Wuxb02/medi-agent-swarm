@@ -6,7 +6,6 @@ import json
 import time
 from typing import Any, Dict, List, Optional
 
-from loguru import logger
 
 from .judge import ConversationJudge
 from .config import EvolutionSettings
@@ -48,7 +47,7 @@ class EvolutionService:
             self._judge = ConversationJudge()
         return self._judge
 
-    def submit_feedback(
+    async def submit_feedback(
         self,
         message_id: int,
         user_id: str,
@@ -56,14 +55,14 @@ class EvolutionService:
         reason_codes: List[str],
         comment: str,
     ) -> Dict[str, Any]:
-        feedback = self.storage.upsert_feedback(
+        feedback = await self.storage.upsert_feedback(
             message_id,
             user_id,
             rating,
             reason_codes,
             comment,
         )
-        job_id = self.storage.enqueue_job(
+        job_id = await self.storage.enqueue_job(
             message_id,
             user_id,
             "user_feedback",
@@ -73,7 +72,7 @@ class EvolutionService:
         feedback["evaluation_job_id"] = job_id
         return feedback
 
-    def maybe_enqueue_sample(self, message_id: int, user_id: str) -> None:
+    async def maybe_enqueue_sample(self, message_id: int, user_id: str) -> None:
         """按确定性采样率将无反馈回答加入评审队列。"""
         if not self.enabled:
             return
@@ -81,27 +80,27 @@ class EvolutionService:
         digest = hashlib.sha256(str(message_id).encode("utf-8")).digest()
         sample = int.from_bytes(digest[:8], "big") / (2**64 - 1)
         if sample < rate:
-            self.storage.enqueue_job(message_id, user_id, "sampling")
+            (await self.storage.enqueue_job(message_id, user_id, "sampling"))
 
-    def enqueue_manual(self, message_id: int) -> Optional[str]:
-        context = self.storage.get_message_context(message_id)
+    async def enqueue_manual(self, message_id: int) -> Optional[str]:
+        context = await self.storage.get_message_context(message_id)
         if context is None:
             raise LookupError("回答不存在")
-        return self.storage.enqueue_job(
+        return await self.storage.enqueue_job(
             message_id,
             context["user_id"],
             "manual",
             time.time_ns(),
         )
 
-    def get_runtime_experiences(
+    async def get_runtime_experiences(
         self,
         user_id: str,
         question: str,
         limit: int = 4,
     ) -> List[Dict[str, Any]]:
         """以词项覆盖度排序已发布经验。"""
-        candidates = self.storage.get_active_experiences(user_id)
+        candidates = await self.storage.get_active_experiences(user_id)
         query_terms = self._terms(question)
         ranked = []
         for item in candidates:
@@ -113,8 +112,8 @@ class EvolutionService:
         ranked.sort(key=lambda value: (value[0], value[1]), reverse=True)
         return [item for _, _, item in ranked[:limit]]
 
-    def get_runtime_context(self, user_id: str, question: str) -> Dict[str, Any]:
-        experiences = self.get_runtime_experiences(user_id, question)
+    async def get_runtime_context(self, user_id: str, question: str) -> Dict[str, Any]:
+        experiences = await self.get_runtime_experiences(user_id, question)
         if not experiences:
             return {}
         lines = []
@@ -161,7 +160,7 @@ class EvolutionService:
         normalized = "".join(char.lower() if char.isalnum() else " " for char in text)
         words = set(normalized.split())
         compact = normalized.replace(" ", "")
-        words.update(compact[index:index + 2] for index in range(len(compact) - 1))
+        words.update(compact[index : index + 2] for index in range(len(compact) - 1))
         return {word for word in words if word}
 
     @staticmethod
@@ -187,62 +186,14 @@ class EvolutionService:
         sample = int.from_bytes(hashlib.sha256(key).digest()[:8], "big")
         return sample / (2**64 - 1) < rate
 
-    async def start(self) -> None:
-        if not self.enabled or self._worker_task is not None:
-            return
-        self._stop_event = asyncio.Event()
-        self._worker_task = asyncio.create_task(self._worker_loop())
-
-    async def stop(self) -> None:
-        if self._worker_task is None:
-            return
-        if self._stop_event is not None:
-            self._stop_event.set()
-        await self._worker_task
-        self._worker_task = None
-
     async def process_one(self) -> bool:
-        job = await asyncio.to_thread(self.storage.claim_job)
+        """手动执行一次统一工作器轮询，租约与重试规则保持一致。"""
+        from mediZJ.infrastructure.handlers import evaluation
+        from mediZJ.infrastructure.jobs import JobWorker, claim
+
+        worker = JobWorker({"evaluation": evaluation}, concurrency=1)
+        job = await claim("evaluation", worker.owner)
         if job is None:
             return False
-        try:
-            context = await asyncio.to_thread(
-                self.storage.get_message_context,
-                int(job["assistant_message_id"]),
-                job["user_id"],
-            )
-            if context is None:
-                raise LookupError("评审对象不存在或无权访问")
-            snapshot = job.get("feedback_snapshot")
-            if snapshot:
-                context["feedback"] = json.loads(snapshot)
-            result = await asyncio.wait_for(
-                self.judge.evaluate(context),
-                timeout=self.settings.judge_timeout,
-            )
-            await asyncio.to_thread(
-                self.storage.save_evaluation,
-                job,
-                result,
-                self.judge.model_name,
-            )
-        except Exception as exc:
-            logger.exception("自进化评审任务失败: {}", job["job_id"])
-            await asyncio.to_thread(
-                self.storage.fail_job,
-                job["job_id"],
-                str(exc),
-            )
+        await worker._execute(job)
         return True
-
-    async def _worker_loop(self) -> None:
-        assert self._stop_event is not None
-        interval = self.settings.poll_interval
-        while not self._stop_event.is_set():
-            processed = await self.process_one()
-            if processed:
-                continue
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass

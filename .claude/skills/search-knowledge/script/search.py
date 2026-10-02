@@ -13,7 +13,7 @@ def get_knowledge_base():
     """获取知识库单例"""
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -34,13 +34,13 @@ async def search_knowledge(query: str, max_results: int = 5) -> Dict[str, Any]:
             "references": [{index, doc_id, source, disease, type, filename, score, snippet}, ...]
         }
     """
-    logger.info(f"Searching knowledge base: query={query}, max_results={max_results}")
+    logger.info('执行医学检索工具')
 
     # 获取知识库单例（避免重复加载模型）
     kb = get_knowledge_base()
 
     # 使用 Milvus 进行语义检索
-    results = kb.search(
+    results = await kb.search(
         query=query,
         top_k=max_results,
         filter_type=None

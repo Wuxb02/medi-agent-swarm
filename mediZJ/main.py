@@ -3,6 +3,7 @@
 MediZJ多智能体医疗助手 - 主入口
 交互式对话；可选 -v / --verbose 开启详细日志
 """
+
 import asyncio
 import sys
 import time
@@ -15,7 +16,7 @@ project_root = Path(__file__).parent.parent
 load_dotenv(project_root / ".env")
 sys.path.insert(0, str(project_root))
 
-from mediZJ.swarm import process_with_swarm
+from mediZJ.swarm import process_with_swarm  # noqa: E402
 
 
 def setup_logger(verbose: bool = False):
@@ -25,13 +26,13 @@ def setup_logger(verbose: bool = False):
         logger.add(
             sys.stderr,
             format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
-            level="DEBUG"
+            level="DEBUG",
         )
     else:
         logger.add(
             sys.stderr,
             format="<level>{level: <8}</level> | <level>{message}</level>",
-            level="INFO"
+            level="INFO",
         )
 
     # 文件日志（始终相对于项目根目录）
@@ -67,6 +68,7 @@ async def interactive_mode():
     # 为整个交互式会话生成一个session_id
     import uuid
     from datetime import datetime
+
     session_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
     logger.info(f"Interactive session started with session_id: {session_id}")
 
@@ -79,15 +81,15 @@ async def interactive_mode():
                 continue
 
             # 处理命令
-            if user_input.lower() in ['exit', 'quit', 'q']:
+            if user_input.lower() in ["exit", "quit", "q"]:
                 print("\n👋 感谢使用，祝您健康！\n")
                 break
 
-            if user_input.lower() == 'clear':
+            if user_input.lower() == "clear":
                 print("\033[2J\033[H")  # 清屏
                 continue
 
-            if user_input.lower() == 'help':
+            if user_input.lower() == "help":
                 print("\n📖 帮助信息：")
                 print("  exit/quit - 退出程序")
                 print("  clear     - 清屏")
@@ -108,18 +110,18 @@ async def interactive_mode():
             execution_time = end_time - start_time
 
             # 显示系统决策和执行时间
-            if result.get('swarm_enabled'):
-                agents_count = len(result.get('agents_involved', []))
-                timeout_occurred = result.get('timeout_occurred', False)
+            if result.get("swarm_enabled"):
+                agents_count = len(result.get("agents_involved", []))
+                timeout_occurred = result.get("timeout_occurred", False)
 
                 if timeout_occurred and agents_count == 0:
-                    print(f"⚠️  群体智能模式：系统超时，所有Agent未完成")
+                    print("⚠️  群体智能模式：系统超时，所有Agent未完成")
                 elif timeout_occurred:
                     print(f"⚠️  群体智能模式：{agents_count} 个Agent完成（部分超时）")
                 else:
                     print(f"🐝 群体智能模式：{agents_count} 个Agent协作")
             else:
-                print(f"🤖 单Agent模式")
+                print("🤖 单Agent模式")
 
             # 打印执行时间
             print(f"⏱️  执行时间：{execution_time:.2f} 秒")
@@ -127,17 +129,19 @@ async def interactive_mode():
             # 显示回答
             print("\n📋 回答：")
             print("-" * 60)
-            print(result['answer'])
+            print(result["answer"])
             print("-" * 60)
 
             # 显示建议（如果有）
-            if result.get('suggestions'):
+            if result.get("suggestions"):
                 print(f"\n💡 核心建议 ({len(result['suggestions'])}条)：")
-                for i, suggestion in enumerate(result['suggestions'], 1):
+                for i, suggestion in enumerate(result["suggestions"], 1):
                     print(f"  {i}. {suggestion}")
 
             # 显示免责声明（固定文案，CLI 末尾统一展示）
-            print(f"\n⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。")
+            print(
+                "\n⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
+            )
             print("\n" + "=" * 60 + "\n")
 
         except KeyboardInterrupt:
@@ -148,17 +152,27 @@ async def interactive_mode():
             print(f"\n❌ 抱歉，处理您的问题时出现错误：{e}\n")
 
 
-def main():
+async def main():
     """主函数：启动交互式对话"""
-    verbose = '-v' in sys.argv or '--verbose' in sys.argv
+    from mediZJ.infrastructure.database import (
+        close_database,
+        initialize_database,
+        validate_runtime_schema,
+    )
+    from mediZJ.infrastructure.redis_client import close_redis, initialize_redis
+
+    verbose = "-v" in sys.argv or "--verbose" in sys.argv
     setup_logger(verbose)
 
     try:
-        asyncio.run(interactive_mode())
-    except Exception as e:
-        logger.error(f"程序运行出错: {e}")
-        sys.exit(1)
+        await initialize_database()
+        await validate_runtime_schema()
+        await initialize_redis()
+        await interactive_mode()
+    finally:
+        await close_redis()
+        await close_database()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

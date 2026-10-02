@@ -6,6 +6,7 @@
 - 每轮检查：关键词命中 + LLM-as-Judge 评分
 - 综合准确率 = (关键词命中 + LLM评分≥4) / 总检查项
 """
+
 import json
 import re
 from typing import Dict, Any, List
@@ -33,16 +34,12 @@ def _check_keywords(answer: str, expected_keywords: List[str]) -> Dict[str, Any]
         "hit": len(missing) == 0,
         "matched": matched,
         "missing": missing,
-        "hit_rate": hit_rate
+        "hit_rate": hit_rate,
     }
 
 
 async def _llm_judge_context(
-    llm_client,
-    history: str,
-    current_question: str,
-    answer: str,
-    expected_context: str
+    llm_client, history: str, current_question: str, answer: str, expected_context: str
 ) -> Dict[str, Any]:
     """使用 LLM-as-Judge 评估上下文理解质量"""
     prompt = f"""你是一个医学对话评估专家。请评估以下回答是否正确理解了对话上下文。
@@ -72,10 +69,10 @@ async def _llm_judge_context(
         response = await llm_client.chat([{"role": "user", "content": prompt}])
 
         # 解析评分
-        score_match = re.search(r'评分[：:]\s*(\d)', response)
+        score_match = re.search(r"评分[：:]\s*(\d)", response)
         score = int(score_match.group(1)) if score_match else 3
 
-        reason_match = re.search(r'理由[：:]\s*(.+)', response)
+        reason_match = re.search(r"理由[：:]\s*(.+)", response)
         reason = reason_match.group(1).strip() if reason_match else "无法解析"
 
         return {"score": max(1, min(5, score)), "reason": reason}
@@ -86,7 +83,6 @@ async def _llm_judge_context(
 
 async def run_multiturn_eval(coordinator=None) -> Dict[str, Any]:
     """运行多轮对话上下文理解评估"""
-    from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
 
     with open(MULTITURN_CASES_PATH, "r", encoding="utf-8") as f:
         cases = json.load(f)
@@ -106,7 +102,7 @@ async def run_multiturn_eval(coordinator=None) -> Dict[str, Any]:
 
         # 每组对话使用独立 coordinator，但共享 session_id
         if coordinator is None:
-            with isolated_coordinator() as coord:
+            async with isolated_coordinator() as coord:
                 case_result = await _run_multiturn_case(
                     coord, case_id, turns, session_id
                 )
@@ -130,7 +126,7 @@ async def run_multiturn_eval(coordinator=None) -> Dict[str, Any]:
         "accuracy": round(accuracy, 4),
         "threshold": threshold,
         "pass": accuracy >= threshold,
-        "details": results
+        "details": results,
     }
 
     logger.info(
@@ -143,10 +139,7 @@ async def run_multiturn_eval(coordinator=None) -> Dict[str, Any]:
 
 
 async def _run_multiturn_case(
-    coordinator,
-    case_id: str,
-    turns: List[Dict],
-    session_id: str
+    coordinator, case_id: str, turns: List[Dict], session_id: str
 ) -> Dict[str, Any]:
     """执行单组多轮对话评估"""
     turn_results = []
@@ -158,16 +151,13 @@ async def _run_multiturn_case(
         question = turn["content"]
         expect_keywords = turn.get("expect_context_keywords", [])
 
-        logger.info(f"  轮次 {i+1}: {question[:30]}...")
+        logger.info(f"  轮次 {i + 1}: {question[:30]}...")
 
         try:
-            result = await coordinator.process(
-                question=question,
-                session_id=session_id
-            )
+            result = await coordinator.process(question=question, session_id=session_id)
             answer = result.get("answer", "")
         except Exception as e:
-            logger.error(f"  轮次 {i+1} 失败: {e}")
+            logger.error(f"  轮次 {i + 1} 失败: {e}")
             answer = f"[ERROR: {e}]"
 
         # 更新对话历史
@@ -181,13 +171,15 @@ async def _run_multiturn_case(
             passed_checks += 1
         total_checks += 1
 
-        turn_results.append({
-            "turn_index": i,
-            "question": question,
-            "answer_preview": answer[:200],
-            "keyword_check": kw_check,
-            "passed": turn_passed
-        })
+        turn_results.append(
+            {
+                "turn_index": i,
+                "question": question,
+                "answer_preview": answer[:200],
+                "keyword_check": kw_check,
+                "passed": turn_passed,
+            }
+        )
 
         logger.info(
             f"    关键词: {kw_check['matched']}/{expect_keywords} "
@@ -198,5 +190,5 @@ async def _run_multiturn_case(
         "case_id": case_id,
         "turn_results": turn_results,
         "total_checks": total_checks,
-        "passed_checks": passed_checks
+        "passed_checks": passed_checks,
     }

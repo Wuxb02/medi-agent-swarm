@@ -11,7 +11,7 @@ _kb_instance = None
 def get_knowledge_base():
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -36,7 +36,7 @@ async def recommend_lifestyle(diagnosis: str) -> Dict[str, Any]:
     kb = get_knowledge_base()
 
     # 从 Milvus 检索生活方式建议
-    results = kb.search(
+    results = await kb.search(
         query=f"{diagnosis} 生活方式建议 饮食 运动 用药",
         top_k=1,
         filter_type="lifestyle"

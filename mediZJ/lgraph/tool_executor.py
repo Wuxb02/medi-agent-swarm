@@ -9,8 +9,8 @@ LangGraph 工具执行节点
 - 收集知识库 references（doc_id 去重）
 - 按当前逻辑计入/不计入 tool_call_count
 """
+
 import json
-import time
 from typing import Dict, Any, List, Optional, Callable
 from loguru import logger
 
@@ -19,7 +19,8 @@ from mediZJ.lgraph.tool_registry import ToolRegistry
 
 # 约束验证（可选）
 try:
-    from mediZJ.constraints import ConstraintValidator
+    from mediZJ.constraints.validator import get_shared_validator
+
     CONSTRAINTS_ENABLED = True
 except ImportError:
     CONSTRAINTS_ENABLED = False
@@ -27,7 +28,8 @@ except ImportError:
 # Trace
 try:
     from mediZJ.trace.context import traced_span
-    from mediZJ.trace.models import SpanType, ToolAttributes
+    from mediZJ.trace.models import SpanType
+
     TRACE_AVAILABLE = True
 except ImportError:
     TRACE_AVAILABLE = False
@@ -38,9 +40,11 @@ except ImportError:
 # 不消耗 Worker 工具调用配额的系统交互工具（激活技能 / 前端问卷）
 _NON_COUNTED_TOOLS = frozenset({"activate_skill"})
 
+
 class _ToolCall:
     """LLM 返回的单个工具调用"""
-    __slots__ = ('id', 'name', 'arguments')
+
+    __slots__ = ("id", "name", "arguments")
 
     def __init__(self, id: str, name: str, arguments: Dict[str, Any]):
         self.id = id
@@ -51,26 +55,36 @@ class _ToolCall:
 def _extract_tool_calls(last_message) -> List[_ToolCall]:
     """从最后一条 assistant 消息中提取 tool_calls（兼容 LangChain AIMessage 和 dict）"""
     # LangChain AIMessage 对象（add_messages reducer 转换后）
-    if hasattr(last_message, 'tool_calls') and not isinstance(last_message, dict):
-        raw_calls = getattr(last_message, 'tool_calls', []) or []
+    if hasattr(last_message, "tool_calls") and not isinstance(last_message, dict):
+        raw_calls = getattr(last_message, "tool_calls", []) or []
         result = []
         for tc in raw_calls:
             if isinstance(tc, dict):
-                result.append(_ToolCall(
-                    id=tc.get("id", ""),
-                    name=tc.get("name", ""),
-                    arguments=tc.get("args", {}) if "args" in tc else tc.get("arguments", {}),
-                ))
+                result.append(
+                    _ToolCall(
+                        id=tc.get("id", ""),
+                        name=tc.get("name", ""),
+                        arguments=tc.get("args", {})
+                        if "args" in tc
+                        else tc.get("arguments", {}),
+                    )
+                )
             else:
-                result.append(_ToolCall(
-                    id=getattr(tc, 'id', ''),
-                    name=getattr(tc, 'name', ''),
-                    arguments=getattr(tc, 'args', {}) if hasattr(tc, 'args') else getattr(tc, 'arguments', {}),
-                ))
+                result.append(
+                    _ToolCall(
+                        id=getattr(tc, "id", ""),
+                        name=getattr(tc, "name", ""),
+                        arguments=getattr(tc, "args", {})
+                        if hasattr(tc, "args")
+                        else getattr(tc, "arguments", {}),
+                    )
+                )
         return result
 
     # 普通 dict 格式
-    tool_calls_data = last_message.get("tool_calls", []) if isinstance(last_message, dict) else []
+    tool_calls_data = (
+        last_message.get("tool_calls", []) if isinstance(last_message, dict) else []
+    )
     if not tool_calls_data:
         return []
 
@@ -83,17 +97,20 @@ def _extract_tool_calls(last_message) -> List[_ToolCall]:
         except json.JSONDecodeError:
             args = {}
 
-        result.append(_ToolCall(
-            id=tc.get("id", ""),
-            name=name,
-            arguments=args,
-        ))
+        result.append(
+            _ToolCall(
+                id=tc.get("id", ""),
+                name=name,
+                arguments=args,
+            )
+        )
     return result
 
 
 # ---- 工具执行节点工厂 ----
 
-def make_tool_execution_node(
+
+async def make_tool_execution_node(
     tool_registry: ToolRegistry,
     validator: Optional[Any] = None,
     on_tool_step: Optional[Callable] = None,
@@ -118,7 +135,6 @@ def make_tool_execution_node(
     """
     _validator = validator
     if _validator is None and CONSTRAINTS_ENABLED:
-        from mediZJ.constraints.validator import get_shared_validator
         _validator = get_shared_validator()
 
     async def tool_execution_node(state: AgentState) -> dict:
@@ -149,7 +165,9 @@ def make_tool_execution_node(
                     logger.warning(f"约束警告 [{tc.name}]: {validation.get('reason')}")
 
             # Trace: TOOL span
-            _tool_ctx = traced_span(SpanType.TOOL, name=tc.name) if TRACE_AVAILABLE else None
+            _tool_ctx = (
+                traced_span(SpanType.TOOL, name=tc.name) if TRACE_AVAILABLE else None
+            )
             if _tool_ctx:
                 _tool_ctx.__enter__()
 
@@ -157,7 +175,7 @@ def make_tool_execution_node(
             try:
                 result = await tool_registry.execute(tc.name, **tc.arguments)
             except Exception as e:
-                logger.error(f"工具执行异常 [{tc.name}]: {e}")
+                logger.error(f"工具执行异常 [{tc.name}]: {type(e).__name__}")
                 result = {"success": False, "error": str(e), "tool": tc.name}
 
             if _tool_ctx:
@@ -188,7 +206,9 @@ def make_tool_execution_node(
                         f"Skill '{skill_name}' 已激活，{len(tool_names)} 个工具可用"
                     )
 
-                    logger.info(f"Skill 激活: {skill_name} → {len(tool_names)} 个工具可见")
+                    logger.info(
+                        f"Skill 激活: {skill_name} → {len(tool_names)} 个工具可见"
+                    )
             elif tc.name not in _NON_COUNTED_TOOLS:
                 # activate_skill 不计入 tool_call_count
                 tool_call_count += 1
@@ -205,15 +225,19 @@ def make_tool_execution_node(
                 )
 
             # 生成与 assistant.tool_calls 配对的 tool 消息
-            tool_results.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "name": tc.name,
-                "content": json.dumps(result, ensure_ascii=False, default=str),
-            })
+            tool_results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "name": tc.name,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                }
+            )
 
         # 整理引用列表
-        reference_list = sorted(collected_refs.values(), key=lambda r: r.get("index", 0))
+        reference_list = sorted(
+            collected_refs.values(), key=lambda r: r.get("index", 0)
+        )
         for new_idx, ref in enumerate(reference_list, 1):
             ref["index"] = new_idx
 

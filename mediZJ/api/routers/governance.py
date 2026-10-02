@@ -10,6 +10,18 @@ from mediZJ.memory.lifecycle import DataLifecycleService
 router = APIRouter(prefix="/api/governance", tags=["governance"])
 
 
+@router.post("/index/jobs/{job_id}/retry")
+async def retry_index_job(job_id: str, _admin: dict = Depends(require_admin)):
+    from mediZJ.infrastructure.indexing import retry
+
+    try:
+        return await retry(job_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/lifecycle/users/{user_id}/delete")
 async def delete_user_data(
     user_id: str,
@@ -28,7 +40,7 @@ async def get_lifecycle_job(
     job_id: str,
     _admin: dict = Depends(require_admin),
 ):
-    job = KnowledgeCatalog().get_job(job_id)
+    job = await KnowledgeCatalog().get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="清理作业不存在")
     return job

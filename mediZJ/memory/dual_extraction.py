@@ -48,58 +48,65 @@ class DualMemoryExtractor:
         self, turn_id: str, user_id: str, question: str, answer: str
     ) -> None:
         results = await asyncio.gather(
-            self._run_lane(turn_id, "personal",
-                           self._personal(question)),
-            self._run_lane(turn_id, "knowledge",
-                           self._knowledge(turn_id, user_id, question, answer)),
+            self._run_lane(turn_id, "personal", lambda: self._personal(question)),
+            self._run_lane(
+                turn_id,
+                "knowledge",
+                lambda: self._knowledge(turn_id, user_id, question, answer),
+            ),
             return_exceptions=True,
         )
-        for lane, result in zip(("personal", "knowledge"), results):
-            if isinstance(result, BaseException):
-                logger.warning("记忆提取轨道异常: turn={} lane={} error={}",
-                               turn_id, lane, result)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise RuntimeError("记忆提取未完成") from errors[0]
 
-    async def _run_lane(
-        self, turn_id: str, lane: str, task: Any
-    ) -> None:
+    async def _run_lane(self, turn_id: str, lane: str, task: Any) -> None:
         catalog = self.candidates.catalog
-        with catalog._connection() as conn:
-            row = conn.execute(
-                """SELECT status FROM memory_extraction_runs
-                WHERE turn_id = ? AND lane = ?""",
-                (turn_id, lane),
+        async with catalog._connection() as conn:
+            row = (
+                await conn.execute(
+                    """SELECT status FROM memory_extraction_runs
+                WHERE turn_id = %s AND lane = %s""",
+                    (turn_id, lane),
+                )
             ).fetchone()
-            if row and row["status"] in {"running", "done"}:
-                task.close()
+            if row and row["status"] in {"done"}:
                 return
-            conn.execute(
-                """INSERT OR REPLACE INTO memory_extraction_runs
+            (
+                await conn.execute(
+                    """INSERT INTO memory_extraction_runs
                 (turn_id, lane, status, error, updated_at)
-                VALUES (?, ?, 'running', NULL, ?)""",
-                (turn_id, lane, _now()),
+                VALUES (%s, %s, 'running', NULL, %s) ON DUPLICATE KEY UPDATE turn_id = VALUES(turn_id), lane = VALUES(lane), status = VALUES(status), error = VALUES(error), updated_at = VALUES(updated_at)""",
+                    (turn_id, lane, _now()),
+                )
             )
         try:
-            await task
+            await task()
             status, error = "done", None
         except asyncio.CancelledError:
             status, error = "failed", "cancelled"
             raise
         except Exception as exc:
             status, error = "failed", type(exc).__name__
-            logger.warning("记忆提取失败: turn={} lane={} error={}",
-                           turn_id, lane, exc)
+            logger.warning(
+                "记忆提取失败: turn={} lane={} error={}",
+                turn_id,
+                lane,
+                type(exc).__name__,
+            )
+            raise
         finally:
-            with catalog._connection() as conn:
-                conn.execute(
-                    """UPDATE memory_extraction_runs SET status = ?, error = ?,
-                    updated_at = ? WHERE turn_id = ? AND lane = ?""",
-                    (status, error, _now(), turn_id, lane),
+            async with catalog._connection() as conn:
+                (
+                    await conn.execute(
+                        """UPDATE memory_extraction_runs SET status = %s, error = %s,
+                    updated_at = %s WHERE turn_id = %s AND lane = %s""",
+                        (status, error, _now(), turn_id, lane),
+                    )
                 )
 
     async def _gate(self, question: str, name: str, spec: dict) -> bool:
-        choice, _ = await self.jev.choice(
-            question, name, spec, {"yes", "no"}
-        )
+        choice, _ = await self.jev.choice(question, name, spec, {"yes", "no"})
         return choice == "yes"
 
     async def _personal(self, question: str) -> None:
@@ -123,46 +130,50 @@ class DualMemoryExtractor:
         records = result.get("medical_records", [])
         if not isinstance(facts, list) or not isinstance(records, list):
             raise ValueError("个人信息提取格式无效")
-        existing = self.profile.load()
-        pending = self.profile.load_pending()
+        existing = await self.profile.load()
+        pending = await self.profile.load_pending()
         pending_facts = {(item.key, item.value) for item in pending}
         unique_facts = [
-            item for item in facts
+            item
+            for item in facts
             if isinstance(item, dict)
-            and item.get("key") and item.get("value")
+            and item.get("key")
+            and item.get("value")
             and item.get("source_text")
             and item["source_text"] in question
             and existing.get(item["key"]) != item["value"]
             and (item["key"], item["value"]) not in pending_facts
         ]
-        current_records = self.profile.load_records()
+        current_records = await self.profile.load_records()
         record_keys = {(item.date, item.description) for item in current_records}
-        record_keys.update(
-            (item.record_date, item.value)
-            for item in pending if item.is_record
+        (
+            record_keys.update(
+                (item.record_date, item.value) for item in pending if item.is_record
+            )
         )
         unique_records = [
-            item for item in records
-            if isinstance(item, dict) and item.get("date")
+            item
+            for item in records
+            if isinstance(item, dict)
+            and item.get("date")
             and item.get("description")
             and item.get("source_text")
             and item["source_text"] in question
             and (item["date"], item["description"]) not in record_keys
         ]
-        self.profile.add_pending(unique_facts)
-        self.profile.add_pending_records(unique_records)
+        (await self.profile.add_pending(unique_facts))
+        (await self.profile.add_pending_records(unique_records))
 
     async def _knowledge(
         self, turn_id: str, user_id: str, question: str, answer: str
     ) -> None:
-        if not await self._gate(question + "\n" + answer, "knowledge",
-                                _KNOWLEDGE_GATE):
+        if not await self._gate(question + "\n" + answer, "knowledge", _KNOWLEDGE_GATE):
             return
         prompt = (
             "从对话提取可独立核验的通用医学知识主张。"
             "不得包含患者个人资料、诊断推测或个人化建议。"
-            "仅输出 JSON：{\"claims\":[{\"claim\":\"...\","
-            "\"source_text\":\"对话中逐字原文\"}]}。每条原文必须逐字出现于对话。"
+            '仅输出 JSON：{"claims":[{"claim":"...",'
+            '"source_text":"对话中逐字原文"}]}。每条原文必须逐字出现于对话。'
             "\n用户：" + question + "\n助手：" + answer
         )
         raw = await self.llm_client.chat(
@@ -180,12 +191,14 @@ class DualMemoryExtractor:
             source_text = str(item.get("source_text", "")).strip()
             if not claim or not source_text or source_text not in question + answer:
                 continue
-            hits = await asyncio.to_thread(self.candidates.evidence_hits, claim)
+            hits = await self.candidates.evidence_hits(claim)
             if any(claim in hit["excerpt"] for hit in hits):
                 continue
             evidence = await self._judge_evidence(claim, hits)
-            self.candidates.add_candidate(
-                turn_id, user_id, claim, source_text, evidence
+            (
+                await self.candidates.add_candidate(
+                    turn_id, user_id, claim, source_text, evidence
+                )
             )
 
     async def _judge_evidence(
@@ -195,10 +208,12 @@ class DualMemoryExtractor:
         for hit in hits:
             prompt = (
                 "比较医学主张与资料片段。仅输出 JSON："
-                "{\"verdict\":\"support|conflict|irrelevant\","
-                "\"quote\":\"片段中的逐字短句\"}。"
-                "不能仅凭主题相近判断支持。\n主张：" + claim
-                + "\n片段：" + hit["excerpt"]
+                '{"verdict":"support|conflict|irrelevant",'
+                '"quote":"片段中的逐字短句"}。'
+                "不能仅凭主题相近判断支持。\n主张："
+                + claim
+                + "\n片段："
+                + hit["excerpt"]
             )
             raw = await self.llm_client.chat(
                 messages=[{"role": "user", "content": prompt}],
@@ -208,7 +223,10 @@ class DualMemoryExtractor:
             judged = json.loads(raw)
             verdict = judged.get("verdict")
             quote = judged.get("quote", "")
-            if verdict in {"support", "conflict"} and len(quote) >= 8 \
-                    and quote in hit["excerpt"]:
+            if (
+                verdict in {"support", "conflict"}
+                and len(quote) >= 8
+                and quote in hit["excerpt"]
+            ):
                 result.append({**hit, "verdict": verdict, "quote": quote})
         return result

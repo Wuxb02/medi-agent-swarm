@@ -35,9 +35,7 @@ def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
     return timestamp
 
 
-def _is_effective(
-    effective_at: Optional[str], expires_at: Optional[str]
-) -> bool:
+def _is_effective(effective_at: Optional[str], expires_at: Optional[str]) -> bool:
     now = datetime.now(timezone.utc)
     effective = _parse_timestamp(effective_at)
     expires = _parse_timestamp(expires_at)
@@ -67,7 +65,7 @@ class StructuredMemoryStore:
     def __init__(self, db: Optional[SessionDB] = None) -> None:
         self.db = db or SessionDB()
 
-    def list_items(
+    async def list_items(
         self,
         user_id: str,
         *,
@@ -78,20 +76,17 @@ class StructuredMemoryStore:
         if not status_list:
             return []
 
-        def _select(conn):
-            placeholders = ",".join("?" for _ in status_list)
-            sql = (
-                "SELECT * FROM user_memory_items "
-                f"WHERE user_id = ? AND status IN ({placeholders})"
-            )
+        async def _select(conn):
+            placeholders = ",".join("%s" for _ in status_list)
+            sql = f"SELECT * FROM user_memory_items WHERE user_id = %s AND status IN ({placeholders})"
             params: list[Any] = [user_id, *status_list]
             if memory_type:
-                sql += " AND memory_type = ?"
+                sql += " AND memory_type = %s"
                 params.append(memory_type)
             sql += " ORDER BY memory_type, memory_key, memory_id"
-            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+            return [dict(row) for row in (await conn.execute(sql, params)).fetchall()]
 
-        rows = self.db._execute(_select)
+        rows = await self.db._execute(_select)
         result = []
         for row in rows:
             if row["status"] == "active" and not _is_effective(
@@ -102,7 +97,7 @@ class StructuredMemoryStore:
             result.append(row)
         return result
 
-    def upsert_active(
+    async def upsert_active(
         self,
         user_id: str,
         memory_type: str,
@@ -117,17 +112,19 @@ class StructuredMemoryStore:
         now = _now()
         memory_id = "memory_" + uuid.uuid4().hex
 
-        def _upsert(conn):
-            self._ensure_owner(conn, user_id, now)
-            current = conn.execute(
-                """
+        async def _upsert(conn):
+            (await self._ensure_owner(conn, user_id, now))
+            current = (
+                await conn.execute(
+                    """
                 SELECT memory_id, revision, value_json, source_type,
                        sensitivity_level, consent_scope
                 FROM user_memory_items
-                WHERE user_id = ? AND memory_type = ? AND memory_key = ?
+                WHERE user_id = %s AND memory_type = %s AND memory_key = %s
                   AND status = 'active'
                 """,
-                (user_id, memory_type, memory_key),
+                    (user_id, memory_type, memory_key),
+                )
             ).fetchone()
             serialized = _canonical_json(value)
             source_rank = {
@@ -152,54 +149,60 @@ class StructuredMemoryStore:
             revision = int(current["revision"]) + 1 if current else 1
             supersedes_id = current["memory_id"] if current else None
             if current:
-                conn.execute(
-                    """
+                (
+                    await conn.execute(
+                        """
                     UPDATE user_memory_items
-                    SET status = 'superseded', updated_at = ?
-                    WHERE memory_id = ?
+                    SET status = 'superseded', updated_at = %s
+                    WHERE memory_id = %s
                     """,
-                    (now, current["memory_id"]),
+                        (now, current["memory_id"]),
+                    )
                 )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 INSERT INTO user_memory_items (
                     memory_id, user_id, memory_type, memory_key, value_json,
                     status, source_type, confidence, sensitivity_level,
                     consent_scope, revision, supersedes_id, created_at,
                     updated_at, confirmed_at
-                ) VALUES (?, ?, ?, ?, ?, 'active', ?, 1.0, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, 'active', %s, 1.0, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (
+                    (
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        memory_key,
+                        serialized,
+                        source_type,
+                        sensitivity_level,
+                        consent_scope,
+                        revision,
+                        supersedes_id,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+            )
+            (await self._increment_revision(conn, user_id, now))
+            (
+                await self._audit(
+                    conn,
                     memory_id,
                     user_id,
-                    memory_type,
-                    memory_key,
-                    serialized,
-                    source_type,
-                    sensitivity_level,
-                    consent_scope,
-                    revision,
-                    supersedes_id,
+                    "activate",
+                    actor_id or user_id,
+                    {"memory_type": memory_type, "memory_key": memory_key},
                     now,
-                    now,
-                    now,
-                ),
-            )
-            self._increment_revision(conn, user_id, now)
-            self._audit(
-                conn,
-                memory_id,
-                user_id,
-                "activate",
-                actor_id or user_id,
-                {"memory_type": memory_type, "memory_key": memory_key},
-                now,
+                )
             )
             return memory_id
 
-        return self.db._execute(_upsert)
+        return await self.db._execute(_upsert)
 
-    def replace_active(
+    async def replace_active(
         self,
         user_id: str,
         memory_type: str,
@@ -209,22 +212,26 @@ class StructuredMemoryStore:
     ) -> None:
         current = {
             item["memory_key"]: item["value"]
-            for item in self.list_items(
-                user_id, statuses=("active",), memory_type=memory_type
+            for item in (
+                await self.list_items(
+                    user_id, statuses=("active",), memory_type=memory_type
+                )
             )
         }
         for key in sorted(set(current) - set(values)):
-            self.deactivate(user_id, memory_type, key, actor_id=actor_id)
+            (await self.deactivate(user_id, memory_type, key, actor_id=actor_id))
         for key, value in sorted(values.items()):
-            self.upsert_active(
-                user_id,
-                memory_type,
-                key,
-                value,
-                actor_id=actor_id,
+            (
+                await self.upsert_active(
+                    user_id,
+                    memory_type,
+                    key,
+                    value,
+                    actor_id=actor_id,
+                )
             )
 
-    def add_pending(
+    async def add_pending(
         self,
         user_id: str,
         memory_type: str,
@@ -235,7 +242,7 @@ class StructuredMemoryStore:
         source_message_id: Optional[str] = None,
         source_trace_id: Optional[str] = None,
     ) -> str:
-        existing = self.list_items(
+        existing = await self.list_items(
             user_id,
             statuses=("pending",),
             memory_type=memory_type,
@@ -250,48 +257,52 @@ class StructuredMemoryStore:
         memory_id = "memory_" + uuid.uuid4().hex
         now = _now()
 
-        def _insert(conn):
-            self._ensure_owner(conn, user_id, now)
-            conn.execute(
-                """
+        async def _insert(conn):
+            (await self._ensure_owner(conn, user_id, now))
+            (
+                await conn.execute(
+                    """
                 INSERT INTO user_memory_items (
                     memory_id, user_id, memory_type, memory_key, value_json,
                     status, source_type, confidence, sensitivity_level,
                     consent_scope, source_message_id, source_trace_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', 'model_inferred', ?,
-                          'sensitive', 'none', ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, 'pending', 'model_inferred', %s,
+                          'sensitive', 'none', %s, %s, %s, %s)
                 """,
-                (
+                    (
+                        memory_id,
+                        user_id,
+                        memory_type,
+                        memory_key,
+                        serialized,
+                        confidence,
+                        source_message_id,
+                        source_trace_id,
+                        now,
+                        now,
+                    ),
+                )
+            )
+            (
+                await self._audit(
+                    conn,
                     memory_id,
                     user_id,
-                    memory_type,
-                    memory_key,
-                    serialized,
-                    confidence,
-                    source_message_id,
-                    source_trace_id,
+                    "create_pending",
+                    "system",
+                    {},
                     now,
-                    now,
-                ),
-            )
-            self._audit(
-                conn,
-                memory_id,
-                user_id,
-                "create_pending",
-                "system",
-                {},
-                now,
+                )
             )
 
-        self.db._execute(_insert)
+        (await self.db._execute(_insert))
         return memory_id
 
-    def confirm_pending(
+    async def confirm_pending(
         self, user_id: str, memory_key: str, expected_value: str
     ) -> bool:
-        pending = self.list_items(user_id, statuses=("pending",))
+        pending = await self.list_items(user_id, statuses=("pending",))
         match = next(
             (
                 item
@@ -303,21 +314,23 @@ class StructuredMemoryStore:
         )
         if match is None:
             return False
-        self.upsert_active(
-            user_id,
-            match["memory_type"],
-            match["memory_key"],
-            match["value"],
-            source_type="user_reported",
-            actor_id=user_id,
+        (
+            await self.upsert_active(
+                user_id,
+                match["memory_type"],
+                match["memory_key"],
+                match["value"],
+                source_type="user_reported",
+                actor_id=user_id,
+            )
         )
-        self._set_status(match["memory_id"], user_id, "superseded", "confirm")
+        (await self._set_status(match["memory_id"], user_id, "superseded", "confirm"))
         return True
 
-    def dismiss_pending(
+    async def dismiss_pending(
         self, user_id: str, memory_key: str, expected_value: str
     ) -> bool:
-        pending = self.list_items(user_id, statuses=("pending",))
+        pending = await self.list_items(user_id, statuses=("pending",))
         match = next(
             (
                 item
@@ -329,10 +342,10 @@ class StructuredMemoryStore:
         )
         if match is None:
             return False
-        self._set_status(match["memory_id"], user_id, "dismissed", "dismiss")
+        (await self._set_status(match["memory_id"], user_id, "dismissed", "dismiss"))
         return True
 
-    def deactivate(
+    async def deactivate(
         self,
         user_id: str,
         memory_type: str,
@@ -342,70 +355,80 @@ class StructuredMemoryStore:
     ) -> bool:
         now = _now()
 
-        def _deactivate(conn):
-            row = conn.execute(
-                """
+        async def _deactivate(conn):
+            row = (
+                await conn.execute(
+                    """
                 SELECT memory_id FROM user_memory_items
-                WHERE user_id = ? AND memory_type = ? AND memory_key = ?
+                WHERE user_id = %s AND memory_type = %s AND memory_key = %s
                   AND status = 'active'
                 """,
-                (user_id, memory_type, memory_key),
+                    (user_id, memory_type, memory_key),
+                )
             ).fetchone()
             if row is None:
                 return False
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 UPDATE user_memory_items
-                SET status = 'superseded', updated_at = ? WHERE memory_id = ?
+                SET status = 'superseded', updated_at = %s WHERE memory_id = %s
                 """,
-                (now, row["memory_id"]),
+                    (now, row["memory_id"]),
+                )
             )
-            self._increment_revision(conn, user_id, now)
-            self._audit(
-                conn,
-                row["memory_id"],
-                user_id,
-                "deactivate",
-                actor_id or user_id,
-                {},
-                now,
+            (await self._increment_revision(conn, user_id, now))
+            (
+                await self._audit(
+                    conn,
+                    row["memory_id"],
+                    user_id,
+                    "deactivate",
+                    actor_id or user_id,
+                    {},
+                    now,
+                )
             )
             return True
 
-        return self.db._execute(_deactivate)
+        return await self.db._execute(_deactivate)
 
-    def get_profile_revision(self, user_id: str) -> int:
-        def _get(conn):
-            row = conn.execute(
-                """
+    async def get_profile_revision(self, user_id: str) -> int:
+        async def _get(conn):
+            row = (
+                await conn.execute(
+                    """
                 SELECT profile_revision FROM memory_profile_revisions
-                WHERE user_id = ?
+                WHERE user_id = %s
                 """,
-                (user_id,),
+                    (user_id,),
+                )
             ).fetchone()
             return int(row["profile_revision"]) if row else 0
 
-        return self.db._execute(_get)
+        return await self.db._execute(_get)
 
-    def set_profile_hash(self, user_id: str, profile_hash: str) -> None:
+    async def set_profile_hash(self, user_id: str, profile_hash: str) -> None:
         now = _now()
 
-        def _set(conn):
-            conn.execute(
-                """
+        async def _set(conn):
+            (
+                await conn.execute(
+                    """
                 INSERT INTO memory_profile_revisions (
                     user_id, profile_revision, profile_prefix_hash, updated_at
-                ) VALUES (?, 0, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    profile_prefix_hash = excluded.profile_prefix_hash,
-                    updated_at = excluded.updated_at
+                ) VALUES (%s, 0, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    profile_prefix_hash = VALUES(profile_prefix_hash),
+                    updated_at = VALUES(updated_at)
                 """,
-                (user_id, profile_hash, now),
+                    (user_id, profile_hash, now),
+                )
             )
 
-        self.db._execute(_set)
+        (await self.db._execute(_set))
 
-    def save_episodic_summary(
+    async def save_episodic_summary(
         self,
         session_id: str,
         user_id: str,
@@ -417,64 +440,70 @@ class StructuredMemoryStore:
         now = datetime.now(timezone.utc)
         expires_at = (now + timedelta(days=retention_days)).isoformat()
 
-        def _save(conn):
-            self._ensure_owner(conn, user_id, now.isoformat())
-            existing = conn.execute(
-                "SELECT summary_id FROM episodic_summaries WHERE session_id = ?",
-                (session_id,),
+        async def _save(conn):
+            (await self._ensure_owner(conn, user_id, now.isoformat()))
+            existing = (
+                await conn.execute(
+                    "SELECT summary_id FROM episodic_summaries WHERE session_id = %s",
+                    (session_id,),
+                )
             ).fetchone()
             resolved_id = existing["summary_id"] if existing else summary_id
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 INSERT INTO episodic_summaries (
                     summary_id, session_id, user_id, summary,
                     resolved_entities, status, created_at, updated_at,
                     expires_at
-                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
-                ON CONFLICT(session_id) DO UPDATE SET
-                    summary = excluded.summary,
-                    resolved_entities = excluded.resolved_entities,
-                    status = 'active', updated_at = excluded.updated_at,
-                    expires_at = excluded.expires_at
+                ) VALUES (%s, %s, %s, %s, %s, 'active', %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    summary = VALUES(summary),
+                    resolved_entities = VALUES(resolved_entities),
+                    status = 'active', updated_at = VALUES(updated_at),
+                    expires_at = VALUES(expires_at)
                 """,
-                (
-                    resolved_id,
-                    session_id,
-                    user_id,
-                    summary,
-                    _canonical_json(resolved_entities or {}),
-                    now.isoformat(),
-                    now.isoformat(),
-                    expires_at,
-                ),
+                    (
+                        resolved_id,
+                        session_id,
+                        user_id,
+                        summary,
+                        _canonical_json(resolved_entities or {}),
+                        now.isoformat(),
+                        now.isoformat(),
+                        expires_at,
+                    ),
+                )
             )
             return resolved_id
 
-        return self.db._execute(_save)
+        return await self.db._execute(_save)
 
-    def recall_episodes(
+    async def recall_episodes(
         self, user_id: str, current_session_id: str
     ) -> list[dict[str, Any]]:
-        def _select(conn):
-            rows = conn.execute(
-                """
+        async def _select(conn):
+            rows = (
+                await conn.execute(
+                    """
                 SELECT * FROM episodic_summaries
-                WHERE user_id = ? AND session_id != ? AND status = 'active'
+                WHERE user_id = %s AND session_id != %s AND status = 'active'
                 ORDER BY updated_at DESC, summary_id
                 """,
-                (user_id, current_session_id),
+                    (user_id, current_session_id),
+                )
             ).fetchall()
             return [dict(row) for row in rows]
 
         result = []
-        for row in self.db._execute(_select):
+        for row in await self.db._execute(_select):
             if not _is_current(row["expires_at"]):
                 continue
             row["resolved_entities"] = json.loads(row["resolved_entities"])
             result.append(row)
         return result
 
-    def record_usage(
+    async def record_usage(
         self,
         memory_ids: Iterable[str],
         *,
@@ -485,13 +514,13 @@ class StructuredMemoryStore:
     ) -> None:
         now = _now()
 
-        def _record(conn):
-            conn.executemany(
+        async def _record(conn):
+            await conn.executemany(
                 """
                 INSERT INTO memory_usage (
                     usage_id, memory_id, session_id, trace_id,
                     agent_id, user_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 [
                     (
@@ -507,54 +536,64 @@ class StructuredMemoryStore:
                 ],
             )
 
-        self.db._execute(_record)
+        (await self.db._execute(_record))
 
-    def _set_status(
+    async def _set_status(
         self, memory_id: str, user_id: str, status: str, action: str
     ) -> None:
         now = _now()
 
-        def _update(conn):
-            conn.execute(
-                """
-                UPDATE user_memory_items SET status = ?, updated_at = ?
-                WHERE memory_id = ? AND user_id = ?
+        async def _update(conn):
+            (
+                await conn.execute(
+                    """
+                UPDATE user_memory_items SET status = %s, updated_at = %s
+                WHERE memory_id = %s AND user_id = %s
                 """,
-                (status, now, memory_id, user_id),
+                    (status, now, memory_id, user_id),
+                )
             )
-            self._audit(conn, memory_id, user_id, action, user_id, {}, now)
+            (await self._audit(conn, memory_id, user_id, action, user_id, {}, now))
 
-        self.db._execute(_update)
+        (await self.db._execute(_update))
 
     @staticmethod
-    def _ensure_owner(conn, user_id: str, now: str) -> None:
-        conn.execute(
-            """
+    async def _ensure_owner(conn, user_id: str, now: str) -> None:
+        (
+            await conn.execute(
+                """
             INSERT INTO users (
                 user_id, username, username_normalized, role,
                 is_active, created_at
-            ) VALUES (?, ?, ?, 'user', 1, ?)
-            ON CONFLICT(user_id) DO NOTHING
+            ) VALUES (%s, %s, %s, 'user', 1, %s)
+            ON DUPLICATE KEY UPDATE user_id = user_id
             """,
-            (user_id, user_id, user_id.casefold(), now),
+                (user_id, user_id, user_id.casefold(), now),
+            )
+        )
+
+        await conn.execute(
+            "SELECT user_id FROM users WHERE user_id=%s FOR UPDATE", (user_id,)
         )
 
     @staticmethod
-    def _increment_revision(conn, user_id: str, now: str) -> None:
-        conn.execute(
-            """
+    async def _increment_revision(conn, user_id: str, now: str) -> None:
+        (
+            await conn.execute(
+                """
             INSERT INTO memory_profile_revisions (
                 user_id, profile_revision, profile_prefix_hash, updated_at
-            ) VALUES (?, 1, '', ?)
-            ON CONFLICT(user_id) DO UPDATE SET
+            ) VALUES (%s, 1, '', %s)
+            ON DUPLICATE KEY UPDATE
                 profile_revision = profile_revision + 1,
-                profile_prefix_hash = '', updated_at = excluded.updated_at
+                profile_prefix_hash = '', updated_at = VALUES(updated_at)
             """,
-            (user_id, now),
+                (user_id, now),
+            )
         )
 
     @staticmethod
-    def _audit(
+    async def _audit(
         conn,
         memory_id: Optional[str],
         user_id: str,
@@ -563,22 +602,24 @@ class StructuredMemoryStore:
         detail: dict[str, Any],
         now: str,
     ) -> None:
-        conn.execute(
-            """
+        (
+            await conn.execute(
+                """
             INSERT INTO memory_audit (
                 audit_id, memory_id, user_id, action,
                 actor_id, detail_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (
-                "audit_" + uuid.uuid4().hex,
-                memory_id,
-                user_id,
-                action,
-                actor_id,
-                _canonical_json(detail),
-                now,
-            ),
+                (
+                    "audit_" + uuid.uuid4().hex,
+                    memory_id,
+                    user_id,
+                    action,
+                    actor_id,
+                    _canonical_json(detail),
+                    now,
+                ),
+            )
         )
 
     @staticmethod

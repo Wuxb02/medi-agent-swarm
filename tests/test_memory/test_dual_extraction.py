@@ -10,20 +10,36 @@ from mediZJ.memory.dual_extraction import DualMemoryExtractor
 @pytest.mark.asyncio
 async def test_both_lanes_run_independently():
     profile = MagicMock()
+    for method in (
+        "load",
+        "load_pending",
+        "load_records",
+        "add_pending",
+        "add_pending_records",
+    ):
+        setattr(profile, method, AsyncMock())
     profile.load.return_value = {}
     profile.load_pending.return_value = []
     profile.load_records.return_value = []
     llm = MagicMock()
-    llm.chat = AsyncMock(side_effect=[
-        '{"stable_info":[{"key":"慢性病史","value":"高血压",'
-        '"confidence":"high","source_text":"我有高血压"}],'
-        '"medical_records":[]}',
-        '{"claims":[]}',
-    ])
+    llm.chat = AsyncMock(
+        side_effect=[
+            '{"stable_info":[{"key":"慢性病史","value":"高血压",'
+            '"confidence":"high","source_text":"我有高血压"}],'
+            '"medical_records":[]}',
+            '{"claims":[]}',
+        ]
+    )
     jev = MagicMock()
     jev.choice = AsyncMock(return_value=("yes", 0.99))
     candidates = MagicMock()
-    candidates.catalog._connection.return_value.__enter__.return_value = MagicMock()
+    candidates.evidence_hits = AsyncMock()
+    candidates.add_candidate = AsyncMock()
+    connection = MagicMock()
+    connection.execute = AsyncMock(return_value=MagicMock())
+    connection.execute.return_value.fetchone.return_value = None
+    candidates.catalog._connection.return_value.__aenter__.return_value = connection
+
     extractor = DualMemoryExtractor(llm, profile, jev, candidates)
 
     await extractor.process("turn-1", "user-1", "我有高血压", "请就医")
@@ -36,6 +52,14 @@ async def test_both_lanes_run_independently():
 @pytest.mark.asyncio
 async def test_one_gate_failure_does_not_stop_other_lane():
     profile = MagicMock()
+    for method in (
+        "load",
+        "load_pending",
+        "load_records",
+        "add_pending",
+        "add_pending_records",
+    ):
+        setattr(profile, method, AsyncMock())
     llm = MagicMock()
     llm.chat = AsyncMock(return_value='{"claims":[]}')
     jev = MagicMock()
@@ -47,11 +71,18 @@ async def test_one_gate_failure_does_not_stop_other_lane():
 
     jev.choice = AsyncMock(side_effect=gate)
     candidates = MagicMock()
-    connection = candidates.catalog._connection.return_value.__enter__.return_value
+    candidates.evidence_hits = AsyncMock()
+    candidates.add_candidate = AsyncMock()
+    connection = MagicMock()
+    connection.execute = AsyncMock(return_value=MagicMock())
+    connection.execute.return_value.fetchone.return_value = None
+    candidates.catalog._connection.return_value.__aenter__.return_value = connection
+    connection = candidates.catalog._connection.return_value.__aenter__.return_value
     connection.execute.return_value.fetchone.return_value = None
     extractor = DualMemoryExtractor(llm, profile, jev, candidates)
 
-    await extractor.process("turn-2", "user-1", "高血压是什么", "高血压需随访")
+    with pytest.raises(RuntimeError, match="记忆提取未完成"):
+        await extractor.process("turn-2", "user-1", "高血压是什么", "高血压需随访")
 
     llm.chat.assert_awaited_once()
     profile.add_pending.assert_not_called()
@@ -60,12 +91,26 @@ async def test_one_gate_failure_does_not_stop_other_lane():
 @pytest.mark.asyncio
 async def test_general_question_does_not_create_personal_fact():
     profile = MagicMock()
+    for method in (
+        "load",
+        "load_pending",
+        "load_records",
+        "add_pending",
+        "add_pending_records",
+    ):
+        setattr(profile, method, AsyncMock())
     llm = MagicMock()
     llm.chat = AsyncMock()
     jev = MagicMock()
     jev.choice = AsyncMock(return_value=("no", 0.99))
     candidates = MagicMock()
-    connection = candidates.catalog._connection.return_value.__enter__.return_value
+    candidates.evidence_hits = AsyncMock()
+    candidates.add_candidate = AsyncMock()
+    connection = MagicMock()
+    connection.execute = AsyncMock(return_value=MagicMock())
+    connection.execute.return_value.fetchone.return_value = None
+    candidates.catalog._connection.return_value.__aenter__.return_value = connection
+    connection = candidates.catalog._connection.return_value.__aenter__.return_value
     connection.execute.return_value.fetchone.return_value = None
     extractor = DualMemoryExtractor(llm, profile, jev, candidates)
 
@@ -78,16 +123,26 @@ async def test_general_question_does_not_create_personal_fact():
 @pytest.mark.asyncio
 async def test_personal_rejects_unquoted_and_existing_facts():
     profile = MagicMock()
+    for method in (
+        "load",
+        "load_pending",
+        "load_records",
+        "add_pending",
+        "add_pending_records",
+    ):
+        setattr(profile, method, AsyncMock())
     profile.load.return_value = {"年龄": "30岁"}
     profile.load_pending.return_value = []
     profile.load_records.return_value = []
     llm = MagicMock()
-    llm.chat = AsyncMock(return_value=(
-        '{"stable_info":['
-        '{"key":"年龄","value":"30岁","source_text":"我30岁"},'
-        '{"key":"过敏史","value":"青霉素","source_text":"不存在的原文"}'
-        '],"medical_records":[]}'
-    ))
+    llm.chat = AsyncMock(
+        return_value=(
+            '{"stable_info":['
+            '{"key":"年龄","value":"30岁","source_text":"我30岁"},'
+            '{"key":"过敏史","value":"青霉素","source_text":"不存在的原文"}'
+            '],"medical_records":[]}'
+        )
+    )
     jev = MagicMock()
     jev.choice = AsyncMock(return_value=("yes", 0.9))
     extractor = DualMemoryExtractor(llm, profile, jev, MagicMock())
@@ -100,25 +155,34 @@ async def test_personal_rejects_unquoted_and_existing_facts():
 @pytest.mark.asyncio
 async def test_knowledge_saves_only_quoted_claim_with_supported_evidence():
     llm = MagicMock()
-    llm.chat = AsyncMock(side_effect=[
-        '{"claims":[{"claim":"高血压需要随访",'
-        '"source_text":"高血压需要随访"},'
-        '{"claim":"虚构事实","source_text":"不存在的原文"}]}',
-        '{"verdict":"support","quote":"高血压应定期随访"}',
-    ])
+    llm.chat = AsyncMock(
+        side_effect=[
+            '{"claims":[{"claim":"高血压需要随访",'
+            '"source_text":"高血压需要随访"},'
+            '{"claim":"虚构事实","source_text":"不存在的原文"}]}',
+            '{"verdict":"support","quote":"高血压应定期随访"}',
+        ]
+    )
     jev = MagicMock()
     jev.choice = AsyncMock(return_value=("yes", 0.9))
     candidates = MagicMock()
-    candidates.evidence_hits.return_value = [{
-        "document_id": "doc", "version_id": "v1",
-        "source_url": "https://example.org",
-        "excerpt": "高血压应定期随访。",
-    }]
+    candidates.evidence_hits = AsyncMock()
+    candidates.add_candidate = AsyncMock()
+    connection = MagicMock()
+    connection.execute = AsyncMock(return_value=MagicMock())
+    connection.execute.return_value.fetchone.return_value = None
+    candidates.catalog._connection.return_value.__aenter__.return_value = connection
+    candidates.evidence_hits.return_value = [
+        {
+            "document_id": "doc",
+            "version_id": "v1",
+            "source_url": "https://example.org",
+            "excerpt": "高血压应定期随访。",
+        }
+    ]
     extractor = DualMemoryExtractor(llm, MagicMock(), jev, candidates)
 
-    await extractor._knowledge(
-        "turn-1", "user-1", "高血压是什么", "高血压需要随访"
-    )
+    await extractor._knowledge("turn-1", "user-1", "高血压是什么", "高血压需要随访")
 
     evidence = candidates.add_candidate.call_args.args[4]
     assert evidence[0]["verdict"] == "support"
@@ -129,9 +193,9 @@ async def test_knowledge_saves_only_quoted_claim_with_supported_evidence():
 @pytest.mark.asyncio
 async def test_evidence_rejects_nonmatching_quote():
     llm = MagicMock()
-    llm.chat = AsyncMock(return_value=(
-        '{"verdict":"support","quote":"不存在于片段的文本"}'
-    ))
+    llm.chat = AsyncMock(
+        return_value=('{"verdict":"support","quote":"不存在于片段的文本"}')
+    )
     extractor = DualMemoryExtractor(llm, MagicMock(), MagicMock(), MagicMock())
     hits = [{"excerpt": "另一段资料", "version_id": "v1"}]
 

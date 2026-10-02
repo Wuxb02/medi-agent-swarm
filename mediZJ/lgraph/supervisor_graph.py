@@ -9,6 +9,7 @@ SupervisorGraph — 替代 SwarmCoordinator.process() 的 LangGraph 主图
 
 采用 Map-Reduce 模式：Send API 并行扇出 Worker，synthesize_results 汇总。
 """
+
 import asyncio
 import os
 import time
@@ -20,7 +21,6 @@ from loguru import logger
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send, interrupt
-from langgraph.checkpoint.memory import MemorySaver
 
 from mediZJ.lgraph.supervisor_state import SupervisorState
 from mediZJ.lgraph.agent_subgraph import build_agent_subgraph
@@ -85,10 +85,12 @@ def _lead_system_prompt(coordinator, method: str, template: str) -> str:
     prompt_method = getattr(lead_agent, method, None)
     return prompt_method() if callable(prompt_method) else PromptLoader.load(template)
 
+
 # Trace
 try:
     from mediZJ.trace.context import traced_span
     from mediZJ.trace.models import SpanType
+
     TRACE_AVAILABLE = True
 except ImportError:
     TRACE_AVAILABLE = False
@@ -117,11 +119,13 @@ async def retrieve_memories_with_intent_gate(
         verified_experiences=verified_experiences,
     )
     result = context.for_lead_agent()
-    result.update({
-        "memory_context": context,
-        "similar_memories": context.episodic_memories,
-        "skip_long_term_retrieval": intent == "others",
-    })
+    result.update(
+        {
+            "memory_context": context.to_dict(),
+            "similar_memories": context.episodic_memories,
+            "skip_long_term_retrieval": intent == "others",
+        }
+    )
     return result
 
 
@@ -147,11 +151,12 @@ def route_by_intent(state: Dict[str, Any]) -> str:
     return "clarify_decide"
 
 
-def build_supervisor_graph(
-    coordinator,                    # SwarmCoordinator 实例（持有所有 Agent、记忆管理器等）
-    tool_registry: ToolRegistry,    # 共享的 ToolRegistry
+async def build_supervisor_graph(
+    coordinator,  # SwarmCoordinator 实例（持有所有 Agent、记忆管理器等）
+    tool_registry: ToolRegistry,  # 共享的 ToolRegistry
     event_callback: Optional[Callable] = None,
     hitl_enabled: bool = False,
+    checkpointer=None,
 ) -> StateGraph:
     """
     构建主 SupervisorGraph
@@ -196,19 +201,23 @@ def build_supervisor_graph(
         result = await classify_intent(coordinator, state["question"])
 
         if event_callback:
-            event_callback(Event(
-                type=EventType.INTENT_CLASSIFIED,
-                source_agent="intent_classifier",
-                data={
-                    "intent": result["intent"],
-                    "confidence": result["intent_confidence"],
-                    "source": result["intent_source"],
-                    "reason": result.get("intent_reason", ""),
-                    "skip_long_term_retrieval": result["skip_long_term_retrieval"],
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.INTENT_CLASSIFIED,
+                    source_agent="intent_classifier",
+                    data={
+                        "intent": result["intent"],
+                        "confidence": result["intent_confidence"],
+                        "source": result["intent_source"],
+                        "reason": result.get("intent_reason", ""),
+                        "skip_long_term_retrieval": result["skip_long_term_retrieval"],
+                    },
+                )
+            )
 
-        logger.info(f"[SupervisorGraph] 意图识别: {result['intent']} ({result['intent_source']})")
+        logger.info(
+            f"[SupervisorGraph] 意图识别: {result['intent']} ({result['intent_source']})"
+        )
         return result
 
     async def _retrieve_memories(state: SupervisorState) -> dict:
@@ -227,7 +236,7 @@ def build_supervisor_graph(
         context_builder = getattr(coordinator, "memory_context_builder", None)
         context_store = getattr(context_builder, "store", None)
         if memory_context is not None and context_store is not None:
-            await memory_context.record_usage(
+            await MedicalMemoryContext.from_dict(memory_context).record_usage(
                 context_store,
                 state.get("trace_id", ""),
             )
@@ -252,10 +261,6 @@ def build_supervisor_graph(
 
         非流式模式（hitl_enabled=False）无 checkpointer，直接跳过澄清。
         """
-        if not coordinator.questionnaire_manager:
-            logger.debug("QuestionnaireManager 未配置，跳过澄清阶段")
-            return {"clarify_complete": True, "collected_info": ""}
-
         if not hitl_enabled:
             logger.debug("非流式模式（无 HITL），跳过澄清阶段")
             return {"clarify_complete": True, "collected_info": ""}
@@ -265,42 +270,48 @@ def build_supervisor_graph(
 
         def _emit_clarify_thinking(content: str, status: str = "running") -> None:
             if event_callback:
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING,
-                    source_agent=lead_agent.agent_id,
-                    data={
-                        "content": content,
-                        "iteration": iteration,
-                        "phase": "clarify",
-                        "title": f"信息澄清（第 {iteration} 轮）",
-                        "status": status,
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING,
+                        source_agent=lead_agent.agent_id,
+                        data={
+                            "content": content,
+                            "iteration": iteration,
+                            "phase": "clarify",
+                            "title": f"信息澄清（第 {iteration} 轮）",
+                            "status": status,
+                        },
+                    )
+                )
 
         def _emit_clarify_done(status: str = "completed") -> None:
             if event_callback:
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING_DONE,
-                    source_agent=lead_agent.agent_id,
-                    data={
-                        "iteration": iteration,
-                        "phase": "clarify",
-                        "status": status,
-                        "elapsed_seconds": round(time.monotonic() - think_start, 1),
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING_DONE,
+                        source_agent=lead_agent.agent_id,
+                        data={
+                            "iteration": iteration,
+                            "phase": "clarify",
+                            "status": status,
+                            "elapsed_seconds": round(time.monotonic() - think_start, 1),
+                        },
+                    )
+                )
 
         # 硬上限：先查再调 LLM，保证第 MAX_ROUNDS+1 次 LLM 不会被调用
         if current_round >= _CLARIFY_MAX_ROUNDS:
-            logger.info(f"[SupervisorGraph] clarify 达到最大轮数 {_CLARIFY_MAX_ROUNDS}，结束澄清")
+            logger.info(
+                f"[SupervisorGraph] clarify 达到最大轮数 {_CLARIFY_MAX_ROUNDS}，结束澄清"
+            )
             think_start = time.monotonic()
-            _emit_clarify_thinking("已达到信息澄清轮数上限，将使用已收集信息继续分析。", "skipped")
+            _emit_clarify_thinking(
+                "已达到信息澄清轮数上限，将使用已收集信息继续分析。", "skipped"
+            )
             _emit_clarify_done("skipped")
             return {
                 "clarify_complete": True,
-                "collected_info": _merge_clarify_info(
-                    state.get("clarify_rounds", [])
-                ),
+                "collected_info": _merge_clarify_info(state.get("clarify_rounds", [])),
             }
 
         # 构建上下文（含已收集答案，供 LLM 判断是否还需追问）
@@ -352,8 +363,10 @@ def build_supervisor_graph(
                     temperature=0.3,
                 )
         except Exception as e:
-            logger.error(f"LeadAgent clarify LLM error: {e}")
-            _emit_clarify_thinking("信息澄清判断失败，结束澄清并继续后续分析。", "failed")
+            logger.error(f"LeadAgent clarify LLM error: {type(e).__name__}")
+            _emit_clarify_thinking(
+                "信息澄清判断失败，结束澄清并继续后续分析。", "failed"
+            )
             _emit_clarify_done("failed")
             return {"clarify_complete": True, "collected_info": ""}
 
@@ -363,9 +376,7 @@ def build_supervisor_graph(
             _emit_clarify_done()
             return {
                 "clarify_complete": True,
-                "collected_info": _merge_clarify_info(
-                    state.get("clarify_rounds", [])
-                ),
+                "collected_info": _merge_clarify_info(state.get("clarify_rounds", [])),
             }
 
         tool_call = response.tool_calls[0]
@@ -375,26 +386,24 @@ def build_supervisor_graph(
             _emit_clarify_done("failed")
             return {
                 "clarify_complete": True,
-                "collected_info": _merge_clarify_info(
-                    state.get("clarify_rounds", [])
-                ),
+                "collected_info": _merge_clarify_info(state.get("clarify_rounds", [])),
             }
 
         questionnaire_xml = tool_call.arguments.get("questionnaire", "")
         try:
             questions = parse_questionnaire(questionnaire_xml)
         except Exception as e:
-            logger.error(f"LeadAgent clarify: 问卷解析失败: {e}")
+            logger.error(f"LeadAgent clarify: 问卷解析失败: {type(e).__name__}")
             _emit_clarify_thinking("问卷内容解析失败，已结束澄清。", "failed")
             _emit_clarify_done("failed")
             return {
                 "clarify_complete": True,
-                "collected_info": _merge_clarify_info(
-                    state.get("clarify_rounds", [])
-                ),
+                "collected_info": _merge_clarify_info(state.get("clarify_rounds", [])),
             }
 
-        questionnaire_id = str(uuid.uuid4())
+        questionnaire_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"{state.get('trace_id')}:{current_round}")
+        )
         questionnaire_data = _build_questionnaire_data(questions)
 
         logger.info(
@@ -404,32 +413,40 @@ def build_supervisor_graph(
 
         # 发射 AGENT_QUESTIONNAIRE 事件（结构与前端依赖一致）
         if event_callback:
-            event_callback(Event(
-                type=EventType.AGENT_TOOL_STEP,
-                source_agent=lead_agent.agent_id,
-                data={
-                    "tool_name": "question_for_user",
-                    "arguments": {
-                        "round": iteration,
-                        "question_count": len(questions),
-                        "question_titles": [question.header for question in questions],
+            event_callback(
+                Event(
+                    type=EventType.AGENT_TOOL_STEP,
+                    source_agent=lead_agent.agent_id,
+                    data={
+                        "tool_name": "question_for_user",
+                        "arguments": {
+                            "round": iteration,
+                            "question_count": len(questions),
+                            "question_titles": [
+                                question.header for question in questions
+                            ],
+                        },
+                        "result": "等待用户回答",
+                        "success": True,
+                        "iteration": iteration,
+                        "phase": "clarify",
+                        "status": "waiting",
                     },
-                    "result": "等待用户回答",
-                    "success": True,
-                    "iteration": iteration,
-                    "phase": "clarify",
-                    "status": "waiting",
-                },
-            ))
-            event_callback(Event(
-                type=EventType.AGENT_QUESTIONNAIRE,
-                source_agent=lead_agent.agent_id,
-                data={
-                    "questionnaire_id": questionnaire_id,
-                    "questionnaire_data": questionnaire_data,
-                },
-            ))
-        _emit_clarify_thinking(f"需要补充 {len(questions)} 项信息，已发起问卷。", "waiting")
+                )
+            )
+            event_callback(
+                Event(
+                    type=EventType.AGENT_QUESTIONNAIRE,
+                    source_agent=lead_agent.agent_id,
+                    data={
+                        "questionnaire_id": questionnaire_id,
+                        "questionnaire_data": questionnaire_data,
+                    },
+                )
+            )
+        _emit_clarify_thinking(
+            f"需要补充 {len(questions)} 项信息，已发起问卷。", "waiting"
+        )
         _emit_clarify_done("waiting")
 
         # 存 payload 到 state，由 clarify_ask 节点 interrupt 挂起
@@ -462,24 +479,27 @@ def build_supervisor_graph(
 
         # 日志用问题文本格式化（避免展示 q0/q1 内部 key）
         from mediZJ.core.tools.questionnaire import format_answers_for_llm
+
         questions_ref = pending.get("_questions_ref", [])
         readable = format_answers_for_llm(questions_ref, answers) or "（空回答）"
-        logger.info(f"[SupervisorGraph] 收到第 {round_no} 轮问卷回答: {readable}")
+        logger.info(f"[SupervisorGraph] 收到第 {round_no} 轮问卷回答")
 
         if event_callback:
-            event_callback(Event(
-                type=EventType.AGENT_TOOL_STEP,
-                source_agent=lead_agent.agent_id,
-                data={
-                    "tool_name": "question_for_user",
-                    "arguments": {"round": round_no},
-                    "result": readable,
-                    "success": True,
-                    "iteration": round_no,
-                    "phase": "clarify",
-                    "status": "completed",
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.AGENT_TOOL_STEP,
+                    source_agent=lead_agent.agent_id,
+                    data={
+                        "tool_name": "question_for_user",
+                        "arguments": {"round": round_no},
+                        "result": readable,
+                        "success": True,
+                        "iteration": round_no,
+                        "phase": "clarify",
+                        "status": "completed",
+                    },
+                )
+            )
 
         # 累积答案：本轮 answers 合并进 clarify_answers；记录到 clarify_rounds
         merged = dict(state.get("clarify_answers", {}))
@@ -489,11 +509,14 @@ def build_supervisor_graph(
         return {
             "clarify_round": round_no,
             "clarify_answers": merged,
-            "clarify_rounds": prev_rounds + [{
-                "round": round_no,
-                "payload": pending,
-                "answers": answers,
-            }],
+            "clarify_rounds": prev_rounds
+            + [
+                {
+                    "round": round_no,
+                    "payload": pending,
+                    "answers": answers,
+                }
+            ],
             "clarify_pending": None,
         }
 
@@ -501,26 +524,35 @@ def build_supervisor_graph(
         """节点: 任务分解（替代 coordinator._do_assess_decompose）"""
         # 注入 LeadAgent thinking 回调
         if event_callback:
+
             def _on_think(content, iteration):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING,
-                    source_agent="lead_agent",
-                    data={
-                        "content": content,
-                        "iteration": iteration,
-                        "phase": "decompose",
-                        "title": "任务分解",
-                        "status": "running",
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING,
+                        source_agent="lead_agent",
+                        data={
+                            "content": content,
+                            "iteration": iteration,
+                            "phase": "decompose",
+                            "title": "任务分解",
+                            "status": "running",
+                        },
+                    )
+                )
 
             def _on_think_done(iteration, elapsed_seconds):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING_DONE,
-                    source_agent="lead_agent",
-                    data={"iteration": iteration, "elapsed_seconds": elapsed_seconds,
-                          "phase": "decompose", "status": "completed"},
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING_DONE,
+                        source_agent="lead_agent",
+                        data={
+                            "iteration": iteration,
+                            "elapsed_seconds": elapsed_seconds,
+                            "phase": "decompose",
+                            "status": "completed",
+                        },
+                    )
+                )
 
             lead_agent.set_on_thinking(_on_think)
             lead_agent.set_on_thinking_done(_on_think_done)
@@ -533,10 +565,18 @@ def build_supervisor_graph(
             "verified_experiences": state.get("context", {}).get(
                 "verified_experiences", ""
             ),
-            "memory_context": state.get("memory_context"),
+            "memory_context": (
+                MedicalMemoryContext.from_dict(state["memory_context"])
+                if state.get("memory_context")
+                else None
+            ),
         }
 
-        _ctx = traced_span(SpanType.STAGE, name="assess_decompose") if TRACE_AVAILABLE else None
+        _ctx = (
+            traced_span(SpanType.STAGE, name="assess_decompose")
+            if TRACE_AVAILABLE
+            else None
+        )
         if _ctx:
             _ctx.__enter__()
 
@@ -566,8 +606,12 @@ def build_supervisor_graph(
         subtasks = state.get("subtasks", [])
         if not subtasks:
             # Fallback
-            task = {"type": "general", "description": state["question"],
-                    "assigned_agent": "consultation_agent", "id": "fallback"}
+            task = {
+                "type": "general",
+                "description": state["question"],
+                "assigned_agent": "consultation_agent",
+                "id": "fallback",
+            }
         else:
             task = subtasks[0]
 
@@ -608,10 +652,10 @@ def build_supervisor_graph(
                 ),
             )
             # 构建并执行 AgentSubGraph
-            subgraph = build_agent_subgraph(
+            subgraph = await build_agent_subgraph(
                 worker=worker,
                 tool_registry=tool_registry,
-                max_iterations=worker.config.get('max_iterations', 10),
+                max_iterations=worker.config.get("max_iterations", 10),
                 max_tool_calls=2,
                 on_thinking=worker.on_thinking,
                 on_tool_step=worker.on_tool_step,
@@ -619,18 +663,20 @@ def build_supervisor_graph(
                 on_content_token=worker.on_content_token,
             )
 
-            result = await subgraph.ainvoke({
-                "agent_id": agent_id,
-                "sub_session_id": sub_session_id,
-                "session_id": state["session_id"],
-                "subtask_id": task.get("id", ""),
-                "subtask_type": task.get("type", ""),
-                "subtask_description": task.get("description", ""),
-                "question": state["question"],  # 含图片分析文本的完整问题
-                "memory_context": worker_memory_context,
-                "max_iterations": worker.config.get('max_iterations', 10),
-                "max_tool_calls": 2,
-            })
+            result = await subgraph.ainvoke(
+                {
+                    "agent_id": agent_id,
+                    "sub_session_id": sub_session_id,
+                    "session_id": state["session_id"],
+                    "subtask_id": task.get("id", ""),
+                    "subtask_type": task.get("type", ""),
+                    "subtask_description": task.get("description", ""),
+                    "question": state["question"],  # 含图片分析文本的完整问题
+                    "memory_context": worker_memory_context.to_dict(),
+                    "max_iterations": worker.config.get("max_iterations", 10),
+                    "max_tool_calls": 2,
+                }
+            )
         finally:
             if _ctx:
                 _ctx.__exit__(None, None, None)
@@ -643,15 +689,18 @@ def build_supervisor_graph(
         citations = result.get("references", [])
 
         # 保存 SessionSummary
-        coordinator._save_session_summary(
-            session_id=state["session_id"],
-            question=state["question"],
-            agent_id=agent_id,
-            final_answer=final_answer,
-            start_time=datetime.fromisoformat(state["start_time"])
-                if state.get("start_time") else datetime.now(),
-            usage=token_usage,
-            message_count=msg_count,
+        (
+            await coordinator._save_session_summary(
+                session_id=state["session_id"],
+                question=state["question"],
+                agent_id=agent_id,
+                final_answer=final_answer,
+                start_time=datetime.fromisoformat(state["start_time"])
+                if state.get("start_time")
+                else datetime.now(),
+                usage=token_usage,
+                message_count=msg_count,
+            )
         )
 
         # 程序化追加参考资料章节
@@ -663,10 +712,11 @@ def build_supervisor_graph(
 
         # 子会话合并到主会话
         await coordinator.short_term_memory.add_message(
-            session_id=state["session_id"], role="user",
+            session_id=state["session_id"],
+            role="user",
             content=state["question"],
         )
-        coordinator.short_term_memory.merge_sub_session(
+        await coordinator.short_term_memory.merge_sub_session(
             main_session_id=state["session_id"],
             sub_session_id=sub_session_id,
             summary_text=final_answer,
@@ -680,7 +730,8 @@ def build_supervisor_graph(
             "swarm_enabled": False,
             "mode": "single_agent" if len(subtasks) == 1 else "fallback",
             "route_reason": (
-                f"单任务路由到 {agent_id}" if len(subtasks) == 1
+                f"单任务路由到 {agent_id}"
+                if len(subtasks) == 1
                 else "无可用子任务，降级到 ConsultationAgent"
             ),
             "suggestions": coordinator.extract_suggestions(final_answer),
@@ -698,7 +749,9 @@ def build_supervisor_graph(
         )
         enhanced_context = memory_context.for_lead_agent()
 
-        _ctx = traced_span(SpanType.STAGE, name="chat_reply") if TRACE_AVAILABLE else None
+        _ctx = (
+            traced_span(SpanType.STAGE, name="chat_reply") if TRACE_AVAILABLE else None
+        )
         if _ctx:
             _ctx.__enter__()
 
@@ -716,15 +769,17 @@ def build_supervisor_graph(
 
         # 记录到短期记忆（chat 模式也需要，否则后续"我刚才问了什么"无法召回）
         await coordinator.short_term_memory.add_message(
-            session_id=state["session_id"], role="user",
+            session_id=state["session_id"],
+            role="user",
             content=state["question"],
         )
         await coordinator.short_term_memory.add_message(
-            session_id=state["session_id"], role="assistant",
+            session_id=state["session_id"],
+            role="assistant",
             content=answer,
         )
 
-        logger.info(f"[SupervisorGraph] 闲聊回复完成: {answer[:100]}")
+        logger.info("[SupervisorGraph] 闲聊回复完成")
 
         return {
             "final_answer": answer,
@@ -750,8 +805,7 @@ def build_supervisor_graph(
         return {
             "swarm_contributions": {},
             "swarm_subtasks_status": {
-                st.get("id", str(i)): "pending"
-                for i, st in enumerate(subtasks)
+                st.get("id", str(i)): "pending" for i, st in enumerate(subtasks)
             },
             "swarm_enabled": True,
             "mode": "swarm",
@@ -774,11 +828,16 @@ def build_supervisor_graph(
             _inject_worker_callbacks(worker, agent_id, event_callback)
 
             # 发射 AGENT_START
-            event_callback(Event(
-                type=EventType.SUBTASK_STARTED,
-                source_agent=agent_id,
-                data={"subtask_id": subtask.get("id", ""), "type": subtask.get("type", "")},
-            ))
+            event_callback(
+                Event(
+                    type=EventType.SUBTASK_STARTED,
+                    source_agent=agent_id,
+                    data={
+                        "subtask_id": subtask.get("id", ""),
+                        "type": subtask.get("type", ""),
+                    },
+                )
+            )
 
         # Trace: AGENT span
         _ctx = traced_span(SpanType.AGENT, name=agent_id) if TRACE_AVAILABLE else None
@@ -794,10 +853,10 @@ def build_supervisor_graph(
                 call_type=agent_id,
                 base_system_prompt=worker.get_base_system_prompt_stable(),
             )
-            subgraph = build_agent_subgraph(
+            subgraph = await build_agent_subgraph(
                 worker=worker,
                 tool_registry=tool_registry,
-                max_iterations=worker.config.get('max_iterations', 10),
+                max_iterations=worker.config.get("max_iterations", 10),
                 max_tool_calls=2,
                 on_thinking=worker.on_thinking,
                 on_tool_step=worker.on_tool_step,
@@ -807,18 +866,20 @@ def build_supervisor_graph(
 
             # Swarm 90s 超时
             result = await asyncio.wait_for(
-                subgraph.ainvoke({
-                    "agent_id": agent_id,
-                    "sub_session_id": sub_session_id,
-                    "session_id": state.get("session_id", ""),
-                    "subtask_id": subtask.get("id", ""),
-                    "subtask_type": subtask.get("type", ""),
-                    "subtask_description": subtask.get("description", ""),
-                    "question": state["question"],  # 含图片分析文本的完整问题
-                    "memory_context": worker_memory_context,
-                    "max_iterations": worker.config.get('max_iterations', 10),
-                    "max_tool_calls": 2,
-                }),
+                subgraph.ainvoke(
+                    {
+                        "agent_id": agent_id,
+                        "sub_session_id": sub_session_id,
+                        "session_id": state.get("session_id", ""),
+                        "subtask_id": subtask.get("id", ""),
+                        "subtask_type": subtask.get("type", ""),
+                        "subtask_description": subtask.get("description", ""),
+                        "question": state["question"],  # 含图片分析文本的完整问题
+                        "memory_context": worker_memory_context.to_dict(),
+                        "max_iterations": worker.config.get("max_iterations", 10),
+                        "max_tool_calls": 2,
+                    }
+                ),
                 timeout=90.0,
             )
 
@@ -842,32 +903,34 @@ def build_supervisor_graph(
 
         # 发射 AGENT_COMPLETE
         if event_callback:
-            event_callback(Event(
-                type=EventType.SUBTASK_COMPLETED,
-                source_agent=agent_id,
-                data={
-                    "subtask_id": subtask.get("id", ""),
-                    "answer_preview": result.get("final_answer", "")[:200],
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.SUBTASK_COMPLETED,
+                    source_agent=agent_id,
+                    data={
+                        "subtask_id": subtask.get("id", ""),
+                        "answer_preview": result.get("final_answer", "")[:200],
+                    },
+                )
+            )
 
         return {
             "swarm_contributions": {
-                agent_id: [{
-                    "agent_id": agent_id,
-                    "subtask_id": subtask.get("id", ""),
-                    "result": {
-                        "answer": result.get("final_answer", ""),
-                        "references": result.get("references", []),
-                        "usage": result.get("usage", {}),
-                        "message_count": result.get("message_count", 0),
-                        "iterations": result.get("iterations", 0),
-                    },
-                }]
+                agent_id: [
+                    {
+                        "agent_id": agent_id,
+                        "subtask_id": subtask.get("id", ""),
+                        "result": {
+                            "answer": result.get("final_answer", ""),
+                            "references": result.get("references", []),
+                            "usage": result.get("usage", {}),
+                            "message_count": result.get("message_count", 0),
+                            "iterations": result.get("iterations", 0),
+                        },
+                    }
+                ]
             },
-            "swarm_subtasks_status": {
-                subtask.get("id", ""): "completed"
-            },
+            "swarm_subtasks_status": {subtask.get("id", ""): "completed"},
             "timeout_occurred": timeout_occurred,
         }
 
@@ -878,29 +941,36 @@ def build_supervisor_graph(
 
         # 注入 thinking 回调
         if event_callback:
+
             def _on_think_synth(content, iteration):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING,
-                    source_agent="lead_agent",
-                    data={
-                        "content": content,
-                        "iteration": iteration,
-                        "phase": "synthesize",
-                        "title": "结果汇总",
-                        "status": "running",
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING,
+                        source_agent="lead_agent",
+                        data={
+                            "content": content,
+                            "iteration": iteration,
+                            "phase": "synthesize",
+                            "title": "结果汇总",
+                            "status": "running",
+                        },
+                    )
+                )
+
             def _on_think_done_synth(iteration, elapsed_seconds):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING_DONE,
-                    source_agent="lead_agent",
-                    data={
-                        "iteration": iteration,
-                        "elapsed_seconds": elapsed_seconds,
-                        "phase": "synthesize",
-                        "status": "completed",
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING_DONE,
+                        source_agent="lead_agent",
+                        data={
+                            "iteration": iteration,
+                            "elapsed_seconds": elapsed_seconds,
+                            "phase": "synthesize",
+                            "status": "completed",
+                        },
+                    )
+                )
+
             lead_agent.set_on_thinking(_on_think_synth)
             lead_agent.set_on_thinking_done(_on_think_done_synth)
 
@@ -927,9 +997,7 @@ def build_supervisor_graph(
                 swarm_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
                 swarm_usage["completion_tokens"] += u.get("completion_tokens", 0)
                 swarm_usage["total_tokens"] += u.get("total_tokens", 0)
-                swarm_usage["cached_prompt_tokens"] += u.get(
-                    "cached_prompt_tokens", 0
-                )
+                swarm_usage["cached_prompt_tokens"] += u.get("cached_prompt_tokens", 0)
                 swarm_msg_count += contrib["result"].get("message_count", 0)
                 # 收集 references
                 refs = contrib["result"].get("references", [])
@@ -938,7 +1006,9 @@ def build_supervisor_graph(
                     if doc_id and doc_id not in all_refs:
                         all_refs[doc_id] = ref
                     if doc_id:
-                        agent_refs.append({"old_index": ref.get("index", 0), "doc_id": doc_id})
+                        agent_refs.append(
+                            {"old_index": ref.get("index", 0), "doc_id": doc_id}
+                        )
             if agent_refs:
                 agent_ref_map[agent_id] = agent_refs
         swarm_usage["cache_hit_ratio"] = (
@@ -969,16 +1039,20 @@ def build_supervisor_graph(
 
         # Step 4: 构建临时 SharedContext（先注入 Contribution，再 apply renumber）
         from mediZJ.swarm.shared_context import SharedContext
+
         shared_ctx = SharedContext(session_id=session_id)
         for agent_id, contribs in contributions.items():
             shared_ctx.agent_contributions[agent_id] = []
             from mediZJ.swarm.shared_context import Contribution
+
             for contrib in contribs:
-                shared_ctx.agent_contributions[agent_id].append(Contribution(
-                    agent_id=agent_id,
-                    subtask_id=contrib.get("subtask_id", ""),
-                    result=dict(contrib["result"]),  # 复制避免修改原数据
-                ))
+                shared_ctx.agent_contributions[agent_id].append(
+                    Contribution(
+                        agent_id=agent_id,
+                        subtask_id=contrib.get("subtask_id", ""),
+                        result=dict(contrib["result"]),  # 复制避免修改原数据
+                    )
+                )
 
         # Step 5: 替换各贡献文本中的旧引用编号为新编号（匹配原 swarm 的 _apply_renumber_map）
         _apply_renumber_to_contributions(shared_ctx, renumber_map)
@@ -1019,9 +1093,11 @@ def build_supervisor_graph(
         # 合并子会话到主会话
         for agent_id, contribs in contributions.items():
             for contrib in contribs:
-                sub_session_id = f"{session_id}:{agent_id}:{contrib.get('subtask_id', '')}"
+                sub_session_id = (
+                    f"{session_id}:{agent_id}:{contrib.get('subtask_id', '')}"
+                )
                 answer = contrib["result"].get("answer", "")
-                coordinator.short_term_memory.merge_sub_session(
+                await coordinator.short_term_memory.merge_sub_session(
                     main_session_id=session_id,
                     sub_session_id=sub_session_id,
                     summary_text=f"[{agent_id}] {answer}" if answer else "",
@@ -1056,11 +1132,15 @@ def build_supervisor_graph(
 
         start_time_str = state.get("start_time", "")
         try:
-            start_time = datetime.fromisoformat(start_time_str) if start_time_str else datetime.now()
+            start_time = (
+                datetime.fromisoformat(start_time_str)
+                if start_time_str
+                else datetime.now()
+            )
         except (ValueError, TypeError):
             start_time = datetime.now()
 
-        end_time = datetime.now()
+        end_time = datetime.now(start_time.tzinfo)
         total_time = (end_time - start_time).total_seconds()
 
         return {
@@ -1078,7 +1158,12 @@ def build_supervisor_graph(
             start = datetime.fromisoformat(start_iso)
         except (ValueError, TypeError):
             return 0.0
-        return (datetime.now() - start).total_seconds()
+        from mediZJ.infrastructure.context import execution_budget
+
+        budget = execution_budget.get()
+        if budget is not None:
+            return budget[0] + asyncio.get_running_loop().time() - budget[1]
+        return (datetime.now(start.tzinfo) - start).total_seconds()
 
     async def _plan_stages(state: SupervisorState) -> dict:
         """节点：判断问题是否含"同消息内依赖性子问" → dag 分层 或 atomic。
@@ -1097,30 +1182,35 @@ def build_supervisor_graph(
         set_thinking = getattr(lead_agent, "set_on_thinking", None)
         set_thinking_done = getattr(lead_agent, "set_on_thinking_done", None)
         if event_callback:
+
             def _on_plan(content, iteration):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING,
-                    source_agent="lead_agent",
-                    data={
-                        "content": content,
-                        "iteration": iteration,
-                        "phase": "decompose",
-                        "title": "回答阶段规划",
-                        "status": "running",
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING,
+                        source_agent="lead_agent",
+                        data={
+                            "content": content,
+                            "iteration": iteration,
+                            "phase": "decompose",
+                            "title": "回答阶段规划",
+                            "status": "running",
+                        },
+                    )
+                )
 
             def _on_plan_done(iteration, elapsed_seconds):
-                event_callback(Event(
-                    type=EventType.AGENT_THINKING_DONE,
-                    source_agent="lead_agent",
-                    data={
-                        "iteration": iteration,
-                        "elapsed_seconds": elapsed_seconds,
-                        "phase": "decompose",
-                        "status": "completed",
-                    },
-                ))
+                event_callback(
+                    Event(
+                        type=EventType.AGENT_THINKING_DONE,
+                        source_agent="lead_agent",
+                        data={
+                            "iteration": iteration,
+                            "elapsed_seconds": elapsed_seconds,
+                            "phase": "decompose",
+                            "status": "completed",
+                        },
+                    )
+                )
 
             if callable(set_thinking):
                 set_thinking(_on_plan)
@@ -1135,7 +1225,11 @@ def build_supervisor_graph(
             "verified_experiences": state.get("context", {}).get(
                 "verified_experiences", ""
             ),
-            "memory_context": state.get("memory_context"),
+            "memory_context": (
+                MedicalMemoryContext.from_dict(state["memory_context"])
+                if state.get("memory_context")
+                else None
+            ),
         }
         try:
             raw = await plan_method(
@@ -1144,7 +1238,7 @@ def build_supervisor_graph(
             )
             normalized = normalize_stage_plan(raw, max_stages=STAGE_MAX_STAGES)
         except Exception as e:  # noqa: BLE001 - 规划失败回落原子路径
-            logger.warning(f"[SupervisorGraph] plan_stages 异常，回落 atomic: {e}")
+            logger.warning(f"[SupervisorGraph] plan_stages 异常，回落 atomic: {type(e).__name__}")
             normalized = {"mode": "atomic", "stages": [], "issues": [str(e)]}
         finally:
             if event_callback:
@@ -1212,30 +1306,35 @@ def build_supervisor_graph(
         if event_callback and next_wave:
             wave_titles = [
                 st.get("title", st["stage_id"])
-                for st in plan if st["stage_id"] in next_wave
+                for st in plan
+                if st["stage_id"] in next_wave
             ]
             wave_iter = DAG_WAVE_ITER_BASE + wave_count
-            event_callback(Event(
-                type=EventType.AGENT_THINKING,
-                source_agent="lead_agent",
-                data={
-                    "content": f"第 {wave_count} 层求解启动，阶段：{'、'.join(wave_titles)}",
-                    "iteration": wave_iter,
-                    "phase": "decompose",
-                    "title": "分层求解推进",
-                    "status": "running",
-                },
-            ))
-            event_callback(Event(
-                type=EventType.AGENT_THINKING_DONE,
-                source_agent="lead_agent",
-                data={
-                    "iteration": wave_iter,
-                    "elapsed_seconds": 0.0,
-                    "phase": "decompose",
-                    "status": "completed",
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent="lead_agent",
+                    data={
+                        "content": f"第 {wave_count} 层求解启动，阶段：{'、'.join(wave_titles)}",
+                        "iteration": wave_iter,
+                        "phase": "decompose",
+                        "title": "分层求解推进",
+                        "status": "running",
+                    },
+                )
+            )
+            event_callback(
+                Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent="lead_agent",
+                    data={
+                        "iteration": wave_iter,
+                        "elapsed_seconds": 0.0,
+                        "phase": "decompose",
+                        "status": "completed",
+                    },
+                )
+            )
 
         return {
             "stage_status": status,
@@ -1262,13 +1361,19 @@ def build_supervisor_graph(
                 phase=f"stage_{stage_id}",
                 stream_final_content=False,
             )
-            event_callback(Event(
-                type=EventType.SUBTASK_STARTED,
-                source_agent=agent_id,
-                data={"subtask_id": stage_id, "type": "stage"},
-            ))
+            event_callback(
+                Event(
+                    type=EventType.SUBTASK_STARTED,
+                    source_agent=agent_id,
+                    data={"subtask_id": stage_id, "type": "stage"},
+                )
+            )
 
-        _ctx = traced_span(SpanType.AGENT, name=f"{agent_id}:{stage_id}") if TRACE_AVAILABLE else None
+        _ctx = (
+            traced_span(SpanType.AGENT, name=f"{agent_id}:{stage_id}")
+            if TRACE_AVAILABLE
+            else None
+        )
         if _ctx:
             _ctx.__enter__()
 
@@ -1284,10 +1389,10 @@ def build_supervisor_graph(
                 collected_info=state.get("collected_info", ""),
                 verified_experiences=state.get("verified_experiences", ""),
             )
-            subgraph = build_agent_subgraph(
+            subgraph = await build_agent_subgraph(
                 worker=worker,
                 tool_registry=tool_registry,
-                max_iterations=worker.config.get('max_iterations', 10),
+                max_iterations=worker.config.get("max_iterations", 10),
                 max_tool_calls=2,
                 on_thinking=worker.on_thinking,
                 on_tool_step=worker.on_tool_step,
@@ -1295,23 +1400,27 @@ def build_supervisor_graph(
                 on_content_token=worker.on_content_token,
             )
             result = await asyncio.wait_for(
-                subgraph.ainvoke({
-                    "agent_id": agent_id,
-                    "sub_session_id": sub_session_id,
-                    "session_id": state.get("session_id", ""),
-                    "subtask_id": stage_id,
-                    "subtask_type": state.get("subtask_type", "stage"),
-                    "subtask_description": state.get("subtask_description", ""),
-                    "question": state["question"],
-                    "stage_prereq_text": state.get("stage_prereq_text", ""),
-                    "memory_context": worker_memory_context,
-                    "max_iterations": worker.config.get('max_iterations', 10),
-                    "max_tool_calls": 2,
-                }),
+                subgraph.ainvoke(
+                    {
+                        "agent_id": agent_id,
+                        "sub_session_id": sub_session_id,
+                        "session_id": state.get("session_id", ""),
+                        "subtask_id": stage_id,
+                        "subtask_type": state.get("subtask_type", "stage"),
+                        "subtask_description": state.get("subtask_description", ""),
+                        "question": state["question"],
+                        "stage_prereq_text": state.get("stage_prereq_text", ""),
+                        "memory_context": worker_memory_context.to_dict(),
+                        "max_iterations": worker.config.get("max_iterations", 10),
+                        "max_tool_calls": 2,
+                    }
+                ),
                 timeout=STAGE_WORKER_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            logger.warning(f"Worker {agent_id} 阶段 {stage_id} 超时 ({STAGE_WORKER_TIMEOUT:.0f}s)")
+            logger.warning(
+                f"Worker {agent_id} 阶段 {stage_id} 超时 ({STAGE_WORKER_TIMEOUT:.0f}s)"
+            )
             result = {
                 "final_answer": f"[{agent_id}] 阶段求解超时，未能完成。",
                 "references": [],
@@ -1321,7 +1430,7 @@ def build_supervisor_graph(
             }
             timeout_occurred = True
         except Exception as e:  # noqa: BLE001 - 保证层间循环不卡死
-            logger.error(f"Worker {agent_id} 阶段 {stage_id} 异常: {e}")
+            logger.error(f"Worker {agent_id} 阶段 {stage_id} 异常: {type(e).__name__}")
             result = {
                 "final_answer": f"[{agent_id}] 阶段求解失败，请重试。",
                 "references": [],
@@ -1337,14 +1446,16 @@ def build_supervisor_graph(
                 _cleanup_worker_callbacks(worker)
 
         if event_callback:
-            event_callback(Event(
-                type=EventType.SUBTASK_COMPLETED,
-                source_agent=agent_id,
-                data={
-                    "subtask_id": stage_id,
-                    "answer_preview": result.get("final_answer", "")[:200],
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.SUBTASK_COMPLETED,
+                    source_agent=agent_id,
+                    data={
+                        "subtask_id": stage_id,
+                        "answer_preview": result.get("final_answer", "")[:200],
+                    },
+                )
+            )
 
         return {
             "stage_results": {
@@ -1376,13 +1487,15 @@ def build_supervisor_graph(
                 continue
             if status.get(sid) != "completed":
                 continue
-            entries.append({
-                "stage_id": sid,
-                "title": st.get("title") or sid,
-                "text": r.get("answer", ""),
-                "references": r.get("references", []),
-                "agent_id": r.get("agent_id", st.get("assigned_agent", "")),
-            })
+            entries.append(
+                {
+                    "stage_id": sid,
+                    "title": st.get("title") or sid,
+                    "text": r.get("answer", ""),
+                    "references": r.get("references", []),
+                    "agent_id": r.get("agent_id", st.get("assigned_agent", "")),
+                }
+            )
 
         # 跨阶段引用统一重编号（纯函数）
         texts, citations = unify_stage_citations(entries)
@@ -1392,9 +1505,7 @@ def build_supervisor_graph(
             if text:
                 parts.append(f"## {entry['title']}\n{text}")
 
-        skipped = [
-            st for st in plan if status.get(st["stage_id"]) != "completed"
-        ]
+        skipped = [st for st in plan if status.get(st["stage_id"]) != "completed"]
         if skipped:
             skipped_titles = "、".join(
                 st.get("title", st["stage_id"]) for st in skipped
@@ -1414,7 +1525,7 @@ def build_supervisor_graph(
         for entry, text in zip(entries, texts):
             agent_id = entry["agent_id"]
             sub_session_id = f"{session_id}:{agent_id}:{entry['stage_id']}"
-            coordinator.short_term_memory.merge_sub_session(
+            await coordinator.short_term_memory.merge_sub_session(
                 main_session_id=session_id,
                 sub_session_id=sub_session_id,
                 summary_text=f"[{agent_id}] {text}" if text else "",
@@ -1456,27 +1567,31 @@ def build_supervisor_graph(
                 + ("（部分阶段未完成）" if timeout_occurred else "（引用已统一编号）")
                 + "。"
             )
-            event_callback(Event(
-                type=EventType.AGENT_THINKING,
-                source_agent="lead_agent",
-                data={
-                    "content": synth_content,
-                    "iteration": 1,
-                    "phase": "synthesize",
-                    "title": "汇总输出",
-                    "status": "running",
-                },
-            ))
-            event_callback(Event(
-                type=EventType.AGENT_THINKING_DONE,
-                source_agent="lead_agent",
-                data={
-                    "iteration": 1,
-                    "elapsed_seconds": 0.0,
-                    "phase": "synthesize",
-                    "status": "completed",
-                },
-            ))
+            event_callback(
+                Event(
+                    type=EventType.AGENT_THINKING,
+                    source_agent="lead_agent",
+                    data={
+                        "content": synth_content,
+                        "iteration": 1,
+                        "phase": "synthesize",
+                        "title": "汇总输出",
+                        "status": "running",
+                    },
+                )
+            )
+            event_callback(
+                Event(
+                    type=EventType.AGENT_THINKING_DONE,
+                    source_agent="lead_agent",
+                    data={
+                        "iteration": 1,
+                        "elapsed_seconds": 0.0,
+                        "phase": "synthesize",
+                        "status": "completed",
+                    },
+                )
+            )
 
         return {
             "final_answer": final_answer,
@@ -1524,23 +1639,31 @@ def build_supervisor_graph(
             subtask_id = st.get("id", str(uuid.uuid4()))
             sub_session_id = f"{session_id}:{agent_id}:{subtask_id}"
 
-            sends.append(Send(
-                node="worker_executor",
-                arg={
-                    "subtask": st,
-                    "agent_id": agent_id,
-                    "sub_session_id": sub_session_id,
-                    "session_id": session_id,
-                    "question": state["question"],
-                    "memory_context": state.get("memory_context"),
-                }
-            ))
+            sends.append(
+                Send(
+                    node="worker_executor",
+                    arg={
+                        "subtask": st,
+                        "agent_id": agent_id,
+                        "sub_session_id": sub_session_id,
+                        "session_id": session_id,
+                        "question": state["question"],
+                        "memory_context": (
+                            MedicalMemoryContext.from_dict(state["memory_context"])
+                            if state.get("memory_context")
+                            else None
+                        ),
+                    },
+                )
+            )
 
         return sends
 
     def _route_after_plan(state: SupervisorState) -> str:
         """阶段规划路由：dag → 分层执行；否则 → 原任务分解路径"""
-        return "stage_advance" if state.get("plan_mode") == "dag" else "assess_decompose"
+        return (
+            "stage_advance" if state.get("plan_mode") == "dag" else "assess_decompose"
+        )
 
     def _stage_fanout(state: SupervisorState):
         """DAG 分层扇出：有待执行层 → 返回 Send 列表；否则 → synthesize_stage。
@@ -1571,24 +1694,30 @@ def build_supervisor_graph(
                     prereq_parts.append(f"【阶段 {dep_title}】\n{dep_answer}")
             stage_prereq_text = "\n".join(prereq_parts) if prereq_parts else ""
 
-            sends.append(Send(
-                node="worker_stage",
-                arg={
-                    "stage_id": sid,
-                    "agent_id": agent_id,
-                    "sub_session_id": sub_session_id,
-                    "session_id": session_id,
-                    "question": st.get("question") or state["question"],
-                    "subtask_description": st.get("description", ""),
-                    "subtask_type": st.get("type", "stage"),
-                    "stage_prereq_text": stage_prereq_text,
-                    "collected_info": state.get("collected_info", ""),
-                    "verified_experiences": state.get("context", {}).get(
-                        "verified_experiences", ""
-                    ),
-                    "memory_context": state.get("memory_context"),
-                }
-            ))
+            sends.append(
+                Send(
+                    node="worker_stage",
+                    arg={
+                        "stage_id": sid,
+                        "agent_id": agent_id,
+                        "sub_session_id": sub_session_id,
+                        "session_id": session_id,
+                        "question": st.get("question") or state["question"],
+                        "subtask_description": st.get("description", ""),
+                        "subtask_type": st.get("type", "stage"),
+                        "stage_prereq_text": stage_prereq_text,
+                        "collected_info": state.get("collected_info", ""),
+                        "verified_experiences": state.get("context", {}).get(
+                            "verified_experiences", ""
+                        ),
+                        "memory_context": (
+                            MedicalMemoryContext.from_dict(state["memory_context"])
+                            if state.get("memory_context")
+                            else None
+                        ),
+                    },
+                )
+            )
         return sends
 
     # ===== 构建图 =====
@@ -1622,7 +1751,7 @@ def build_supervisor_graph(
         {
             "chat_reply": "chat_reply",
             "clarify_decide": "clarify_decide",
-        }
+        },
     )
 
     # clarify 多轮循环：decide → (有问卷) ask → decide；无问卷 → 检索记忆
@@ -1632,7 +1761,7 @@ def build_supervisor_graph(
         {
             "clarify_ask": "clarify_ask",
             "retrieve_memories": "retrieve_memories",
-        }
+        },
     )
     builder.add_edge("clarify_ask", "clarify_decide")
 
@@ -1648,7 +1777,7 @@ def build_supervisor_graph(
         {
             "assess_decompose": "assess_decompose",
             "stage_advance": "stage_advance",
-        }
+        },
     )
 
     # 条件路由：single / swarm / fallback
@@ -1659,7 +1788,7 @@ def build_supervisor_graph(
             "single": "single_agent",
             "swarm": "send_workers",
             "fallback": "single_agent",  # fallback 复用 single_agent 节点
-        }
+        },
     )
 
     # 单 Agent / Fallback → finalize
@@ -1684,21 +1813,19 @@ def build_supervisor_graph(
         {
             "worker_stage": "worker_stage",
             "synthesize_stage": "synthesize_stage",
-        }
+        },
     )
     builder.add_edge("worker_stage", "stage_advance")
     builder.add_edge("synthesize_stage", "finalize")
     builder.add_edge("finalize", END)
 
-    # 编译：仅当启用 HITL（流式问卷）时才引入 checkpointer —— 按需引入 checkpoint
-    if hitl_enabled:
-        return builder.compile(
-            checkpointer=MemorySaver(),
-        )
-    return builder.compile()
+    if hitl_enabled and checkpointer is None:
+        raise RuntimeError("交互问答必须配置持久化检查点")
+    return builder.compile(checkpointer=checkpointer)
 
 
 # ===== 辅助函数 =====
+
 
 def _build_clarify_context(state: SupervisorState) -> str:
     """构建 clarify 决策阶段的上下文文本（个人档案/近期历史/历史案例）"""
@@ -1746,12 +1873,14 @@ def _merge_clarify_info(rounds: List[Dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[int, int]]):
+def _apply_renumber_to_contributions(
+    shared_ctx, renumber_map: Dict[str, Dict[int, int]]
+):
     """将 SharedContext 中各 Worker 贡献文本中的旧引用编号替换为新编号
 
     与 SwarmCoordinator._apply_renumber_map 行为一致。
     """
-    citation_pattern = re.compile(r'\[(\d+(?:[,\-]\d+)*)\]')
+    citation_pattern = re.compile(r"\[(\d+(?:[,\-]\d+)*)\]")
 
     for agent_id, mapping in renumber_map.items():
         if not mapping:
@@ -1766,10 +1895,10 @@ def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[in
 
             def replace_ref(match):
                 nums_str = match.group(1)
-                parts = re.split(r'([,\-])', nums_str)
+                parts = re.split(r"([,\-])", nums_str)
                 new_parts = []
                 for part in parts:
-                    if part in (',', '-'):
+                    if part in (",", "-"):
                         new_parts.append(part)
                     else:
                         try:
@@ -1778,7 +1907,7 @@ def _apply_renumber_to_contributions(shared_ctx, renumber_map: Dict[str, Dict[in
                             new_parts.append(str(new_num))
                         except ValueError:
                             new_parts.append(part)
-                return '[' + ''.join(new_parts) + ']'
+                return "[" + "".join(new_parts) + "]"
 
             contrib.result["answer"] = citation_pattern.sub(replace_ref, answer)
 
@@ -1796,53 +1925,61 @@ def _inject_worker_callbacks(
     避免同 agent 相邻阶段层的 thinking 事件在 SSE/前端聚合时被并入一块。
     原子路径不传，行为与原来完全一致。
     """
+
     def _on_thinking(content, iteration):
         data = {"content": content, "iteration": iteration}
         if phase:
             data["phase"] = phase
-        event_callback(Event(
-            type=EventType.AGENT_THINKING,
-            source_agent=agent_id,
-            data=data,
-        ))
+        event_callback(
+            Event(
+                type=EventType.AGENT_THINKING,
+                source_agent=agent_id,
+                data=data,
+            )
+        )
 
     def _on_tool_step(tool_name, arguments, result, iteration, success):
-        event_callback(Event(
-            type=EventType.AGENT_TOOL_STEP,
-            source_agent=agent_id,
-            data={
-                "tool_name": tool_name,
-                "arguments": {k: str(v)[:100] for k, v in arguments.items()}
-                    if isinstance(arguments, dict) else str(arguments)[:100],
-                "result": result,
-                "iteration": iteration,
-                "success": success,
-            },
-        ))
+        event_callback(
+            Event(
+                type=EventType.AGENT_TOOL_STEP,
+                source_agent=agent_id,
+                data={
+                    "tool_name": tool_name,
+                    "arguments": {k: str(v)[:100] for k, v in arguments.items()}
+                    if isinstance(arguments, dict)
+                    else str(arguments)[:100],
+                    "result": result,
+                    "iteration": iteration,
+                    "success": success,
+                },
+            )
+        )
 
     def _on_thinking_done(iteration, elapsed_seconds):
         data = {"iteration": iteration, "elapsed_seconds": elapsed_seconds}
         if phase:
             data["phase"] = phase
-        event_callback(Event(
-            type=EventType.AGENT_THINKING_DONE,
-            source_agent=agent_id,
-            data=data,
-        ))
+        event_callback(
+            Event(
+                type=EventType.AGENT_THINKING_DONE,
+                source_agent=agent_id,
+                data=data,
+            )
+        )
 
     def _on_content_token(token):
-        event_callback(Event(
-            type=EventType.AGENT_CONTENT_DELTA,
-            source_agent=agent_id,
-            data={"token": token, "is_final": True},
-        ))
+        event_callback(
+            Event(
+                type=EventType.AGENT_CONTENT_DELTA,
+                source_agent=agent_id,
+                data={"token": token, "is_final": True},
+            )
+        )
 
     worker.set_on_thinking(_on_thinking)
     worker.set_on_tool_step(_on_tool_step)
     worker.set_on_thinking_done(_on_thinking_done)
-    worker.set_on_content_token(
-        _on_content_token if stream_final_content else None
-    )
+    worker.set_on_content_token(_on_content_token if stream_final_content else None)
 
 
 def _cleanup_worker_callbacks(worker):

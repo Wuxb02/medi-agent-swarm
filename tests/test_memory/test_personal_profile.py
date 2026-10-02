@@ -1,18 +1,27 @@
-"""PersonalProfile（SQLite 存储）按 user_id 隔离的测试"""
-import threading
+"""PersonalProfile（MySQL 存储）按 user_id 隔离的测试"""
 
+import asyncio
 import pytest
+from mediZJ.infrastructure.database import transaction
 
-from mediZJ.memory import personal_profile as pp_module
 from mediZJ.memory.personal_profile import PersonalProfile
 from mediZJ.memory.session_db import SessionDB
 
+pytestmark = [pytest.mark.integration, pytest.mark.infrastructure]
+
 
 @pytest.fixture
-def db(tmp_path):
+async def db(mysql_infrastructure):
     """每个用例使用独立的临时数据库"""
     SessionDB.reset()
-    instance = SessionDB(str(tmp_path / "sessions.db"))
+    instance = SessionDB()
+    async with transaction() as conn:
+        for user_id in ("alice", "bob", "default"):
+            await conn.execute(
+                "INSERT INTO users(user_id,username,username_normalized,created_at) "
+                "VALUES (%s,%s,%s,'now')",
+                (user_id, user_id, user_id),
+            )
     yield instance
     SessionDB.reset()
 
@@ -20,52 +29,47 @@ def db(tmp_path):
 @pytest.fixture(autouse=True)
 def profile_dir(tmp_path, monkeypatch):
     """重定向旧版档案目录，避免迁移逻辑触碰仓库真实文件"""
-    monkeypatch.setattr(pp_module, "_PROFILE_DIR", tmp_path / "profile")
-    return pp_module._PROFILE_DIR
+    return tmp_path / "profile"
 
 
-def test_profiles_isolated_between_users(db):
+async def test_profiles_isolated_between_users(db):
     """两个 user_id 的档案互不可见"""
     alice = PersonalProfile(user_id="alice", db=db)
     bob = PersonalProfile(user_id="bob", db=db)
-
-    alice.save({"年龄": "30岁"})
-    bob.save({"年龄": "45岁", "过敏史": "青霉素"})
-
-    assert PersonalProfile(user_id="alice", db=db).load() == {"年龄": "30岁"}
-    assert PersonalProfile(user_id="bob", db=db).load() == {
-        "年龄": "45岁", "过敏史": "青霉素"
+    await alice.save({"年龄": "30岁"})
+    await bob.save({"年龄": "45岁", "过敏史": "青霉素"})
+    assert await PersonalProfile(user_id="alice", db=db).load() == {"年龄": "30岁"}
+    assert await PersonalProfile(user_id="bob", db=db).load() == {
+        "年龄": "45岁",
+        "过敏史": "青霉素",
     }
 
 
-def test_pending_isolated_between_users(db):
+async def test_pending_isolated_between_users(db):
     """待确认暂存区同样按用户隔离"""
     alice = PersonalProfile(user_id="alice", db=db)
-    bob = PersonalProfile(user_id="bob", db=db)
-
-    alice.add_pending([{"key": "吸烟史", "value": "10年", "confidence": "high"}])
-
-    assert len(PersonalProfile(user_id="alice", db=db).load_pending()) == 1
-    assert PersonalProfile(user_id="bob", db=db).load_pending() == []
+    await alice.add_pending([{"key": "吸烟史", "value": "10年", "confidence": "high"}])
+    assert len(await PersonalProfile(user_id="alice", db=db).load_pending()) == 1
+    assert await PersonalProfile(user_id="bob", db=db).load_pending() == []
 
 
-def test_save_does_not_clobber_pending(db):
+async def test_save_does_not_clobber_pending(db):
     """save() 只写 content 列，不清空 pending 列"""
     profile = PersonalProfile(user_id="alice", db=db)
-    profile.add_pending([{"key": "吸烟史", "value": "10年", "confidence": "high"}])
+    await profile.add_pending(
+        [{"key": "吸烟史", "value": "10年", "confidence": "high"}]
+    )
+    await profile.save({"年龄": "30岁"})
+    assert await profile.load() == {"年龄": "30岁"}
+    assert len(await profile.load_pending()) == 1
 
-    profile.save({"年龄": "30岁"})
 
-    assert profile.load() == {"年龄": "30岁"}
-    assert len(profile.load_pending()) == 1
-
-
-def test_default_user_when_no_user_id(db):
+async def test_default_user_when_no_user_id(db):
     """缺省 user_id 落到 default（向后兼容）"""
     profile = PersonalProfile(db=db)
     assert profile.user_id == "default"
-    profile.save({"性别": "男"})
-    assert db.get_profile("default") is not None
+    await profile.save({"性别": "男"})
+    assert await profile.load() == {"性别": "男"}
 
 
 def test_invalid_user_id_rejected(db):
@@ -76,61 +80,82 @@ def test_invalid_user_id_rejected(db):
         PersonalProfile(user_id="a/b", db=db)
 
 
-def test_legacy_files_migrated_to_default(db, profile_dir):
-    """旧版全局单文件自动迁移入库（归入 default 用户）"""
-    profile_dir.mkdir(parents=True)
-    legacy_text = "# 患者档案\n\n## 个人信息\n- 年龄：28岁\n"
-    legacy = profile_dir / "PERSONAL.md"
-    legacy.write_text(legacy_text, encoding="utf-8")
-
-    profile = PersonalProfile(user_id="default", db=db)
-
-    # 全局文件消失，入库内容与原文件逐字节一致，中间文件改名 .bak
-    assert not legacy.exists()
-    assert db.get_profile("default")["content"] == legacy_text
-    assert (profile_dir / "default" / "PERSONAL.md.bak").exists()
-    assert profile.load() == {"年龄": "28岁"}
-
-
-def test_user_files_migrated_idempotently(db, profile_dir):
-    """用户目录文件迁移入库，且重复实例化不产生重复迁移"""
-    user_dir = profile_dir / "alice"
-    user_dir.mkdir(parents=True)
-    personal_text = "# 患者档案\n\n## 个人信息\n- 年龄：30岁\n"
-    pending_text = "# 待确认信息\n\n- [信息]吸烟史：10年（2025-05-16 提取，置信度：高）\n"
-    (user_dir / "PERSONAL.md").write_text(personal_text, encoding="utf-8")
-    (user_dir / "PENDING.md").write_text(pending_text, encoding="utf-8")
-
-    PersonalProfile(user_id="alice", db=db)
-
-    row = db.get_profile("alice")
-    assert row["content"] == personal_text
-    assert row["pending"] == pending_text
-    assert not (user_dir / "PERSONAL.md").exists()
-    assert (user_dir / "PERSONAL.md.bak").exists()
-    assert (user_dir / "PENDING.md.bak").exists()
-
-    # 二次实例化：结构化记忆已迁移，旧 profiles 行不再参与运行时读取。
-    db.upsert_profile("alice", content="# 患者档案\n\n## 个人信息\n- 年龄：31岁\n")
-    profile = PersonalProfile(user_id="alice", db=db)
-    assert profile.load() == {"年龄": "30岁"}
-
-
-def test_concurrent_update_no_lost_update(db):
-    """多线程并发 update 不丢失更新（共享 user 锁）"""
-    profile = PersonalProfile(user_id="alice", db=db)
-
-    def worker(n: int):
-        PersonalProfile(user_id="alice", db=db).update(
-            [{"key": f"key{n}", "value": str(n)}]
+async def test_concurrent_update_no_lost_update(db):
+    """独立档案实例的并发更新通过 MySQL 行锁保护。"""
+    await asyncio.gather(
+        *(
+            PersonalProfile(user_id="alice", db=db).update(
+                [{"key": f"key{i}", "value": str(i)}]
+            )
+            for i in range(10)
         )
+    )
+    confirmed = await PersonalProfile(user_id="alice", db=db).load()
+    assert confirmed == {f"key{i}": str(i) for i in range(10)}
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
 
-    confirmed = profile.load()
-    for i in range(10):
-        assert confirmed.get(f"key{i}") == str(i)
+async def test_existing_files_remain_untouched(db, profile_dir):
+    profile_dir.mkdir(parents=True)
+    legacy = profile_dir / "PERSONAL.md"
+    text = "# 患者档案\n\n## 个人信息\n- 年龄：28岁\n"
+    legacy.write_text(text, encoding="utf-8")
+    assert await PersonalProfile(db=db).load() == {}
+    assert legacy.read_text(encoding="utf-8") == text
+
+
+async def test_records_pending_confirmation_replacement_and_text(db):
+    from mediZJ.memory.personal_profile import MedicalRecord, PendingItem
+
+    profile = PersonalProfile("alice", db)
+    assert await profile.to_text() == "暂无"
+    records = await profile.add_records(
+        [
+            {"date": "2024-01", "description": "旧记录"},
+            {
+                "date": "2025-01",
+                "description": "新记录",
+                "symptoms": "咳嗽",
+                "medication": "处方药",
+            },
+            {"date": "", "description": "忽略"},
+        ]
+    )
+    assert [record.date for record in records] == ["2025-01", "2024-01"]
+    assert "咳嗽" in await profile.to_text()
+    assert "用药：处方药" in records[0].to_line()
+    await profile.save_records(
+        [MedicalRecord("2025-03", "替换", duration="一周", outcome="已康复")]
+    )
+    assert len(await profile.load_records()) == 1
+    await profile.add_pending_records(
+        [
+            {
+                "date": "2025-04",
+                "description": "待确认",
+                "symptoms": "发热",
+                "duration": "两天",
+                "medication": "未用药",
+            },
+            {"date": "", "description": "忽略"},
+        ]
+    )
+    pending = await profile.get_pending()
+    assert pending[0].is_record and "待确认" in pending[0].to_line()
+    assert await profile.confirm_pending("病史", "待确认")
+    assert len(await profile.load_records()) == 2
+    await profile.add_pending_records([{"date": "2025-05", "description": "待驳回"}])
+    assert await profile.dismiss_pending("病史", "待驳回")
+    assert not await profile.dismiss_pending("病史", "不存在")
+    await profile.save_pending([PendingItem("年龄", "30岁", "2025-01-01", "medium")])
+    assert "置信度：中" in (await profile.load_pending())[0].to_line()
+    await profile.save_pending([PendingItem("性别", "女", "2025-01-01", "high")])
+    assert [item.key for item in await profile.load_pending()] == ["性别"]
+    await profile.save({"年龄": "30", "": "忽略"})
+    assert "个人信息" in await profile.to_text()
+    assert not await profile.confirm_pending("不存在", "不存在")
+
+
+async def test_unknown_profile_owner_is_rejected(db):
+    profile = PersonalProfile("missing-owner", db)
+    with pytest.raises(LookupError):
+        await profile.update([{"key": "年龄", "value": "30"}])

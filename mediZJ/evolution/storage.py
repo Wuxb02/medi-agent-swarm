@@ -1,24 +1,19 @@
-"""自进化数据的 SQLite 持久化。"""
+"""自进化数据的 MySQL 持久化。"""
+
+from mediZJ.infrastructure.database import Connection, execute, transaction
 
 import hashlib
 import json
-import os
 import re
-import sqlite3
 import threading
 import uuid
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from .config import EvolutionSettings
 from .source_catalog import get_source_locations
 
-
-_DEFAULT_DB_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "memory", "data", "sessions.db"
-)
 
 _SCHEMA_VERSION = 3
 
@@ -34,7 +29,7 @@ _EXPERIENCE_TYPES = {
 class RollbackBlockedError(ValueError):
     """发布快照包含当前不可恢复的经验。"""
 
-    def __init__(self, blockers: List[Dict[str, str]]):
+    def __init__(self, blockers: list[dict[str, str]]):
         super().__init__("发布版本包含不可恢复的经验")
         self.blockers = blockers
 
@@ -52,382 +47,69 @@ class EvolutionStorage:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, db_path: str = _DEFAULT_DB_PATH):
-        if hasattr(self, "_initialized"):
-            return
-        self.db_path = str(Path(db_path).resolve())
-        self._local = threading.local()
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._execute(self._create_tables)
-        self._execute(self._migrate_tables)
+    def __init__(self) -> None:
+        """存储实例不在构造阶段访问数据库。"""
         self._initialized = True
 
     @classmethod
     def reset(cls) -> None:
         cls._instance = None
 
-    def _get_conn(self) -> sqlite3.Connection:
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            self._local.conn = conn
-        return self._local.conn
+    async def _execute(self, func, *args, **kwargs):
+        return await execute(func, *args, **kwargs)
 
-    def _execute(self, func, *args, **kwargs):
-        conn = self._get_conn()
-        try:
-            result = func(conn, *args, **kwargs)
-            conn.commit()
-            return result
-        except Exception:
-            conn.rollback()
-            raise
-
-    @staticmethod
-    def _create_tables(conn: sqlite3.Connection) -> None:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS conversation_feedback (
-                feedback_id         TEXT PRIMARY KEY,
-                assistant_message_id INTEGER NOT NULL,
-                user_id             TEXT NOT NULL,
-                rating              TEXT NOT NULL,
-                reason_codes        TEXT NOT NULL DEFAULT '[]',
-                comment             TEXT NOT NULL DEFAULT '',
-                version             INTEGER NOT NULL DEFAULT 1,
-                created_at          TEXT NOT NULL,
-                updated_at          TEXT NOT NULL,
-                UNIQUE(assistant_message_id, user_id),
-                FOREIGN KEY (assistant_message_id)
-                    REFERENCES messages(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS evaluation_jobs (
-                job_id               TEXT PRIMARY KEY,
-                assistant_message_id INTEGER NOT NULL,
-                user_id              TEXT NOT NULL,
-                trigger_type         TEXT NOT NULL,
-                feedback_version     INTEGER NOT NULL DEFAULT 0,
-                status               TEXT NOT NULL DEFAULT 'pending',
-                attempts             INTEGER NOT NULL DEFAULT 0,
-                scheduled_at         TEXT NOT NULL,
-                lease_until          TEXT,
-                last_error           TEXT,
-                feedback_snapshot    TEXT,
-                created_at           TEXT NOT NULL,
-                updated_at           TEXT NOT NULL,
-                UNIQUE(assistant_message_id, feedback_version),
-                FOREIGN KEY (assistant_message_id)
-                    REFERENCES messages(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS conversation_evaluations (
-                evaluation_id        TEXT PRIMARY KEY,
-                job_id               TEXT NOT NULL UNIQUE,
-                assistant_message_id INTEGER NOT NULL,
-                user_id              TEXT NOT NULL,
-                overall_score        REAL NOT NULL,
-                dimension_scores     TEXT NOT NULL,
-                verdict              TEXT NOT NULL,
-                safety_violation     INTEGER NOT NULL DEFAULT 0,
-                attribution          TEXT NOT NULL,
-                rationale            TEXT NOT NULL DEFAULT '',
-                recommendations      TEXT NOT NULL DEFAULT '[]',
-                extracted_experience TEXT,
-                judge_model          TEXT NOT NULL DEFAULT '',
-                rubric_version       TEXT NOT NULL DEFAULT 'v1',
-                is_superseded         INTEGER NOT NULL DEFAULT 0,
-                created_at           TEXT NOT NULL,
-                FOREIGN KEY (job_id) REFERENCES evaluation_jobs(job_id),
-                FOREIGN KEY (assistant_message_id)
-                    REFERENCES messages(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS failure_cases (
-                failure_id      TEXT PRIMARY KEY,
-                evaluation_id   TEXT NOT NULL UNIQUE,
-                user_id         TEXT NOT NULL,
-                root_causes     TEXT NOT NULL,
-                evidence        TEXT NOT NULL DEFAULT '[]',
-                recommended_fix TEXT NOT NULL DEFAULT '',
-                status          TEXT NOT NULL DEFAULT 'open',
-                created_at      TEXT NOT NULL,
-                FOREIGN KEY (evaluation_id)
-                    REFERENCES conversation_evaluations(evaluation_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS learned_experiences (
-                experience_id   TEXT PRIMARY KEY,
-                experience_type TEXT NOT NULL,
-                scope           TEXT NOT NULL,
-                owner_user_id   TEXT,
-                query_pattern   TEXT NOT NULL,
-                content         TEXT NOT NULL,
-                status          TEXT NOT NULL DEFAULT 'candidate',
-                average_score   REAL NOT NULL DEFAULT 0,
-                support_count   INTEGER NOT NULL DEFAULT 1,
-                conflict_count  INTEGER NOT NULL DEFAULT 0,
-                version         INTEGER NOT NULL DEFAULT 1,
-                supersedes_id   TEXT,
-                applicability   TEXT NOT NULL DEFAULT '[]',
-                exclusions      TEXT NOT NULL DEFAULT '[]',
-                prerequisites   TEXT NOT NULL DEFAULT '[]',
-                safety_notes    TEXT NOT NULL DEFAULT '',
-                evidence_refs   TEXT NOT NULL DEFAULT '[]',
-                risk_level      TEXT NOT NULL DEFAULT 'low',
-                capability_tag  TEXT NOT NULL DEFAULT '',
-                distinct_users  INTEGER NOT NULL DEFAULT 1,
-                negative_count  INTEGER NOT NULL DEFAULT 0,
-                expires_at      TEXT,
-                last_validated_at TEXT,
-                created_at      TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS experience_sources (
-                experience_id TEXT NOT NULL,
-                evaluation_id TEXT NOT NULL,
-                PRIMARY KEY (experience_id, evaluation_id),
-                FOREIGN KEY (experience_id)
-                    REFERENCES learned_experiences(experience_id) ON DELETE CASCADE,
-                FOREIGN KEY (evaluation_id)
-                    REFERENCES conversation_evaluations(evaluation_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS experience_supports (
-                experience_id       TEXT NOT NULL,
-                assistant_message_id INTEGER NOT NULL,
-                evaluation_id       TEXT NOT NULL,
-                user_id             TEXT NOT NULL,
-                score               REAL NOT NULL,
-                created_at          TEXT NOT NULL,
-                PRIMARY KEY (experience_id, assistant_message_id),
-                FOREIGN KEY (experience_id)
-                    REFERENCES learned_experiences(experience_id) ON DELETE CASCADE,
-                FOREIGN KEY (evaluation_id)
-                    REFERENCES conversation_evaluations(evaluation_id) ON DELETE CASCADE,
-                FOREIGN KEY (assistant_message_id)
-                    REFERENCES messages(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS experience_exposures (
-                experience_id       TEXT NOT NULL,
-                assistant_message_id INTEGER NOT NULL,
-                user_id             TEXT NOT NULL,
-                bucket              TEXT NOT NULL,
-                applied             INTEGER NOT NULL,
-                created_at          TEXT NOT NULL,
-                PRIMARY KEY (experience_id, assistant_message_id),
-                FOREIGN KEY (experience_id)
-                    REFERENCES learned_experiences(experience_id) ON DELETE CASCADE,
-                FOREIGN KEY (assistant_message_id)
-                    REFERENCES messages(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS evolution_schema_meta (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS strategy_releases (
-                release_id       TEXT PRIMARY KEY,
-                version          INTEGER NOT NULL UNIQUE,
-                active_ids       TEXT NOT NULL,
-                previous_version INTEGER,
-                action           TEXT NOT NULL,
-                operator_user_id TEXT NOT NULL,
-                created_at       TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS session_deletion_audits (
-                audit_id              TEXT PRIMARY KEY,
-                session_id_hash       TEXT NOT NULL UNIQUE,
-                user_id_hash          TEXT NOT NULL,
-                deleted_message_count INTEGER NOT NULL DEFAULT 0,
-                deleted_feedback_count INTEGER NOT NULL DEFAULT 0,
-                deleted_job_count     INTEGER NOT NULL DEFAULT 0,
-                deleted_evaluation_count INTEGER NOT NULL DEFAULT 0,
-                deleted_failure_count INTEGER NOT NULL DEFAULT 0,
-                deleted_trace_count   INTEGER NOT NULL DEFAULT 0,
-                affected_experience_ids TEXT NOT NULL DEFAULT '[]',
-                demoted_experience_ids  TEXT NOT NULL DEFAULT '[]',
-                cleanup_status        TEXT NOT NULL DEFAULT 'pending',
-                cleanup_errors        TEXT NOT NULL DEFAULT '[]',
-                created_at            TEXT NOT NULL,
-                cleanup_completed_at  TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_feedback_message
-                ON conversation_feedback(assistant_message_id);
-            CREATE INDEX IF NOT EXISTS idx_eval_jobs_status
-                ON evaluation_jobs(status, scheduled_at);
-            CREATE INDEX IF NOT EXISTS idx_evaluations_user
-                ON conversation_evaluations(user_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_experiences_active
-                ON learned_experiences(status, scope, owner_user_id);
-            CREATE INDEX IF NOT EXISTS idx_deletion_audits_created
-                ON session_deletion_audits(created_at);
-            CREATE INDEX IF NOT EXISTS idx_exposure_bucket
-                ON experience_exposures(experience_id, bucket, user_id);
-            CREATE INDEX IF NOT EXISTS idx_jobs_state
-                ON evaluation_jobs(status, updated_at);
-            """
-        )
-
-    @staticmethod
-    def _migrate_tables(conn: sqlite3.Connection) -> None:
-        """为已有经验库补充治理与适用边界字段。"""
-        migrations = [
-            ("applicability", "TEXT NOT NULL DEFAULT '[]'"),
-            ("exclusions", "TEXT NOT NULL DEFAULT '[]'"),
-            ("prerequisites", "TEXT NOT NULL DEFAULT '[]'"),
-            ("safety_notes", "TEXT NOT NULL DEFAULT ''"),
-            ("evidence_refs", "TEXT NOT NULL DEFAULT '[]'"),
-            ("risk_level", "TEXT NOT NULL DEFAULT 'low'"),
-            ("capability_tag", "TEXT NOT NULL DEFAULT ''"),
-            ("distinct_users", "INTEGER NOT NULL DEFAULT 1"),
-            ("negative_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("expires_at", "TEXT"),
-            ("last_validated_at", "TEXT"),
-        ]
-        for column, definition in migrations:
-            try:
-                conn.execute(
-                    f"ALTER TABLE learned_experiences "
-                    f"ADD COLUMN {column} {definition}"
-                )
-            except sqlite3.OperationalError as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
-        job_migrations = [
-            ("feedback_snapshot", "TEXT"),
-        ]
-        evaluation_migrations = [
-            ("is_superseded", "INTEGER NOT NULL DEFAULT 0"),
-        ]
-        for table, columns in (
-            ("evaluation_jobs", job_migrations),
-            ("conversation_evaluations", evaluation_migrations),
-        ):
-            for column, definition in columns:
-                try:
-                    conn.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    )
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-        version = conn.execute(
-            "SELECT value FROM evolution_schema_meta WHERE key = 'schema_version'"
-        ).fetchone()
-        if version is None:
-            EvolutionStorage._clear_legacy_evolution_data(conn)
-            conn.execute(
-                "INSERT INTO evolution_schema_meta VALUES ('schema_version', ?)",
-                (str(_SCHEMA_VERSION),),
-            )
-        elif int(version["value"]) < _SCHEMA_VERSION:
-            EvolutionStorage._clear_legacy_evolution_data(conn)
-            conn.execute(
-                "UPDATE evolution_schema_meta SET value = ? "
-                "WHERE key = 'schema_version'",
-                (str(_SCHEMA_VERSION),),
-            )
-        conn.execute(
-            """
-            UPDATE learned_experiences
-            SET distinct_users = MAX(
-                distinct_users,
-                COALESCE((
-                    SELECT COUNT(DISTINCT ce.user_id)
-                    FROM experience_sources AS es
-                    JOIN conversation_evaluations AS ce
-                      ON ce.evaluation_id = es.evaluation_id
-                    WHERE es.experience_id = learned_experiences.experience_id
-                ), 0)
-            )
-            """
-        )
-        settings = EvolutionSettings.from_env()
-        conn.execute(
-            """
-            UPDATE learned_experiences
-            SET status = 'candidate', updated_at = ?
-            WHERE scope = 'global' AND status IN ('active', 'observing')
-              AND (support_count < ? OR distinct_users < ?)
-            """,
-            (
-                datetime.now().isoformat(),
-                settings.global_min_support,
-                settings.global_min_support,
-            ),
-        )
-
-    @staticmethod
-    def _clear_legacy_evolution_data(conn: sqlite3.Connection) -> None:
-        """一次性清空旧自进化业务数据，保留会话、Trace 与删除审计。"""
-        for table in (
-            "experience_exposures",
-            "experience_supports",
-            "experience_sources",
-            "failure_cases",
-            "conversation_evaluations",
-            "evaluation_jobs",
-            "conversation_feedback",
-            "strategy_releases",
-            "learned_experiences",
-        ):
-            conn.execute(f"DELETE FROM {table}")
-
-    def get_message_context(
+    async def get_message_context(
         self,
         message_id: int,
         user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """读取评审所需的回答、问题、会话及 Trace。"""
 
-        def _do_get(conn: sqlite3.Connection):
+        async def _do_get(conn: Connection):
             params: List[Any] = [message_id]
             user_clause = ""
             if user_id is not None:
-                user_clause = " AND s.user_id = ?"
+                user_clause = " AND s.user_id = %s"
                 params.append(user_id)
-            row = conn.execute(
-                """
+            row = (
+                await conn.execute(
+                    """
                 SELECT m.*, s.user_id, s.session_id
                 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
-                WHERE m.id = ? AND m.role = 'assistant'
-                """ + user_clause,
-                tuple(params),
+                WHERE m.id = %s AND m.role = 'assistant'
+                """
+                    + user_clause,
+                    tuple(params),
+                )
             ).fetchone()
             if row is None:
                 return None
             result = dict(row)
-            question = conn.execute(
-                """
+            question = (
+                await conn.execute(
+                    """
                 SELECT content FROM messages
-                WHERE session_id = ? AND turn_index = ? AND role = 'user'
+                WHERE session_id = %s AND turn_index = %s AND role = 'user'
                 ORDER BY id LIMIT 1
                 """,
-                (result["session_id"], result["turn_index"]),
+                    (result["session_id"], result["turn_index"]),
+                )
             ).fetchone()
             result["question"] = question["content"] if question else ""
-            feedback = conn.execute(
-                "SELECT * FROM conversation_feedback "
-                "WHERE assistant_message_id = ? AND user_id = ?",
-                (message_id, result["user_id"]),
+            feedback = (
+                await conn.execute(
+                    "SELECT * FROM conversation_feedback WHERE assistant_message_id = %s AND user_id = %s",
+                    (message_id, result["user_id"]),
+                )
             ).fetchone()
             result["feedback"] = dict(feedback) if feedback else None
-            try:
-                trace = conn.execute(
-                    "SELECT tree_json FROM traces WHERE trace_id = ?",
+            trace = (
+                await conn.execute(
+                    "SELECT tree_json FROM traces WHERE trace_id = %s",
                     (result.get("trace_id"),),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                trace = None
+                )
+            ).fetchone()
             result["trace"] = json.loads(trace["tree_json"]) if trace else {}
             for field in ("agent_events", "citations"):
                 value = result.get(field)
@@ -438,122 +120,144 @@ class EvolutionStorage:
                         result[field] = []
             return result
 
-        return self._execute(_do_get)
+        return await self._execute(_do_get)
 
-    def delete_session_data(
+    async def delete_session_data(
         self,
         session_id: str,
         user_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """事务化删除会话原始数据，并重算受影响的经验。"""
 
-        def _do_delete(conn: sqlite3.Connection):
-            conn.execute("BEGIN IMMEDIATE")
+        async def _do_delete(conn: Connection):
             params: List[Any] = [session_id]
             owner_clause = ""
             if user_id is not None:
-                owner_clause = " AND user_id = ?"
+                owner_clause = " AND user_id = %s"
                 params.append(user_id)
-            session = conn.execute(
-                "SELECT user_id FROM sessions WHERE session_id = ?"
-                + owner_clause,
-                tuple(params),
+            session = (
+                await conn.execute(
+                    "SELECT user_id FROM sessions WHERE session_id = %s" + owner_clause,
+                    tuple(params),
+                )
             ).fetchone()
             if session is None:
                 return None
 
-            counts = self._session_deletion_counts(conn, session_id)
+            counts = await self._session_deletion_counts(conn, session_id)
             affected_ids = [
                 row["experience_id"]
-                for row in conn.execute(
-                    """
+                for row in (
+                    await conn.execute(
+                        """
                     SELECT DISTINCT sources.experience_id
                     FROM experience_sources AS sources
                     JOIN conversation_evaluations AS evaluations
                       ON evaluations.evaluation_id = sources.evaluation_id
                     JOIN messages
                       ON messages.id = evaluations.assistant_message_id
-                    WHERE messages.session_id = ?
+                    WHERE messages.session_id = %s
                     """,
-                    (session_id,),
+                        (session_id,),
+                    )
                 ).fetchall()
             ]
-            negative_impacts, conflict_impacts = self._experience_impacts(
+            negative_impacts, conflict_impacts = await self._experience_impacts(
                 conn,
                 session_id,
             )
 
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 DELETE FROM experience_sources
                 WHERE evaluation_id IN (
                     SELECT evaluations.evaluation_id
                     FROM conversation_evaluations AS evaluations
                     JOIN messages
                       ON messages.id = evaluations.assistant_message_id
-                    WHERE messages.session_id = ?
+                    WHERE messages.session_id = %s
                 )
                 """,
-                (session_id,),
+                    (session_id,),
+                )
             )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 DELETE FROM failure_cases
                 WHERE evaluation_id IN (
                     SELECT evaluations.evaluation_id
                     FROM conversation_evaluations AS evaluations
                     JOIN messages
                       ON messages.id = evaluations.assistant_message_id
-                    WHERE messages.session_id = ?
+                    WHERE messages.session_id = %s
                 )
                 """,
-                (session_id,),
+                    (session_id,),
+                )
             )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 DELETE FROM conversation_evaluations
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?
+                    SELECT id FROM messages WHERE session_id = %s
                 )
                 """,
-                (session_id,),
+                    (session_id,),
+                )
             )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 DELETE FROM conversation_feedback
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?
+                    SELECT id FROM messages WHERE session_id = %s
                 )
                 """,
-                (session_id,),
+                    (session_id,),
+                )
             )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 DELETE FROM evaluation_jobs
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?
+                    SELECT id FROM messages WHERE session_id = %s
                 )
                 """,
-                (session_id,),
+                    (session_id,),
+                )
             )
-            try:
-                conn.execute("DELETE FROM traces WHERE session_id = ?", (session_id,))
-            except sqlite3.OperationalError as exc:
-                if "no such table" not in str(exc).lower():
-                    raise
-            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+            (
+                await conn.execute(
+                    "DELETE FROM traces WHERE session_id = %s", (session_id,)
+                )
+            )
+            (
+                await conn.execute(
+                    "DELETE FROM messages WHERE session_id = %s", (session_id,)
+                )
+            )
+            (
+                await conn.execute(
+                    "DELETE FROM sessions WHERE session_id = %s", (session_id,)
+                )
+            )
 
-            demoted_ids = self._recalculate_experiences(
+            demoted_ids = await self._recalculate_experiences(
                 conn,
                 affected_ids,
                 negative_impacts,
                 conflict_impacts,
             )
-            now = datetime.now().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             session_hash = self._identifier_hash(session_id)
-            conn.execute(
-                """
+            audit_id = str(uuid.uuid4())
+            (
+                await conn.execute(
+                    """
                 INSERT INTO session_deletion_audits
                     (audit_id, session_id_hash, user_id_hash,
                      deleted_message_count, deleted_feedback_count,
@@ -561,117 +265,119 @@ class EvolutionStorage:
                      deleted_failure_count, deleted_trace_count,
                      affected_experience_ids, demoted_experience_ids,
                      cleanup_status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', %s)
                 """,
-                (
-                    str(uuid.uuid4()),
-                    session_hash,
-                    self._identifier_hash(session["user_id"]),
-                    counts["messages"],
-                    counts["feedback"],
-                    counts["jobs"],
-                    counts["evaluations"],
-                    counts["failures"],
-                    counts["traces"],
-                    json.dumps(affected_ids),
-                    json.dumps(demoted_ids),
-                    now,
-                ),
+                    (
+                        audit_id,
+                        session_hash,
+                        self._identifier_hash(session["user_id"]),
+                        counts["messages"],
+                        counts["feedback"],
+                        counts["jobs"],
+                        counts["evaluations"],
+                        counts["failures"],
+                        counts["traces"],
+                        json.dumps(affected_ids),
+                        json.dumps(demoted_ids),
+                        now,
+                    ),
+                )
             )
             return {
+                "audit_id": audit_id,
                 "session_id_hash": session_hash,
                 "affected_experience_ids": affected_ids,
                 "demoted_experience_ids": demoted_ids,
             }
 
-        return self._execute(_do_delete)
+        return await self._execute(_do_delete)
 
-    def complete_session_cleanup(
+    async def complete_session_cleanup(
         self,
-        session_id_hash: str,
+        audit_id: str,
         errors: List[str],
     ) -> None:
         """记录数据库外部的向量和文件清理结果。"""
 
-        def _do_complete(conn: sqlite3.Connection):
-            conn.execute(
-                """
+        async def _do_complete(conn: Connection):
+            (
+                await conn.execute(
+                    """
                 UPDATE session_deletion_audits
-                SET cleanup_status = ?, cleanup_errors = ?,
-                    cleanup_completed_at = ?
-                WHERE session_id_hash = ?
+                SET cleanup_status = %s, cleanup_errors = %s,
+                    cleanup_completed_at = %s
+                WHERE audit_id = %s
                 """,
-                (
-                    "completed" if not errors else "partial",
-                    json.dumps(errors, ensure_ascii=False),
-                    datetime.now().isoformat(),
-                    session_id_hash,
-                ),
+                    (
+                        "completed" if not errors else "partial",
+                        json.dumps(errors, ensure_ascii=False),
+                        datetime.now(timezone.utc).isoformat(),
+                        audit_id,
+                    ),
+                )
             )
 
-        self._execute(_do_complete)
+        (await self._execute(_do_complete))
 
     @staticmethod
     def _identifier_hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _session_deletion_counts(
-        conn: sqlite3.Connection,
+    async def _session_deletion_counts(
+        conn: Connection,
         session_id: str,
     ) -> Dict[str, int]:
         queries = {
-            "messages": "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            "messages": "SELECT COUNT(*) AS count FROM messages WHERE session_id = %s",
             "feedback": """
-                SELECT COUNT(*) FROM conversation_feedback
+                SELECT COUNT(*) AS count FROM conversation_feedback
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?)
+                    SELECT id FROM messages WHERE session_id = %s)
             """,
             "jobs": """
-                SELECT COUNT(*) FROM evaluation_jobs
+                SELECT COUNT(*) AS count FROM evaluation_jobs
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?)
+                    SELECT id FROM messages WHERE session_id = %s)
             """,
             "evaluations": """
-                SELECT COUNT(*) FROM conversation_evaluations
+                SELECT COUNT(*) AS count FROM conversation_evaluations
                 WHERE assistant_message_id IN (
-                    SELECT id FROM messages WHERE session_id = ?)
+                    SELECT id FROM messages WHERE session_id = %s)
             """,
             "failures": """
-                SELECT COUNT(*) FROM failure_cases
+                SELECT COUNT(*) AS count FROM failure_cases
                 WHERE evaluation_id IN (
                     SELECT evaluations.evaluation_id
                     FROM conversation_evaluations AS evaluations
                     JOIN messages
                       ON messages.id = evaluations.assistant_message_id
-                    WHERE messages.session_id = ?)
+                    WHERE messages.session_id = %s)
             """,
         }
         counts = {
-            key: conn.execute(query, (session_id,)).fetchone()[0]
+            key: (await conn.execute(query, (session_id,))).fetchone()["count"]
             for key, query in queries.items()
         }
-        try:
-            counts["traces"] = conn.execute(
-                "SELECT COUNT(*) FROM traces WHERE session_id = ?",
+        counts["traces"] = (
+            await conn.execute(
+                "SELECT COUNT(*) AS count FROM traces WHERE session_id = %s",
                 (session_id,),
-            ).fetchone()[0]
-        except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc).lower():
-                raise
-            counts["traces"] = 0
+            )
+        ).fetchone()["count"]
         return counts
 
-    def _experience_impacts(
+    async def _experience_impacts(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         session_id: str,
     ) -> tuple[Dict[str, int], Dict[str, int]]:
         """计算待删除负反馈和失败评审对已应用经验的影响。"""
         negative: Dict[str, int] = {}
         conflicts: Dict[str, int] = {}
-        rows = conn.execute(
-            """
+        rows = (
+            await conn.execute(
+                """
             SELECT messages.id,
                    feedback.rating,
                    COALESCE(SUM(CASE
@@ -683,13 +389,14 @@ class EvolutionStorage:
               ON feedback.assistant_message_id = messages.id
             LEFT JOIN conversation_evaluations AS evaluations
               ON evaluations.assistant_message_id = messages.id
-            WHERE messages.session_id = ? AND messages.role = 'assistant'
+            WHERE messages.session_id = %s AND messages.role = 'assistant'
             GROUP BY messages.id, feedback.rating
             """,
-            (session_id,),
+                (session_id,),
+            )
         ).fetchall()
         for row in rows:
-            applied_ids = self._get_applied_experience_ids(conn, row["id"])
+            applied_ids = await self._get_applied_experience_ids(conn, row["id"])
             for experience_id in applied_ids:
                 if row["rating"] == "dislike":
                     negative[experience_id] = negative.get(experience_id, 0) + 1
@@ -699,36 +406,40 @@ class EvolutionStorage:
                     )
         return negative, conflicts
 
-    def _recalculate_experiences(
+    async def _recalculate_experiences(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         source_experience_ids: List[str],
         negative_impacts: Dict[str, int],
         conflict_impacts: Dict[str, int],
     ) -> List[str]:
         """根据剩余评审证据重算经验统计并执行降级。"""
-        all_ids = set(source_experience_ids) | set(negative_impacts) | set(
-            conflict_impacts
+        all_ids = (
+            set(source_experience_ids) | set(negative_impacts) | set(conflict_impacts)
         )
         demoted_ids: List[str] = []
         release_required = False
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         for experience_id in all_ids:
-            row = conn.execute(
-                "SELECT * FROM learned_experiences WHERE experience_id = ?",
-                (experience_id,),
+            row = (
+                await conn.execute(
+                    "SELECT * FROM learned_experiences WHERE experience_id = %s",
+                    (experience_id,),
+                )
             ).fetchone()
             if row is None:
                 continue
-            aggregate = conn.execute(
-                """
+            aggregate = (
+                await conn.execute(
+                    """
                 SELECT COUNT(*) AS support_count,
                        COALESCE(AVG(score), 0) AS average,
                        COUNT(DISTINCT user_id) AS distinct_users
                 FROM experience_supports
-                WHERE experience_id = ?
+                WHERE experience_id = %s
                 """,
-                (experience_id,),
+                    (experience_id,),
+                )
             ).fetchone()
             status = row["status"]
             support_count = aggregate["support_count"]
@@ -742,47 +453,52 @@ class EvolutionStorage:
                 0,
                 row["conflict_count"] - conflict_impacts.get(experience_id, 0),
             )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 UPDATE learned_experiences
-                SET support_count = ?, average_score = ?, distinct_users = ?,
-                    negative_count = ?, conflict_count = ?, status = ?,
-                    updated_at = ?
-                WHERE experience_id = ?
+                SET support_count = %s, average_score = %s, distinct_users = %s,
+                    negative_count = %s, conflict_count = %s, status = %s,
+                    updated_at = %s
+                WHERE experience_id = %s
                 """,
-                (
-                    support_count,
-                    aggregate["average"],
-                    aggregate["distinct_users"],
-                    negative_count,
-                    conflict_count,
-                    status,
-                    now,
-                    experience_id,
-                ),
+                    (
+                        support_count,
+                        aggregate["average"],
+                        aggregate["distinct_users"],
+                        negative_count,
+                        conflict_count,
+                        status,
+                        now,
+                        experience_id,
+                    ),
+                )
             )
-            refreshed = conn.execute(
-                "SELECT * FROM learned_experiences WHERE experience_id = ?",
-                (experience_id,),
+            refreshed = (
+                await conn.execute(
+                    "SELECT * FROM learned_experiences WHERE experience_id = %s",
+                    (experience_id,),
+                )
             ).fetchone()
             if status in {"active", "observing"}:
                 try:
-                    self._validate_publication(refreshed)
+                    (self._validate_publication(refreshed))
                 except ValueError:
                     status = "candidate"
-                    conn.execute(
-                        "UPDATE learned_experiences SET status = ? "
-                        "WHERE experience_id = ?",
-                        (status, experience_id),
+                    (
+                        await conn.execute(
+                            "UPDATE learned_experiences SET status = %s WHERE experience_id = %s",
+                            (status, experience_id),
+                        )
                     )
             if row["status"] in {"active", "observing"} and status != row["status"]:
                 demoted_ids.append(experience_id)
                 release_required = True
         if release_required:
-            self._create_release(conn, "auto_demote_session_deleted", "system")
+            (await self._create_release(conn, "auto_demote_session_deleted", "system"))
         return demoted_ids
 
-    def upsert_feedback(
+    async def upsert_feedback(
         self,
         message_id: int,
         user_id: str,
@@ -792,107 +508,123 @@ class EvolutionStorage:
     ) -> Dict[str, Any]:
         """新增或更新一条用户反馈。"""
 
-        def _do_upsert(conn: sqlite3.Connection):
-            owned = conn.execute(
-                """
+        async def _do_upsert(conn: Connection):
+            owned = (
+                await conn.execute(
+                    """
                 SELECT 1 FROM messages AS m
                 JOIN sessions AS s ON s.session_id = m.session_id
-                WHERE m.id = ? AND m.role = 'assistant' AND s.user_id = ?
+                WHERE m.id = %s AND m.role = 'assistant' AND s.user_id = %s
                 """,
-                (message_id, user_id),
+                    (message_id, user_id),
+                )
             ).fetchone()
             if owned is None:
                 raise LookupError("回答不存在")
-            now = datetime.now().isoformat()
-            existing = conn.execute(
-                "SELECT * FROM conversation_feedback "
-                "WHERE assistant_message_id = ? AND user_id = ?",
-                (message_id, user_id),
+            now = datetime.now(timezone.utc).isoformat()
+            existing = (
+                await conn.execute(
+                    "SELECT * FROM conversation_feedback WHERE assistant_message_id = %s AND user_id = %s",
+                    (message_id, user_id),
+                )
             ).fetchone()
             if existing:
                 previous_rating = existing["rating"]
                 version = existing["version"] + 1
-                conn.execute(
-                    """
+                (
+                    await conn.execute(
+                        """
                     UPDATE conversation_feedback
-                    SET rating = ?, reason_codes = ?, comment = ?,
-                        version = ?, updated_at = ?
-                    WHERE feedback_id = ?
+                    SET rating = %s, reason_codes = %s, comment = %s,
+                        version = %s, updated_at = %s
+                    WHERE feedback_id = %s
                     """,
-                    (
-                        rating,
-                        json.dumps(reason_codes, ensure_ascii=False),
-                        comment,
-                        version,
-                        now,
-                        existing["feedback_id"],
-                    ),
+                        (
+                            rating,
+                            json.dumps(reason_codes, ensure_ascii=False),
+                            comment,
+                            version,
+                            now,
+                            existing["feedback_id"],
+                        ),
+                    )
                 )
                 feedback_id = existing["feedback_id"]
             else:
                 previous_rating = None
                 feedback_id = str(uuid.uuid4())
                 version = 1
-                conn.execute(
-                    """
+                (
+                    await conn.execute(
+                        """
                     INSERT INTO conversation_feedback
                         (feedback_id, assistant_message_id, user_id, rating,
                          reason_codes, comment, version, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (
-                        feedback_id,
-                        message_id,
-                        user_id,
-                        rating,
-                        json.dumps(reason_codes, ensure_ascii=False),
-                        comment,
-                        version,
-                        now,
-                        now,
-                    ),
+                        (
+                            feedback_id,
+                            message_id,
+                            user_id,
+                            rating,
+                            json.dumps(reason_codes, ensure_ascii=False),
+                            comment,
+                            version,
+                            now,
+                            now,
+                        ),
+                    )
                 )
             if previous_rating != rating:
                 delta = (
-                    1 if rating == "dislike" else -1
-                    if previous_rating == "dislike" else 0
+                    1
+                    if rating == "dislike"
+                    else -1
+                    if previous_rating == "dislike"
+                    else 0
                 )
                 if delta:
-                    applied_ids = self._get_applied_experience_ids(
+                    applied_ids = await self._get_applied_experience_ids(
                         conn,
                         message_id,
                     )
                     for experience_id in applied_ids:
-                        conn.execute(
-                            """
+                        (
+                            await conn.execute(
+                                """
                             UPDATE learned_experiences
-                            SET negative_count = MAX(0, negative_count + ?),
+                            SET negative_count = GREATEST(0, negative_count + %s),
                                 status = CASE
-                                    WHEN ? > 0 AND status = 'observing'
+                                    WHEN %s > 0 AND status = 'observing'
                                     THEN 'retired'
                                     ELSE status
                                 END,
-                                updated_at = ?
-                            WHERE experience_id = ?
+                                updated_at = %s
+                            WHERE experience_id = %s
                             """,
-                            (delta, delta, now, experience_id),
+                                (delta, delta, now, experience_id),
+                            )
                         )
                     if delta > 0 and applied_ids:
-                        self._create_release(
-                            conn,
-                            "auto_retire_negative_feedback",
-                            "system",
+                        (
+                            await self._create_release(
+                                conn,
+                                "auto_retire_negative_feedback",
+                                "system",
+                            )
                         )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 UPDATE evaluation_jobs
-                SET status = 'superseded', updated_at = ?
-                WHERE assistant_message_id = ?
+                SET status = 'superseded', updated_at = %s
+                WHERE assistant_message_id = %s
                   AND trigger_type = 'user_feedback'
-                  AND feedback_version < ?
+                  AND feedback_version < %s
                   AND status = 'pending'
                 """,
-                (now, message_id, version),
+                    (now, message_id, version),
+                )
             )
             return {
                 "feedback_id": feedback_id,
@@ -903,24 +635,26 @@ class EvolutionStorage:
                 "version": version,
             }
 
-        return self._execute(_do_upsert)
+        return await self._execute(_do_upsert)
 
     @staticmethod
-    def _get_applied_experience_ids(
-        conn: sqlite3.Connection,
+    async def _get_applied_experience_ids(
+        conn: Connection,
         message_id: int,
     ) -> List[str]:
         """从结构化曝光记录读取回答实际应用的经验。"""
-        rows = conn.execute(
-            """
+        rows = (
+            await conn.execute(
+                """
             SELECT experience_id FROM experience_exposures
-            WHERE assistant_message_id = ? AND applied = 1
+            WHERE assistant_message_id = %s AND applied = 1
             """,
-            (message_id,),
+                (message_id,),
+            )
         ).fetchall()
         return [row["experience_id"] for row in rows]
 
-    def record_exposures(
+    async def record_exposures(
         self,
         message_id: int,
         user_id: str,
@@ -928,40 +662,45 @@ class EvolutionStorage:
     ) -> None:
         """持久化本次回答的经验实验分组。"""
 
-        def _do_record(conn: sqlite3.Connection):
-            now = datetime.now().isoformat()
+        async def _do_record(conn: Connection):
+            now = datetime.now(timezone.utc).isoformat()
             for assignment in assignments:
                 bucket = assignment.get("bucket")
                 if bucket not in {"active", "treatment", "control"}:
                     raise ValueError("非法经验实验分组")
-                conn.execute(
-                    """
+                (
+                    await conn.execute(
+                        """
                     INSERT INTO experience_exposures
                         (experience_id, assistant_message_id, user_id, bucket,
                          applied, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(experience_id, assistant_message_id) DO UPDATE SET
-                        bucket = excluded.bucket,
-                        applied = excluded.applied
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        bucket = VALUES(bucket),
+                        applied = VALUES(applied)
                     """,
-                    (
-                        assignment["experience_id"],
-                        message_id,
-                        user_id,
-                        bucket,
-                        int(bool(assignment.get("applied"))),
-                        now,
-                    ),
+                        (
+                            assignment["experience_id"],
+                            message_id,
+                            user_id,
+                            bucket,
+                            int(bool(assignment.get("applied"))),
+                            now,
+                        ),
+                    )
                 )
 
-        self._execute(_do_record)
+        (await self._execute(_do_record))
 
-    def get_feedback(self, message_id: int, user_id: str) -> Optional[Dict[str, Any]]:
-        def _do_get(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT * FROM conversation_feedback "
-                "WHERE assistant_message_id = ? AND user_id = ?",
-                (message_id, user_id),
+    async def get_feedback(
+        self, message_id: int, user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        async def _do_get(conn: Connection):
+            row = (
+                await conn.execute(
+                    "SELECT * FROM conversation_feedback WHERE assistant_message_id = %s AND user_id = %s",
+                    (message_id, user_id),
+                )
             ).fetchone()
             if row is None:
                 return None
@@ -970,9 +709,9 @@ class EvolutionStorage:
             result["assistant_message_id"] = str(result["assistant_message_id"])
             return result
 
-        return self._execute(_do_get)
+        return await self._execute(_do_get)
 
-    def enqueue_job(
+    async def enqueue_job(
         self,
         message_id: int,
         user_id: str,
@@ -982,17 +721,17 @@ class EvolutionStorage:
     ) -> Optional[str]:
         """幂等创建评审任务。"""
 
-        def _do_enqueue(conn: sqlite3.Connection):
-            now = datetime.now().isoformat()
+        async def _do_enqueue(conn: Connection):
+            now = datetime.now(timezone.utc).isoformat()
             job_id = str(uuid.uuid4())
-            cursor = conn.execute(
+            cursor = await conn.execute(
                 """
                 INSERT INTO evaluation_jobs
                     (job_id, assistant_message_id, user_id, trigger_type,
                      feedback_version, status, attempts, scheduled_at,
                      created_at, updated_at, feedback_snapshot)
-                VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)
-                ON CONFLICT(assistant_message_id, feedback_version) DO NOTHING
+                VALUES (%s, %s, %s, %s, %s, 'pending', 0, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE assistant_message_id = assistant_message_id
                 """,
                 (
                     job_id,
@@ -1004,80 +743,50 @@ class EvolutionStorage:
                     now,
                     now,
                     json.dumps(feedback_snapshot, ensure_ascii=False)
-                    if feedback_snapshot else None,
+                    if feedback_snapshot
+                    else None,
                 ),
             )
-            return job_id if cursor.rowcount else None
+            if cursor.rowcount:
+                from mediZJ.infrastructure.jobs import enqueue
 
-        return self._execute(_do_enqueue)
+                await enqueue(
+                    "evaluation", f"evaluation:{job_id}", {"evaluation_job_id": job_id}
+                )
+                return job_id
+            return None
 
-    def claim_job(self) -> Optional[Dict[str, Any]]:
-        """领取一个待执行或租约过期的任务。"""
+        return await self._execute(_do_enqueue)
 
-        def _do_claim(conn: sqlite3.Connection):
-            now = datetime.now()
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                SELECT * FROM evaluation_jobs
-                WHERE (status = 'pending' AND scheduled_at <= ?)
-                   OR (status = 'running' AND lease_until < ?)
-                ORDER BY created_at LIMIT 1
-                """,
-                (now.isoformat(), now.isoformat()),
+    async def claim_job(self) -> Optional[Dict[str, Any]]:
+        """评审同样通过统一任务表领取，并携带执行令牌。"""
+        from mediZJ.infrastructure.jobs import claim, finish
+
+        lease = await claim("evaluation", uuid.uuid4().hex)
+        if lease is None:
+            return None
+        async with transaction() as conn:
+            row = (
+                await conn.execute(
+                    "SELECT * FROM evaluation_jobs WHERE job_id=%s FOR UPDATE",
+                    (lease["payload"]["evaluation_job_id"],),
+                )
             ).fetchone()
-            if row is None:
-                return None
-            lease = (now + timedelta(minutes=5)).isoformat()
-            cursor = conn.execute(
-                """
-                UPDATE evaluation_jobs
-                SET status = 'running', attempts = attempts + 1,
-                    lease_until = ?, updated_at = ?
-                WHERE job_id = ? AND status IN ('pending', 'running')
-                """,
-                (lease, now.isoformat(), row["job_id"]),
+            if row is None or row["status"] in {"superseded", "completed"}:
+                await finish(lease)
+                return await self.claim_job()
+            await conn.execute(
+                "UPDATE evaluation_jobs SET status='running',attempts=%s WHERE job_id=%s",
+                (lease["attempts"], row["job_id"]),
             )
-            return dict(row) if cursor.rowcount else None
+            return {**dict(row), "attempts": lease["attempts"], "_lease": lease}
 
-        return self._execute(_do_claim)
+    async def complete_job(self, job: dict) -> None:
+        from mediZJ.infrastructure.jobs import finish
 
-    def complete_job(self, job_id: str) -> None:
-        self._set_job_status(job_id, "completed", None)
+        await finish(job["_lease"])
 
-    def fail_job(self, job_id: str, error: str, max_attempts: int = 3) -> None:
-        def _do_fail(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT attempts FROM evaluation_jobs WHERE job_id = ?",
-                (job_id,),
-            ).fetchone()
-            status = "failed" if not row or row["attempts"] >= max_attempts else "pending"
-            conn.execute(
-                """
-                UPDATE evaluation_jobs
-                SET status = ?, last_error = ?, lease_until = NULL,
-                    updated_at = ?
-                WHERE job_id = ?
-                """,
-                (status, error[:2000], datetime.now().isoformat(), job_id),
-            )
-
-        self._execute(_do_fail)
-
-    def _set_job_status(self, job_id: str, status: str, error: Optional[str]) -> None:
-        def _do_set(conn: sqlite3.Connection):
-            conn.execute(
-                """
-                UPDATE evaluation_jobs
-                SET status = ?, last_error = ?, lease_until = NULL,
-                    updated_at = ? WHERE job_id = ?
-                """,
-                (status, error, datetime.now().isoformat(), job_id),
-            )
-
-        self._execute(_do_set)
-
-    def save_evaluation(
+    async def save_evaluation(
         self,
         job: Dict[str, Any],
         result: Dict[str, Any],
@@ -1085,115 +794,139 @@ class EvolutionStorage:
     ) -> str:
         """保存评分，并生成失败案例或经验候选。"""
 
-        def _do_save(conn: sqlite3.Connection):
-            existing_evaluation = conn.execute(
-                "SELECT evaluation_id FROM conversation_evaluations "
-                "WHERE job_id = ?",
-                (job["job_id"],),
+        async def _do_save(conn: Connection):
+            if job.get("_lease"):
+                from mediZJ.infrastructure.jobs import assert_lease
+
+                await assert_lease(conn, job["_lease"])
+            existing_evaluation = (
+                await conn.execute(
+                    "SELECT evaluation_id FROM conversation_evaluations WHERE job_id = %s",
+                    (job["job_id"],),
+                )
             ).fetchone()
             if existing_evaluation:
-                conn.execute(
-                    "UPDATE evaluation_jobs SET status = 'completed', "
-                    "lease_until = NULL, updated_at = ? WHERE job_id = ?",
-                    (datetime.now().isoformat(), job["job_id"]),
+                (
+                    await conn.execute(
+                        "UPDATE evaluation_jobs SET status = 'completed', lease_until = NULL, updated_at = %s WHERE job_id = %s",
+                        (datetime.now(timezone.utc).isoformat(), job["job_id"]),
+                    )
                 )
                 return existing_evaluation["evaluation_id"]
             evaluation_id = str(uuid.uuid4())
-            now = datetime.now().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             overall = float(result["overall_score"])
             safety = bool(result.get("safety_violation", False))
             verdict = result.get("verdict") or (
-                "low" if overall < 65 or safety else "high" if overall >= 85 else "medium"
+                "low"
+                if overall < 65 or safety
+                else "high"
+                if overall >= 85
+                else "medium"
             )
             proposed_experiences = result.get("experiences") or (
                 [result["experience"]] if result.get("experience") else []
             )
             experiences = [
-                experience for experience in proposed_experiences
+                experience
+                for experience in proposed_experiences
                 if isinstance(experience, dict)
-                and experience.get("type", "response_strategy")
-                in _EXPERIENCE_TYPES
+                and experience.get("type", "response_strategy") in _EXPERIENCE_TYPES
             ]
             is_superseded = False
             if (
                 job.get("trigger_type") == "user_feedback"
                 and int(job.get("feedback_version") or 0) > 0
             ):
-                current_feedback = conn.execute(
-                    "SELECT version FROM conversation_feedback "
-                    "WHERE assistant_message_id = ? AND user_id = ?",
-                    (job["assistant_message_id"], job["user_id"]),
+                current_feedback = (
+                    await conn.execute(
+                        "SELECT version FROM conversation_feedback WHERE assistant_message_id = %s AND user_id = %s",
+                        (job["assistant_message_id"], job["user_id"]),
+                    )
                 ).fetchone()
                 is_superseded = (
                     current_feedback is None
                     or current_feedback["version"] != job["feedback_version"]
                 )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 INSERT INTO conversation_evaluations
                     (evaluation_id, job_id, assistant_message_id, user_id,
                      overall_score, dimension_scores, verdict,
                      safety_violation, attribution, rationale,
                      recommendations, extracted_experience, judge_model,
                      rubric_version, is_superseded, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'v3', ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'v3', %s, %s)
                 """,
-                (
-                    evaluation_id,
-                    job["job_id"],
-                    job["assistant_message_id"],
-                    job["user_id"],
-                    overall,
-                    json.dumps(result.get("dimension_scores", {}), ensure_ascii=False),
-                    verdict,
-                    int(safety),
-                    json.dumps(result.get("attribution", []), ensure_ascii=False),
-                    result.get("rationale", ""),
-                    json.dumps(result.get("recommendations", []), ensure_ascii=False),
-                    json.dumps(experiences, ensure_ascii=False),
-                    judge_model,
-                    int(is_superseded),
-                    now,
-                ),
-            )
-            if not is_superseded and (verdict == "low" or safety):
-                conn.execute(
-                    """
-                    INSERT INTO failure_cases
-                        (failure_id, evaluation_id, user_id, root_causes,
-                         evidence, recommended_fix, status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
-                    """,
                     (
-                        str(uuid.uuid4()),
                         evaluation_id,
+                        job["job_id"],
+                        job["assistant_message_id"],
                         job["user_id"],
-                        json.dumps(result.get("attribution", ["other"]), ensure_ascii=False),
-                        json.dumps(result.get("evidence", []), ensure_ascii=False),
-                        "；".join(result.get("recommendations", [])),
+                        overall,
+                        json.dumps(
+                            result.get("dimension_scores", {}), ensure_ascii=False
+                        ),
+                        verdict,
+                        int(safety),
+                        json.dumps(result.get("attribution", []), ensure_ascii=False),
+                        result.get("rationale", ""),
+                        json.dumps(
+                            result.get("recommendations", []), ensure_ascii=False
+                        ),
+                        json.dumps(experiences, ensure_ascii=False),
+                        judge_model,
+                        int(is_superseded),
                         now,
                     ),
                 )
-                applied_ids = self._get_applied_experience_ids(
+            )
+            if not is_superseded and (verdict == "low" or safety):
+                (
+                    await conn.execute(
+                        """
+                    INSERT INTO failure_cases
+                        (failure_id, evaluation_id, user_id, root_causes,
+                         evidence, recommended_fix, status, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'open', %s)
+                    """,
+                        (
+                            str(uuid.uuid4()),
+                            evaluation_id,
+                            job["user_id"],
+                            json.dumps(
+                                result.get("attribution", ["other"]), ensure_ascii=False
+                            ),
+                            json.dumps(result.get("evidence", []), ensure_ascii=False),
+                            "；".join(result.get("recommendations", [])),
+                            now,
+                        ),
+                    )
+                )
+                applied_ids = await self._get_applied_experience_ids(
                     conn,
                     int(job["assistant_message_id"]),
                 )
                 supported_ids = [
                     row["experience_id"]
-                    for row in conn.execute(
-                        "SELECT experience_id FROM experience_supports "
-                        "WHERE assistant_message_id = ?",
-                        (job["assistant_message_id"],),
+                    for row in (
+                        await conn.execute(
+                            "SELECT experience_id FROM experience_supports WHERE assistant_message_id = %s",
+                            (job["assistant_message_id"],),
+                        )
                     ).fetchall()
                 ]
-                conn.execute(
-                    "DELETE FROM experience_supports "
-                    "WHERE assistant_message_id = ?",
-                    (job["assistant_message_id"],),
+                (
+                    await conn.execute(
+                        "DELETE FROM experience_supports WHERE assistant_message_id = %s",
+                        (job["assistant_message_id"],),
+                    )
                 )
                 for experience_id in applied_ids:
-                    conn.execute(
-                        """
+                    (
+                        await conn.execute(
+                            """
                         UPDATE learned_experiences
                         SET conflict_count = conflict_count + 1,
                             status = CASE
@@ -1201,49 +934,58 @@ class EvolutionStorage:
                                 THEN 'retired'
                                 ELSE status
                             END,
-                            updated_at = ?
-                        WHERE experience_id = ?
+                            updated_at = %s
+                        WHERE experience_id = %s
                         """,
-                        (now, experience_id),
+                            (now, experience_id),
+                        )
                     )
                 if applied_ids:
-                    self._create_release(
-                        conn,
-                        "auto_retire_failed_evaluation",
-                        "system",
+                    (
+                        await self._create_release(
+                            conn,
+                            "auto_retire_failed_evaluation",
+                            "system",
+                        )
                     )
                 for experience_id in supported_ids:
-                    self._recompute_experience_statistics(
-                        conn,
-                        experience_id,
-                        now,
+                    (
+                        await self._recompute_experience_statistics(
+                            conn,
+                            experience_id,
+                            now,
+                        )
                     )
             if not is_superseded and verdict == "high":
                 for experience in experiences:
-                    self._upsert_experience(
-                        conn,
-                        evaluation_id,
-                        job["user_id"],
-                        overall,
-                        experience,
-                        int(job["assistant_message_id"]),
-                        now,
+                    (
+                        await self._upsert_experience(
+                            conn,
+                            evaluation_id,
+                            job["user_id"],
+                            overall,
+                            experience,
+                            int(job["assistant_message_id"]),
+                            now,
+                        )
                     )
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 UPDATE evaluation_jobs
-                SET status = 'completed', lease_until = NULL, updated_at = ?
-                WHERE job_id = ?
+                SET status = 'completed', lease_until = NULL, updated_at = %s
+                WHERE job_id = %s
                 """,
-                (now, job["job_id"]),
+                    (now, job["job_id"]),
+                )
             )
             return evaluation_id
 
-        return self._execute(_do_save)
+        return await self._execute(_do_save)
 
-    def _upsert_experience(
+    async def _upsert_experience(
         self,
-        conn: sqlite3.Connection,
+        conn: Connection,
         evaluation_id: str,
         user_id: str,
         overall: float,
@@ -1258,16 +1000,18 @@ class EvolutionStorage:
         if experience_type not in _EXPERIENCE_TYPES:
             return
         query_pattern = experience.get("query_pattern", "")
-        existing = conn.execute(
-            """
+        existing = (
+            await conn.execute(
+                """
             SELECT * FROM learned_experiences
-            WHERE experience_type = ? AND scope = ?
-              AND COALESCE(owner_user_id, '') = COALESCE(?, '')
-              AND query_pattern = ?
+            WHERE experience_type = %s AND scope = %s
+              AND COALESCE(owner_user_id, '') = COALESCE(%s, '')
+              AND query_pattern = %s
               AND status IN ('candidate', 'observing', 'active')
             ORDER BY version DESC LIMIT 1
             """,
-            (experience_type, scope, owner, query_pattern),
+                (experience_type, scope, owner, query_pattern),
+            )
         ).fetchone()
         json_fields = {
             "applicability": experience.get("applicability", []),
@@ -1277,35 +1021,38 @@ class EvolutionStorage:
         }
         if existing:
             experience_id = existing["experience_id"]
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 UPDATE learned_experiences
-                SET content = ?,
-                    applicability = ?, exclusions = ?, prerequisites = ?,
-                    safety_notes = ?, evidence_refs = ?, risk_level = ?,
-                    capability_tag = ?, expires_at = ?,
-                    last_validated_at = ?, updated_at = ?
-                WHERE experience_id = ?
+                SET content = %s,
+                    applicability = %s, exclusions = %s, prerequisites = %s,
+                    safety_notes = %s, evidence_refs = %s, risk_level = %s,
+                    capability_tag = %s, expires_at = %s,
+                    last_validated_at = %s, updated_at = %s
+                WHERE experience_id = %s
                 """,
-                (
-                    experience.get("content", existing["content"]),
-                    json.dumps(json_fields["applicability"], ensure_ascii=False),
-                    json.dumps(json_fields["exclusions"], ensure_ascii=False),
-                    json.dumps(json_fields["prerequisites"], ensure_ascii=False),
-                    experience.get("safety_notes", ""),
-                    json.dumps(json_fields["evidence_refs"], ensure_ascii=False),
-                    experience.get("risk_level", "low"),
-                    experience.get("capability_tag", ""),
-                    experience.get("expires_at"),
-                    now,
-                    now,
-                    experience_id,
-                ),
+                    (
+                        experience.get("content", existing["content"]),
+                        json.dumps(json_fields["applicability"], ensure_ascii=False),
+                        json.dumps(json_fields["exclusions"], ensure_ascii=False),
+                        json.dumps(json_fields["prerequisites"], ensure_ascii=False),
+                        experience.get("safety_notes", ""),
+                        json.dumps(json_fields["evidence_refs"], ensure_ascii=False),
+                        experience.get("risk_level", "low"),
+                        experience.get("capability_tag", ""),
+                        experience.get("expires_at"),
+                        now,
+                        now,
+                        experience_id,
+                    ),
+                )
             )
         else:
             experience_id = str(uuid.uuid4())
-            conn.execute(
-                """
+            (
+                await conn.execute(
+                    """
                 INSERT INTO learned_experiences
                     (experience_id, experience_type, scope, owner_user_id,
                      query_pattern, content, status, average_score,
@@ -1314,57 +1061,64 @@ class EvolutionStorage:
                      risk_level, capability_tag, distinct_users,
                      negative_count, expires_at, last_validated_at,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'candidate', 0, 0, 0, 1, ?, ?, ?,
-                        ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, 'candidate', 0, 0, 0, 1, %s, %s, %s,
+                        %s, %s, %s, %s, 0, 0, %s, %s, %s, %s)
                 """,
-                (
-                    experience_id,
-                    experience_type,
-                    scope,
-                    owner,
-                    query_pattern,
-                    experience.get("content", ""),
-                    json.dumps(json_fields["applicability"], ensure_ascii=False),
-                    json.dumps(json_fields["exclusions"], ensure_ascii=False),
-                    json.dumps(json_fields["prerequisites"], ensure_ascii=False),
-                    experience.get("safety_notes", ""),
-                    json.dumps(json_fields["evidence_refs"], ensure_ascii=False),
-                    experience.get("risk_level", "low"),
-                    experience.get("capability_tag", ""),
-                    experience.get("expires_at"),
-                    now,
-                    now,
-                    now,
-                ),
+                    (
+                        experience_id,
+                        experience_type,
+                        scope,
+                        owner,
+                        query_pattern,
+                        experience.get("content", ""),
+                        json.dumps(json_fields["applicability"], ensure_ascii=False),
+                        json.dumps(json_fields["exclusions"], ensure_ascii=False),
+                        json.dumps(json_fields["prerequisites"], ensure_ascii=False),
+                        experience.get("safety_notes", ""),
+                        json.dumps(json_fields["evidence_refs"], ensure_ascii=False),
+                        experience.get("risk_level", "low"),
+                        experience.get("capability_tag", ""),
+                        experience.get("expires_at"),
+                        now,
+                        now,
+                        now,
+                    ),
+                )
             )
-        conn.execute(
-            "INSERT OR IGNORE INTO experience_sources VALUES (?, ?)",
-            (experience_id, evaluation_id),
+        (
+            await conn.execute(
+                "INSERT IGNORE INTO experience_sources VALUES (%s, %s)",
+                (experience_id, evaluation_id),
+            )
         )
-        conn.execute(
-            """
+        (
+            await conn.execute(
+                """
             INSERT INTO experience_supports
                 (experience_id, assistant_message_id, evaluation_id, user_id,
                  score, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(experience_id, assistant_message_id) DO UPDATE SET
-                evaluation_id = excluded.evaluation_id,
-                score = excluded.score,
-                created_at = excluded.created_at
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                evaluation_id = VALUES(evaluation_id),
+                score = VALUES(score),
+                created_at = VALUES(created_at)
             """,
-            (
-                experience_id,
-                assistant_message_id,
-                evaluation_id,
-                user_id,
-                overall,
-                now,
-            ),
+                (
+                    experience_id,
+                    assistant_message_id,
+                    evaluation_id,
+                    user_id,
+                    overall,
+                    now,
+                ),
+            )
         )
-        self._recompute_experience_statistics(conn, experience_id, now)
-        row = conn.execute(
-            "SELECT * FROM learned_experiences WHERE experience_id = ?",
-            (experience_id,),
+        (await self._recompute_experience_statistics(conn, experience_id, now))
+        row = (
+            await conn.execute(
+                "SELECT * FROM learned_experiences WHERE experience_id = %s",
+                (experience_id,),
+            )
         ).fetchone()
         status = row["status"]
         if (
@@ -1377,60 +1131,67 @@ class EvolutionStorage:
             and row["experience_type"] != "medical_knowledge"
         ):
             try:
-                self._validate_publication(row)
+                (self._validate_publication(row))
             except ValueError:
                 status = row["status"]
             else:
                 status = "active"
-        conn.execute(
-            """
+        (
+            await conn.execute(
+                """
             UPDATE learned_experiences
-            SET status = ?, updated_at = ?
-            WHERE experience_id = ?
+            SET status = %s, updated_at = %s
+            WHERE experience_id = %s
             """,
-            (status, now, experience_id),
+                (status, now, experience_id),
+            )
         )
         if status == "active" and row["status"] != "active":
-            self._create_release(conn, "auto_promote", "system")
+            (await self._create_release(conn, "auto_promote", "system"))
 
     @staticmethod
-    def _recompute_experience_statistics(
-        conn: sqlite3.Connection,
+    async def _recompute_experience_statistics(
+        conn: Connection,
         experience_id: str,
         now: str,
     ) -> None:
-        aggregate = conn.execute(
-            """
+        aggregate = (
+            await conn.execute(
+                """
             SELECT COUNT(*) AS support_count,
                    COALESCE(AVG(score), 0) AS average_score,
                    COUNT(DISTINCT user_id) AS distinct_users
             FROM experience_supports
-            WHERE experience_id = ?
+            WHERE experience_id = %s
             """,
-            (experience_id,),
+                (experience_id,),
+            )
         ).fetchone()
-        conn.execute(
-            """
+        (
+            await conn.execute(
+                """
             UPDATE learned_experiences
-            SET support_count = ?, average_score = ?, distinct_users = ?,
-                updated_at = ?
-            WHERE experience_id = ?
+            SET support_count = %s, average_score = %s, distinct_users = %s,
+                updated_at = %s
+            WHERE experience_id = %s
             """,
-            (
-                aggregate["support_count"],
-                aggregate["average_score"],
-                aggregate["distinct_users"],
-                now,
-                experience_id,
-            ),
+                (
+                    aggregate["support_count"],
+                    aggregate["average_score"],
+                    aggregate["distinct_users"],
+                    now,
+                    experience_id,
+                ),
+            )
         )
 
-    def list_evaluations(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def list_evaluations(self, limit: int = 100) -> List[Dict[str, Any]]:
         """返回可追溯到原对话、反馈和 Trace 的评审列表。"""
 
-        def _do_list(conn: sqlite3.Connection):
-            rows = conn.execute(
-                """
+        async def _do_list(conn: Connection):
+            rows = (
+                await conn.execute(
+                    """
                 SELECT ce.*,
                        answer.session_id,
                        answer.turn_index,
@@ -1460,9 +1221,10 @@ class EvolutionStorage:
                   ON feedback.assistant_message_id = ce.assistant_message_id
                  AND feedback.user_id = ce.user_id
                 ORDER BY ce.created_at DESC
-                LIMIT ?
+                LIMIT %s
                 """,
-                (limit,),
+                    (limit,),
+                )
             ).fetchall()
             items = []
             for row in rows:
@@ -1482,14 +1244,15 @@ class EvolutionStorage:
                 items.append(item)
             return items
 
-        return self._execute(_do_list)
+        return await self._execute(_do_list)
 
-    def list_failures(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def list_failures(self, limit: int = 100) -> List[Dict[str, Any]]:
         """返回关联对话、Trace 和源码位置的失败案例。"""
 
-        def _do_list(conn: sqlite3.Connection):
-            rows = conn.execute(
-                """
+        async def _do_list(conn: Connection):
+            rows = (
+                await conn.execute(
+                    """
                 SELECT failures.*,
                        evaluations.overall_score,
                        evaluations.rationale,
@@ -1515,9 +1278,10 @@ class EvolutionStorage:
                 LEFT JOIN evaluation_jobs AS jobs
                   ON jobs.job_id = evaluations.job_id
                 ORDER BY failures.created_at DESC
-                LIMIT ?
+                LIMIT %s
                 """,
-                (limit,),
+                    (limit,),
+                )
             ).fetchall()
             items = []
             for row in rows:
@@ -1529,31 +1293,31 @@ class EvolutionStorage:
                             item[field] = json.loads(value)
                         except json.JSONDecodeError:
                             item[field] = []
-                item["source_locations"] = get_source_locations(
-                    item["root_causes"]
-                )
+                item["source_locations"] = get_source_locations(item["root_causes"])
                 items.append(item)
             return items
 
-        return self._execute(_do_list)
+        return await self._execute(_do_list)
 
-    def list_experiences(
+    async def list_experiences(
         self,
         limit: int = 100,
         status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        def _do_list(conn: sqlite3.Connection):
+        async def _do_list(conn: Connection):
             if status:
-                rows = conn.execute(
-                    "SELECT * FROM learned_experiences WHERE status = ? "
-                    "ORDER BY updated_at DESC LIMIT ?",
-                    (status, limit),
+                rows = (
+                    await conn.execute(
+                        "SELECT * FROM learned_experiences WHERE status = %s ORDER BY updated_at DESC LIMIT %s",
+                        (status, limit),
+                    )
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    "SELECT * FROM learned_experiences "
-                    "ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
+                rows = (
+                    await conn.execute(
+                        "SELECT * FROM learned_experiences ORDER BY updated_at DESC LIMIT %s",
+                        (limit,),
+                    )
                 ).fetchall()
             items = []
             for row in rows:
@@ -1565,25 +1329,24 @@ class EvolutionStorage:
                     "evidence_refs",
                 ):
                     item[field] = json.loads(item.get(field) or "[]")
-                metrics = self._observation_metrics(conn, item["experience_id"])
+                metrics = await self._observation_metrics(conn, item["experience_id"])
                 item["observation_metrics"] = metrics
                 try:
-                    self._validate_observation(row)
+                    (self._validate_observation(row))
                     item["eligible_for_observation"] = True
                     item["observation_blocker"] = ""
                 except ValueError as exc:
                     item["eligible_for_observation"] = False
                     item["observation_blocker"] = str(exc)
                 try:
-                    self._validate_activation(row, metrics)
+                    (self._validate_activation(row, metrics))
                     item["eligible_for_activation"] = True
                     item["activation_blocker"] = ""
                 except ValueError as exc:
                     item["eligible_for_activation"] = False
                     item["activation_blocker"] = str(exc)
                 uses_observation_gate = (
-                    item["status"] == "candidate"
-                    and item["scope"] == "global"
+                    item["status"] == "candidate" and item["scope"] == "global"
                 )
                 item["publishable"] = (
                     item["eligible_for_observation"]
@@ -1598,9 +1361,9 @@ class EvolutionStorage:
                 items.append(item)
             return items
 
-        return self._execute(_do_list)
+        return await self._execute(_do_list)
 
-    def apply_experience_action(
+    async def apply_experience_action(
         self,
         experience_id: str,
         action: str,
@@ -1608,18 +1371,20 @@ class EvolutionStorage:
     ) -> bool:
         """执行观察、发布、驳回、重新应用、退役或删除动作。"""
 
-        def _do_set(conn: sqlite3.Connection):
-            row = conn.execute(
-                "SELECT * FROM learned_experiences WHERE experience_id = ?",
-                (experience_id,),
+        async def _do_set(conn: Connection):
+            row = (
+                await conn.execute(
+                    "SELECT * FROM learned_experiences WHERE experience_id = %s",
+                    (experience_id,),
+                )
             ).fetchone()
             if row is None:
                 return False
             if action == "delete":
                 if row["status"] != "rejected":
                     raise ValueError("仅已驳回的经验可以删除")
-                cursor = conn.execute(
-                    "DELETE FROM learned_experiences WHERE experience_id = ?",
+                cursor = await conn.execute(
+                    "DELETE FROM learned_experiences WHERE experience_id = %s",
                     (experience_id,),
                 )
                 return bool(cursor.rowcount)
@@ -1636,15 +1401,15 @@ class EvolutionStorage:
             if action == "observe":
                 if row["scope"] != "global" or row["status"] != "candidate":
                     raise ValueError("仅全局候选经验可以进入观察")
-                self._validate_observation(row)
+                (self._validate_observation(row))
             elif action == "activate":
                 if row["scope"] == "global":
                     if row["status"] != "observing":
                         raise ValueError("全局经验必须先完成观察")
-                    metrics = self._observation_metrics(conn, experience_id)
-                    self._validate_activation(row, metrics)
+                    metrics = await self._observation_metrics(conn, experience_id)
+                    (self._validate_activation(row, metrics))
                 else:
-                    self._validate_publication(row)
+                    (self._validate_publication(row))
             elif action == "reject" and row["status"] not in {
                 "candidate",
                 "retired",
@@ -1652,20 +1417,19 @@ class EvolutionStorage:
                 raise ValueError("仅待审核或已停用的经验可以驳回")
             elif action == "reapply" and row["status"] != "rejected":
                 raise ValueError("仅已驳回的经验可以重新应用")
-            cursor = conn.execute(
-                "UPDATE learned_experiences SET status = ?, updated_at = ? "
-                "WHERE experience_id = ?",
-                (target_status, datetime.now().isoformat(), experience_id),
+            cursor = await conn.execute(
+                "UPDATE learned_experiences SET status = %s, updated_at = %s WHERE experience_id = %s",
+                (target_status, datetime.now(timezone.utc).isoformat(), experience_id),
             )
             if not cursor.rowcount:
                 return False
             if target_status in {"active", "observing", "retired"}:
-                self._create_release(conn, action, operator_user_id)
+                (await self._create_release(conn, action, operator_user_id))
             return True
 
-        return self._execute(_do_set)
+        return await self._execute(_do_set)
 
-    def set_experience_status(
+    async def set_experience_status(
         self,
         experience_id: str,
         status: str,
@@ -1673,13 +1437,15 @@ class EvolutionStorage:
     ) -> bool:
         """兼容内部调用，并映射为明确治理动作。"""
 
-        row = self._execute(
-            lambda conn: conn.execute(
-                "SELECT scope, status FROM learned_experiences "
-                "WHERE experience_id = ?",
-                (experience_id,),
+        async def get_row(conn):
+            return (
+                await conn.execute(
+                    "SELECT scope, status FROM learned_experiences WHERE experience_id = %s",
+                    (experience_id,),
+                )
             ).fetchone()
-        )
+
+        row = await self._execute(get_row)
         if row is None:
             return False
         if status == "active" and row["scope"] == "global":
@@ -1690,19 +1456,20 @@ class EvolutionStorage:
                 "rejected": "reject",
                 "retired": "retire",
             }.get(status, status)
-        return self.apply_experience_action(
+        return await self.apply_experience_action(
             experience_id,
             action,
             operator_user_id,
         )
 
     @staticmethod
-    def _observation_metrics(
-        conn: sqlite3.Connection,
+    async def _observation_metrics(
+        conn: Connection,
         experience_id: str,
     ) -> Dict[str, Any]:
-        rows = conn.execute(
-            """
+        rows = (
+            await conn.execute(
+                """
             WITH latest AS (
                 SELECT assistant_message_id, MAX(created_at) AS created_at
                 FROM conversation_evaluations
@@ -1729,11 +1496,12 @@ class EvolutionStorage:
             LEFT JOIN conversation_feedback AS feedback
               ON feedback.assistant_message_id = exposures.assistant_message_id
              AND feedback.user_id = exposures.user_id
-            WHERE exposures.experience_id = ?
+            WHERE exposures.experience_id = %s
               AND exposures.bucket IN ('treatment', 'control')
             GROUP BY exposures.bucket
             """,
-            (experience_id,),
+                (experience_id,),
+            )
         ).fetchall()
         metrics = {
             "treatment": {
@@ -1768,17 +1536,17 @@ class EvolutionStorage:
         return metrics
 
     @staticmethod
-    def _validate_observation(row: sqlite3.Row) -> None:
-        EvolutionStorage._validate_publication(row)
+    def _validate_observation(row: dict[str, Any]) -> None:
+        (EvolutionStorage._validate_publication(row))
         if row["scope"] != "global":
             raise ValueError("仅全局经验需要观察")
 
     @staticmethod
     def _validate_activation(
-        row: sqlite3.Row,
+        row: dict[str, Any],
         metrics: Dict[str, Any],
     ) -> None:
-        EvolutionStorage._validate_publication(row)
+        (EvolutionStorage._validate_publication(row))
         if row["scope"] != "global":
             return
         treatment = metrics["treatment"]
@@ -1797,19 +1565,20 @@ class EvolutionStorage:
             raise ValueError("观察组得分显著低于对照组")
 
     @staticmethod
-    def _validate_publication(row: sqlite3.Row) -> None:
+    def _validate_publication(row: dict[str, Any]) -> None:
         """强制校验经验的发布证据与医疗安全边界。"""
         if row["conflict_count"] > 0:
             raise ValueError("存在冲突案例，不能发布")
         if row["negative_count"] > 0:
             raise ValueError("存在负面反馈，不能发布")
-        if row["scope"] == "global" and EvolutionStorage._row_has_personal_data(row):
+        if row["scope"] == "global" and (EvolutionStorage._row_has_personal_data(row)):
             raise ValueError("全局经验包含个人身份信息")
         evidence_refs = json.loads(row["evidence_refs"] or "[]")
         prerequisites = json.loads(row["prerequisites"] or "[]")
         settings = EvolutionSettings.from_env()
         trusted_evidence = [
-            evidence for evidence in evidence_refs
+            evidence
+            for evidence in evidence_refs
             if EvolutionStorage._is_trusted_evidence(evidence, settings)
         ]
         if row["experience_type"] == "medical_knowledge" and not trusted_evidence:
@@ -1826,7 +1595,7 @@ class EvolutionStorage:
                 expires_at = datetime.fromisoformat(row["expires_at"])
             except ValueError as exc:
                 raise ValueError("经验有效期格式错误") from exc
-            if expires_at <= datetime.now():
+            if expires_at <= datetime.now(timezone.utc):
                 raise ValueError("经验已经过期，必须重新认证")
         if row["scope"] == "private":
             if row["support_count"] < 2 or row["average_score"] < 85:
@@ -1837,8 +1606,7 @@ class EvolutionStorage:
             or row["distinct_users"] < settings.global_min_support
         ):
             raise ValueError(
-                "全局经验至少需 %d 个不同用户的支持案例"
-                % settings.global_min_support
+                "全局经验至少需 %d 个不同用户的支持案例" % settings.global_min_support
             )
         if row["average_score"] < 88:
             raise ValueError("全局经验平均得分不得低于 88")
@@ -1860,13 +1628,10 @@ class EvolutionStorage:
             return False
         parsed = urlparse(url)
         hostname = (parsed.hostname or "").lower()
-        return (
-            parsed.scheme == "https"
-            and hostname in settings.trusted_domains
-        )
+        return parsed.scheme == "https" and hostname in settings.trusted_domains
 
     @staticmethod
-    def _row_has_personal_data(row: sqlite3.Row) -> bool:
+    def _row_has_personal_data(row: dict[str, Any]) -> bool:
         fields = (
             "query_pattern",
             "content",
@@ -1883,116 +1648,123 @@ class EvolutionStorage:
             r"\b\d{17}[\dXx]\b",
             r"(?:姓名|称呼)\s*[：:]\s*[^，。\n]+",
         )
-        return any(re.search(pattern, text) for pattern in patterns)
+        return any((re.search(pattern, text)) for pattern in patterns)
 
     @staticmethod
-    def _create_release(
-        conn: sqlite3.Connection,
+    async def _create_release(
+        conn: Connection,
         action: str,
         operator_user_id: str,
     ) -> None:
-        row = conn.execute(
-            "SELECT MAX(version) AS version FROM strategy_releases"
+        row = (
+            await conn.execute("SELECT MAX(version) AS version FROM strategy_releases")
         ).fetchone()
         previous = row["version"] if row and row["version"] else None
         version = (previous or 0) + 1
-        active = conn.execute(
-            "SELECT experience_id, status FROM learned_experiences "
-            "WHERE status IN ('active', 'observing') ORDER BY experience_id"
+        active = (
+            await conn.execute(
+                "SELECT experience_id, status FROM learned_experiences "
+                "WHERE status IN ('active', 'observing') ORDER BY experience_id"
+            )
         ).fetchall()
-        conn.execute(
-            """
+        (
+            await conn.execute(
+                """
             INSERT INTO strategy_releases
                 (release_id, version, active_ids, previous_version,
                  action, operator_user_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (
-                str(uuid.uuid4()),
-                version,
-                json.dumps(
-                    {row["experience_id"]: row["status"] for row in active}
+                (
+                    str(uuid.uuid4()),
+                    version,
+                    json.dumps({row["experience_id"]: row["status"] for row in active}),
+                    previous,
+                    action,
+                    operator_user_id,
+                    datetime.now(timezone.utc).isoformat(),
                 ),
-                previous,
-                action,
-                operator_user_id,
-                datetime.now().isoformat(),
-            ),
+            )
         )
 
-    def list_releases(self, limit: int = 50) -> List[Dict[str, Any]]:
-        def _do_list(conn: sqlite3.Connection):
-            rows = conn.execute(
-                "SELECT * FROM strategy_releases "
-                "ORDER BY version DESC LIMIT ?",
-                (limit,),
+    async def list_releases(self, limit: int = 50) -> List[Dict[str, Any]]:
+        async def _do_list(conn: Connection):
+            rows = (
+                await conn.execute(
+                    "SELECT * FROM strategy_releases ORDER BY version DESC LIMIT %s",
+                    (limit,),
+                )
             ).fetchall()
             return [dict(row) for row in rows]
 
-        return self._execute(_do_list)
+        return await self._execute(_do_list)
 
-    def list_jobs(
+    async def list_jobs(
         self,
         limit: int = 100,
         status: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """按状态返回评审任务。"""
 
-        def _do_list(conn: sqlite3.Connection):
+        async def _do_list(conn: Connection):
             if status:
-                rows = conn.execute(
-                    "SELECT * FROM evaluation_jobs WHERE status = ? "
-                    "ORDER BY updated_at DESC LIMIT ?",
-                    (status, limit),
+                rows = (
+                    await conn.execute(
+                        "SELECT * FROM evaluation_jobs WHERE status = %s ORDER BY updated_at DESC LIMIT %s",
+                        (status, limit),
+                    )
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    "SELECT * FROM evaluation_jobs "
-                    "ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
+                rows = (
+                    await conn.execute(
+                        "SELECT * FROM evaluation_jobs ORDER BY updated_at DESC LIMIT %s",
+                        (limit,),
+                    )
                 ).fetchall()
             return [dict(row) for row in rows]
 
-        return self._execute(_do_list)
+        return await self._execute(_do_list)
 
-    def retry_job(self, job_id: str) -> bool:
+    async def retry_job(self, job_id: str) -> bool:
         """将失败任务重新加入队列。"""
 
-        def _do_retry(conn: sqlite3.Connection):
-            now = datetime.now().isoformat()
-            cursor = conn.execute(
+        async def _do_retry(conn: Connection):
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = await conn.execute(
                 """
                 UPDATE evaluation_jobs
-                SET status = 'pending', attempts = 0, scheduled_at = ?,
-                    lease_until = NULL, last_error = NULL, updated_at = ?
-                WHERE job_id = ? AND status = 'failed'
+                SET status = 'pending', attempts = 0, scheduled_at = %s,
+                    lease_until = NULL, last_error = NULL, updated_at = %s
+                WHERE job_id = %s AND status = 'failed'
                 """,
                 (now, now, job_id),
             )
             return bool(cursor.rowcount)
 
-        return self._execute(_do_retry)
+        return await self._execute(_do_retry)
 
-    def rollback_release(self, version: int, operator_user_id: str) -> bool:
-        def _do_rollback(conn: sqlite3.Connection):
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT active_ids FROM strategy_releases WHERE version = ?",
-                (version,),
+    async def rollback_release(self, version: int, operator_user_id: str) -> bool:
+        async def _do_rollback(conn: Connection):
+            row = (
+                await conn.execute(
+                    "SELECT active_ids FROM strategy_releases WHERE version = %s",
+                    (version,),
+                )
             ).fetchone()
             if row is None:
                 return False
             active_snapshot = json.loads(row["active_ids"])
             if isinstance(active_snapshot, list):
                 active_snapshot = {
-                    experience_id: "active"
-                    for experience_id in active_snapshot
+                    experience_id: "active" for experience_id in active_snapshot
                 }
             blockers = []
             for experience_id, status in active_snapshot.items():
-                experience = conn.execute(
-                    "SELECT * FROM learned_experiences WHERE experience_id = ?",
-                    (experience_id,),
+                experience = (
+                    await conn.execute(
+                        "SELECT * FROM learned_experiences WHERE experience_id = %s",
+                        (experience_id,),
+                    )
                 ).fetchone()
                 if experience is None:
                     blockers.append(
@@ -2004,10 +1776,10 @@ class EvolutionStorage:
                     continue
                 try:
                     if status == "active" and experience["scope"] == "global":
-                        metrics = self._observation_metrics(conn, experience_id)
-                        self._validate_activation(experience, metrics)
+                        metrics = await self._observation_metrics(conn, experience_id)
+                        (self._validate_activation(experience, metrics))
                     else:
-                        self._validate_publication(experience)
+                        (self._validate_publication(experience))
                 except ValueError as exc:
                     blockers.append(
                         {
@@ -2017,76 +1789,85 @@ class EvolutionStorage:
                     )
             if blockers:
                 raise RollbackBlockedError(blockers)
-            conn.execute(
-                "UPDATE learned_experiences SET status = 'retired' "
-                "WHERE status IN ('active', 'observing')"
+            (
+                await conn.execute(
+                    "UPDATE learned_experiences SET status = 'retired' "
+                    "WHERE status IN ('active', 'observing')"
+                )
             )
             for experience_id, status in active_snapshot.items():
-                conn.execute(
-                    "UPDATE learned_experiences SET status = ? "
-                    "WHERE experience_id = ?",
-                    (status, experience_id),
+                (
+                    await conn.execute(
+                        "UPDATE learned_experiences SET status = %s WHERE experience_id = %s",
+                        (status, experience_id),
+                    )
                 )
-            self._create_release(conn, f"rollback:{version}", operator_user_id)
+            (await self._create_release(conn, f"rollback:{version}", operator_user_id))
             return True
 
-        return self._execute(_do_rollback)
+        return await self._execute(_do_rollback)
 
-    def get_active_experiences(
+    async def get_active_experiences(
         self,
         user_id: str,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """返回当前用户可用的私有和全局经验。"""
 
-        def _do_get(conn: sqlite3.Connection):
-            now = datetime.now().isoformat()
-            cursor = conn.execute(
+        async def _do_get(conn: Connection):
+            now = datetime.now(timezone.utc).isoformat()
+            cursor = await conn.execute(
                 """
                 UPDATE learned_experiences
-                SET status = 'candidate', updated_at = ?
+                SET status = 'candidate', updated_at = %s
                 WHERE status IN ('active', 'observing')
-                  AND expires_at IS NOT NULL AND expires_at <= ?
+                  AND expires_at IS NOT NULL AND expires_at <= %s
                 """,
                 (now, now),
             )
             if cursor.rowcount:
-                self._create_release(conn, "auto_expire", "system")
+                (await self._create_release(conn, "auto_expire", "system"))
             sql = """
                 SELECT * FROM learned_experiences
                 WHERE status IN ('active', 'observing')
-                  AND (expires_at IS NULL OR expires_at > ?)
-                  AND (scope = 'global' OR owner_user_id = ?)
-                ORDER BY CASE WHEN owner_user_id = ? THEN 0 ELSE 1 END,
+                  AND (expires_at IS NULL OR expires_at > %s)
+                  AND (scope = 'global' OR owner_user_id = %s)
+                ORDER BY CASE WHEN owner_user_id = %s THEN 0 ELSE 1 END,
                          average_score DESC
             """
             params: List[Any] = [now, user_id, user_id]
             if limit is not None:
-                sql += " LIMIT ?"
+                sql += " LIMIT %s"
                 params.append(limit)
-            rows = conn.execute(sql, tuple(params)).fetchall()
+            rows = (await conn.execute(sql, tuple(params))).fetchall()
             return [dict(row) for row in rows]
 
-        return self._execute(_do_get)
+        return await self._execute(_do_get)
 
-    def overview(self) -> Dict[str, Any]:
-        def _do_overview(conn: sqlite3.Connection):
-            eval_row = conn.execute(
-                "SELECT COUNT(*) AS count, AVG(overall_score) AS average "
-                "FROM conversation_evaluations"
+    async def overview(self) -> Dict[str, Any]:
+        async def _do_overview(conn: Connection):
+            eval_row = (
+                await conn.execute(
+                    "SELECT COUNT(*) AS count, AVG(overall_score) AS average "
+                    "FROM conversation_evaluations"
+                )
             ).fetchone()
-            job_rows = conn.execute(
-                "SELECT status, COUNT(*) AS count FROM evaluation_jobs "
-                "GROUP BY status"
+            job_rows = (
+                await conn.execute(
+                    "SELECT status, COUNT(*) AS count FROM evaluation_jobs "
+                    "GROUP BY status"
+                )
             ).fetchall()
             job_counts = {row["status"]: row["count"] for row in job_rows}
-            exposure_rows = conn.execute(
-                """
+            exposure_rows = (
+                await conn.execute(
+                    """
                 SELECT bucket, COUNT(*) AS count,
                        COUNT(DISTINCT user_id) AS distinct_users
                 FROM experience_exposures
                 GROUP BY bucket
                 """
+                )
             ).fetchall()
             exposure_counts = {
                 row["bucket"]: {
@@ -2098,20 +1879,26 @@ class EvolutionStorage:
             return {
                 "evaluation_count": eval_row["count"],
                 "average_score": round(eval_row["average"] or 0, 2),
-                "failure_count": conn.execute(
-                    "SELECT COUNT(*) AS count FROM failure_cases"
+                "failure_count": (
+                    await conn.execute("SELECT COUNT(*) AS count FROM failure_cases")
                 ).fetchone()["count"],
-                "candidate_count": conn.execute(
-                    "SELECT COUNT(*) AS count FROM learned_experiences "
-                    "WHERE status = 'candidate'"
+                "candidate_count": (
+                    await conn.execute(
+                        "SELECT COUNT(*) AS count FROM learned_experiences "
+                        "WHERE status = 'candidate'"
+                    )
                 ).fetchone()["count"],
-                "active_count": conn.execute(
-                    "SELECT COUNT(*) AS count FROM learned_experiences "
-                    "WHERE status = 'active'"
+                "active_count": (
+                    await conn.execute(
+                        "SELECT COUNT(*) AS count FROM learned_experiences "
+                        "WHERE status = 'active'"
+                    )
                 ).fetchone()["count"],
-                "observing_count": conn.execute(
-                    "SELECT COUNT(*) AS count FROM learned_experiences "
-                    "WHERE status = 'observing'"
+                "observing_count": (
+                    await conn.execute(
+                        "SELECT COUNT(*) AS count FROM learned_experiences "
+                        "WHERE status = 'observing'"
+                    )
                 ).fetchone()["count"],
                 "job_counts": {
                     status: job_counts.get(status, 0)
@@ -2126,4 +1913,4 @@ class EvolutionStorage:
                 "exposure_counts": exposure_counts,
             }
 
-        return self._execute(_do_overview)
+        return await self._execute(_do_overview)

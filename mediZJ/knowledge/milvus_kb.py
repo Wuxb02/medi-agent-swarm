@@ -10,19 +10,23 @@
 
 兼容性：search() 签名与返回值结构保持不变，所有 Skill 无需改动
 """
+
+import asyncio
 import json
 import math
 import threading
 from contextlib import contextmanager
 from functools import wraps
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from pymilvus import (
-    MilvusClient, DataType,
-    AnnSearchRequest, RRFRanker,
-    Function, FunctionType,
+    MilvusClient,
+    DataType,
+    AnnSearchRequest,
+    RRFRanker,
+    Function,
+    FunctionType,
 )
 from mediZJ.knowledge.entity_index import MedicalEntityIndex
 from mediZJ.knowledge.catalog import KnowledgeCatalog
@@ -33,16 +37,19 @@ COLLECTION_NAME = "medical_knowledge_v2"
 
 def _serialized(func):
     """串行化 Milvus 客户端调用（pymilvus 对本地文件型客户端无线程安全保证）"""
+
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         with self._client_lock:
             return func(self, *args, **kwargs)
+
     return wrapper
 
 
 # ---- Trace 集成（可选）----
 try:
     from trace import traced_span, SpanType, ToolAttributes as TraceToolAttrs
+
     _TRACE_AVAILABLE = True
 except ImportError:
     _TRACE_AVAILABLE = False
@@ -68,22 +75,24 @@ class MedicalKnowledgeBase:
 
     def __init__(
         self,
-        db_path: str = None,
-        collection_name: str = COLLECTION_NAME,
-        embedding_model: str = "BAAI/bge-small-zh-v1.5",
+        collection_name: str | None = None,
+        embedding_model: str = None,
+        initialize: bool = False,
     ):
-        if db_path is None:
-            import os
-            db_path = os.path.join(os.path.dirname(__file__), "data", "milvus_lite.db")
         if hasattr(self, "_initialized"):
             return
+        from mediZJ.infrastructure.settings import get_settings
 
-        self.db_path = db_path
+        settings = get_settings()
+        collection_name = collection_name or settings.knowledge_collection
         self.collection_name = collection_name
 
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-
         # ---- Embedding 模型（进程内共享缓存实例） ----
+        if (
+            embedding_model is not None
+            and embedding_model != settings.embedding_model_name
+        ):
+            raise ValueError("禁止更换固定 embedding 模型")
         self.embedding_model = load_embedding_model(embedding_model)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         logger.info(f"Embedding model loaded (dimension={self.embedding_dim})")
@@ -91,22 +100,34 @@ class MedicalKnowledgeBase:
         # ---- Milvus Client ----
         # pymilvus 客户端调用串行化锁（需在 _create_collection 前初始化）
         self._client_lock = threading.RLock()
-        logger.info(f"Connecting to Milvus Lite: {db_path}")
-        self.milvus_client = MilvusClient(db_path)
+        self.milvus_client = MilvusClient(
+            uri=settings.milvus_uri, token=settings.milvus_token
+        )
 
-        # ---- 创建 Collection ----
         if not self.milvus_client.has_collection(collection_name):
-            logger.info(f"Creating collection: {collection_name}")
+            if not initialize:
+                raise RuntimeError("知识 collection 不存在，请先执行 bootstrap")
             self._create_collection()
+        from mediZJ.infrastructure.vector_schema import validate_collection
+
+        validate_collection(
+            self.milvus_client.describe_collection(collection_name),
+            {
+                "id": DataType.VARCHAR,
+                "doc_id": DataType.VARCHAR,
+                "doc_type": DataType.VARCHAR,
+                "chunk_id": DataType.INT64,
+                "total_chunks": DataType.INT64,
+                "text": DataType.VARCHAR,
+                "dense_vector": DataType.FLOAT_VECTOR,
+                "sparse_vector": DataType.SPARSE_FLOAT_VECTOR,
+            },
+            self.embedding_dim,
+        )
 
         # ---- Entity Index ----
         self.entity_index = MedicalEntityIndex()
         self._build_entity_index()
-
-        # 幂等登记旧库，使所有检索入口共用 active 事实边界。
-        catalog = KnowledgeCatalog()
-        for document in self.list_documents():
-            catalog.register_legacy(document)
 
         self._initialized = True
 
@@ -116,11 +137,15 @@ class MedicalKnowledgeBase:
 
     def _create_collection(self):
         """创建内置中文分词与 BM25 Function 的显式 Schema"""
+        from mediZJ.infrastructure.vector_schema import SCHEMA_DESCRIPTION
+
         schema = MilvusClient.create_schema(
-            auto_id=True, enable_dynamic_field=True,
+            auto_id=False,
+            enable_dynamic_field=True,
+            description=SCHEMA_DESCRIPTION,
         )
 
-        schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
+        schema.add_field("id", DataType.VARCHAR, max_length=256, is_primary=True)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=256)
         schema.add_field("doc_type", DataType.VARCHAR, max_length=64)
         schema.add_field("chunk_id", DataType.INT64)
@@ -128,8 +153,11 @@ class MedicalKnowledgeBase:
 
         # 为原始文本添加内置中文 Jieba 分析器
         schema.add_field(
-            "text", DataType.VARCHAR, max_length=65535,
-            analyzer_params={"type": "chinese"}
+            "text",
+            DataType.VARCHAR,
+            max_length=65535,
+            enable_analyzer=True,
+            analyzer_params={"type": "chinese"},
         )
 
         schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=self.embedding_dim)
@@ -141,7 +169,7 @@ class MedicalKnowledgeBase:
             name="text_bm25_emb",
             function_type=FunctionType.BM25,
             input_field_names=["text"],
-            output_field_names=["sparse_vector"]
+            output_field_names=["sparse_vector"],
         )
         schema.add_function(bm25_fn)
 
@@ -150,28 +178,35 @@ class MedicalKnowledgeBase:
 
         # 将 metric_type 改为标准的 BM25 评分机制
         index_params.add_index(
-            "sparse_vector", index_type="SPARSE_INVERTED_INDEX", metric_type="BM25",
+            "sparse_vector",
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="BM25",
         )
+
+        from mediZJ.infrastructure.vector_schema import SCHEMA_DESCRIPTION
 
         self.milvus_client.create_collection(
             collection_name=self.collection_name,
+            description=SCHEMA_DESCRIPTION,
             schema=schema,
             index_params=index_params,
         )
-        logger.info("Collection created successfully with native Chinese BM25 Function.")
+        logger.info(
+            "Collection created successfully with native Chinese BM25 Function."
+        )
 
     def _build_entity_index(self):
         """从当前 collection 的文档文本构建实体倒排索引"""
         try:
             rows = self.milvus_client.query(
                 collection_name=self.collection_name,
-                filter="id >= 0",
+                filter='id != ""',
                 output_fields=["doc_id", "document_id", "text"],
                 limit=16384,
             )
         except Exception as e:
-            logger.warning(f"Failed to query docs for entity index: {e}")
-            return
+            logger.error("知识实体索引初始化失败: {}", type(e).__name__)
+            raise
 
         if not rows:
             return
@@ -211,7 +246,8 @@ class MedicalKnowledgeBase:
             self.entity_index.remove_document(document_id)
             return
         self.entity_index.add_document(
-            document_id, "\n".join(row.get("text", "") for row in rows),
+            document_id,
+            "\n".join(row.get("text", "") for row in rows),
         )
 
     @staticmethod
@@ -233,7 +269,9 @@ class MedicalKnowledgeBase:
 
     @_serialized
     def add_documents(
-        self, documents: List[Dict[str, Any]], chunk_size: int = 1024,
+        self,
+        documents: List[Dict[str, Any]],
+        chunk_size: int = 1024,
     ) -> int:
         """
         添加文档到知识库（分块 + 稠密向量化 + 插入）。
@@ -254,21 +292,23 @@ class MedicalKnowledgeBase:
             chunks = self._chunk_text(doc["content"], chunk_size=chunk_size)
             meta = doc.get("metadata", {})
             for i, chunk in enumerate(chunks):
-                all_chunks.append({
-                    "doc_id": doc["id"],
-                    "document_id": meta.get("document_id", doc["id"]),
-                    "version_id": meta.get("version_id", doc["id"]),
-                    "document_version": str(meta.get("document_version", "1")),
-                    "chunk_uid": f"{meta.get('version_id', doc['id'])}:{i}",
-                    "doc_type": meta.get("type", ""),
-                    "chunk_id": i,
-                    "total_chunks": len(chunks),
-                    "text": chunk,
-                    "disease": meta.get("disease", ""),
-                    "source": meta.get("source", ""),
-                    "filename": meta.get("filename", ""),
-                    "content_hash": meta.get("content_hash", ""),
-                })
+                all_chunks.append(
+                    {
+                        "doc_id": doc["id"],
+                        "document_id": meta.get("document_id", doc["id"]),
+                        "version_id": meta.get("version_id", doc["id"]),
+                        "document_version": str(meta.get("document_version", "1")),
+                        "chunk_uid": f"{meta.get('version_id', doc['id'])}:{i}",
+                        "doc_type": meta.get("type", ""),
+                        "chunk_id": i,
+                        "total_chunks": len(chunks),
+                        "text": chunk,
+                        "disease": meta.get("disease", ""),
+                        "source": meta.get("source", ""),
+                        "filename": meta.get("filename", ""),
+                        "content_hash": meta.get("content_hash", ""),
+                    }
+                )
 
         logger.info(f"Split into {len(all_chunks)} chunks")
 
@@ -280,6 +320,7 @@ class MedicalKnowledgeBase:
         data: List[Dict[str, Any]] = []
         for i, chunk in enumerate(all_chunks):
             entry: Dict[str, Any] = {
+                "id": chunk["chunk_uid"],
                 "doc_id": chunk["doc_id"],
                 "document_id": chunk["document_id"],
                 "version_id": chunk["version_id"],
@@ -298,7 +339,7 @@ class MedicalKnowledgeBase:
             }
             data.append(entry)
 
-        self.milvus_client.insert(self.collection_name, data)
+        self.milvus_client.upsert(self.collection_name, data)
         logger.info(f"Successfully added {len(data)} chunks")
 
         # 完全删除了原来庞大的库内 query 全量拉取并 fit/save 离线 pkl 的代码，彻底根治延迟高/崩溃隐患
@@ -321,7 +362,8 @@ class MedicalKnowledgeBase:
     ) -> List[Dict[str, Any]]:
         """Path 1+2: Dense + BM25 混合检索（Milvus RRF）"""
         query_vector = self.embedding_model.encode(
-            [query], normalize_embeddings=True,
+            [query],
+            normalize_embeddings=True,
         )[0]
 
         dense_req = AnnSearchRequest(
@@ -334,7 +376,9 @@ class MedicalKnowledgeBase:
 
         # 不再调用客户端编码，直接传中文原始文本字符串
         sparse_req = AnnSearchRequest(
-            data=[query],  # 传入原始文本，Milvus 在服务端对其执行 chinese analyzer 分词并利用索引完成检索评分
+            data=[
+                query
+            ],  # 传入原始文本，Milvus 在服务端对其执行 chinese analyzer 分词并利用索引完成检索评分
             anns_field="sparse_vector",
             param={"metric_type": "BM25"},  # 指明评分度量为标准的 BM25 算法
             limit=top_k * 3,
@@ -343,14 +387,25 @@ class MedicalKnowledgeBase:
 
         results = self.milvus_client.hybrid_search(
             collection_name=self.collection_name,
+            consistency_level="Strong",
             reqs=[dense_req, sparse_req],
             ranker=RRFRanker(k=60),
             limit=top_k * 3,
             output_fields=[
-                "id", "doc_id", "doc_type", "chunk_id",
-                "total_chunks", "text", "document_id", "version_id",
-                "document_version", "chunk_uid", "disease", "source",
-                "filename", "content_hash",
+                "id",
+                "doc_id",
+                "doc_type",
+                "chunk_id",
+                "total_chunks",
+                "text",
+                "document_id",
+                "version_id",
+                "document_version",
+                "chunk_uid",
+                "disease",
+                "source",
+                "filename",
+                "content_hash",
             ],
         )
 
@@ -365,7 +420,7 @@ class MedicalKnowledgeBase:
         return results[0]
 
     @_serialized
-    def search(
+    async def search(
         self,
         query: str,
         top_k: int = 5,
@@ -383,39 +438,51 @@ class MedicalKnowledgeBase:
             文档列表，每个文档含 ``id``, ``content``, ``metadata``, ``score``
         """
         logger.debug(
-            f"Hybrid search: query={query[:80]} top_k={top_k} "
-            f"filter_type={filter_type}"
+            f"Hybrid search: query={query[:80]} top_k={top_k} filter_type={filter_type}"
         )
 
-        _ctx = traced_span(SpanType.TOOL, name="knowledge_search") if _TRACE_AVAILABLE else _noop_ctx()
+        _ctx = (
+            traced_span(SpanType.TOOL, name="knowledge_search")
+            if _TRACE_AVAILABLE
+            else _noop_ctx()
+        )
         with _ctx as t:
             if t and TraceToolAttrs:
                 t.tool_attrs = TraceToolAttrs(
                     tool_name="knowledge_search",
-                    arguments={"query": query[:200], "top_k": top_k, "filter_type": filter_type},
+                    arguments={
+                        "query": query[:200],
+                        "top_k": top_k,
+                        "filter_type": filter_type,
+                    },
                 )
 
             # Step 1: 实体加权（Path 3）
             entity_boost = self.entity_index.search(query)
 
             # Step 2: Dense + BM25 混合检索（Path 1+2）
-            filter_expr = (
-                f'doc_type == "{filter_type}"' if filter_type else None
-            )
+            filter_expr = f'doc_type == "{filter_type}"' if filter_type else None
             try:
-                hits = self._hybrid_search(query, top_k, filter_expr)
+                hits = await asyncio.to_thread(
+                    self._hybrid_search, query, top_k, filter_expr
+                )
             except Exception as e:
-                logger.error(f"Hybrid search failed: {e}")
+                logger.error(f"Hybrid search failed: {type(e).__name__}")
                 if t:
-                    t.tool_attrs.result_summary = json.dumps({"error": str(e)}, ensure_ascii=False)
+                    t.tool_attrs.result_summary = json.dumps(
+                        {"error": str(e)}, ensure_ascii=False
+                    )
                 return []
 
             catalog = KnowledgeCatalog()
             hits = [
-                hit for hit in hits
-                if catalog.active_by_version(
-                    hit.get("entity", {}).get("version_id")
-                    or hit.get("entity", {}).get("doc_id", "")
+                hit
+                for hit in hits
+                if (
+                    await catalog.active_by_version(
+                        hit.get("entity", {}).get("version_id")
+                        or hit.get("entity", {}).get("doc_id", "")
+                    )
                 )
             ]
 
@@ -426,7 +493,9 @@ class MedicalKnowledgeBase:
             # 由于内置 RRF 返回的最终得分可能已被归一化（0~1范围）或为经典 RRF 倒数和，
             # 为保证在混合搜索召回时分值稳定不溢出崩溃，引入最大距离动态截断保护
             max_raw_score = max([h.get("distance", 0.0) for h in hits]) if hits else 0.0
-            normalization_factor = max_raw_score if max_raw_score > 0 else (2.0 / (RRF_K + 1))
+            normalization_factor = (
+                max_raw_score if max_raw_score > 0 else (2.0 / (RRF_K + 1))
+            )
 
             scoring_detail = []
             for hit in hits:
@@ -439,18 +508,24 @@ class MedicalKnowledgeBase:
 
                 raw_rrf = hit.get("distance", 0.0)
                 # 进行比例归一化缩放
-                normalized_rrf = raw_rrf / normalization_factor if normalization_factor > 0 else raw_rrf
+                normalized_rrf = (
+                    raw_rrf / normalization_factor
+                    if normalization_factor > 0
+                    else raw_rrf
+                )
                 bonus = entity_boost.get(document_id, 0.0) * ENTITY_BONUS_COEFFICIENT
 
                 # 融合最终得分
                 hit["final_score"] = min(normalized_rrf + bonus, 1.0)
-                scoring_detail.append({
-                    "doc_id": document_id,
-                    "raw_rrf": round(raw_rrf, 6),
-                    "normalized_rrf": round(normalized_rrf, 4),
-                    "entity_bonus": round(bonus, 4),
-                    "final_score": round(hit["final_score"], 4),
-                })
+                scoring_detail.append(
+                    {
+                        "doc_id": document_id,
+                        "raw_rrf": round(raw_rrf, 6),
+                        "normalized_rrf": round(normalized_rrf, 4),
+                        "entity_bonus": round(bonus, 4),
+                        "final_score": round(hit["final_score"], 4),
+                    }
+                )
 
             # Step 4: 按 final_score 重排
             hits.sort(key=lambda h: h["final_score"], reverse=True)
@@ -470,12 +545,16 @@ class MedicalKnowledgeBase:
                             "doc_id": doc_id,
                             "physical_doc_id": hit.get("_physical_doc_id", doc_id),
                             "version_id": hit.get("entity", {}).get("version_id", ""),
-                            "document_version": hit.get("entity", {}).get("document_version", ""),
+                            "document_version": hit.get("entity", {}).get(
+                                "document_version", ""
+                            ),
                             "chunk_uid": hit.get("entity", {}).get("chunk_uid", ""),
                             "disease": hit.get("entity", {}).get("disease", ""),
                             "source": hit.get("entity", {}).get("source", ""),
                             "filename": hit.get("entity", {}).get("filename", ""),
-                            "content_hash": hit.get("entity", {}).get("content_hash", ""),
+                            "content_hash": hit.get("entity", {}).get(
+                                "content_hash", ""
+                            ),
                             "type": hit.get("entity", {}).get("doc_type", ""),
                         },
                         "score": round(score, 4),
@@ -483,7 +562,9 @@ class MedicalKnowledgeBase:
 
             # Step 6: 按分数排序，取 top_k
             top_docs = sorted(
-                seen_docs.values(), key=lambda d: d["score"], reverse=True,
+                seen_docs.values(),
+                key=lambda d: d["score"],
+                reverse=True,
             )[:top_k]
 
             # Step 7: 还原完整文档内容（拼接所有 chunk），补充完整 metadata
@@ -493,25 +574,30 @@ class MedicalKnowledgeBase:
                     physical_id = doc["metadata"].get("physical_doc_id", doc_id)
                     full_chunks = self.get_document_chunks(physical_id)
                     if full_chunks:
-                        doc["content"] = "\n".join(
-                            c["content"] for c in full_chunks
-                        )
+                        doc["content"] = "\n".join(c["content"] for c in full_chunks)
                         if full_chunks:
                             first_meta = full_chunks[0].get("metadata", {})
                             doc["metadata"] = first_meta
 
             # 回填 trace 监控指标
             if t:
-                t.tool_attrs.result_summary = json.dumps({
-                    "paths": ["dense_vector(IP)", "native_bm25_sparse", "entity_exact_match"],
-                    "rrf_k": RRF_K,
-                    "entity_bonus_coefficient": ENTITY_BONUS_COEFFICIENT,
-                    "entity_boost_matches": len(entity_boost),
-                    "raw_candidates": len(hits),
-                    "scoring_top5": scoring_detail[:5],
-                    "final_count": len(top_docs),
-                    "top_score": top_docs[0]["score"] if top_docs else 0,
-                }, ensure_ascii=False)
+                t.tool_attrs.result_summary = json.dumps(
+                    {
+                        "paths": [
+                            "dense_vector(IP)",
+                            "native_bm25_sparse",
+                            "entity_exact_match",
+                        ],
+                        "rrf_k": RRF_K,
+                        "entity_bonus_coefficient": ENTITY_BONUS_COEFFICIENT,
+                        "entity_boost_matches": len(entity_boost),
+                        "raw_candidates": len(hits),
+                        "scoring_top5": scoring_detail[:5],
+                        "final_count": len(top_docs),
+                        "top_score": top_docs[0]["score"] if top_docs else 0,
+                    },
+                    ensure_ascii=False,
+                )
                 t.tool_attrs.success = len(top_docs) > 0
 
             logger.debug(f"Found {len(top_docs)} unique documents")
@@ -535,7 +621,7 @@ class MedicalKnowledgeBase:
         try:
             return len(self.list_documents())
         except Exception as e:
-            logger.warning(f"Failed to count documents: {e}")
+            logger.warning(f"Failed to count documents: {type(e).__name__}")
             return 0
 
     @_serialized
@@ -544,13 +630,19 @@ class MedicalKnowledgeBase:
         try:
             all_rows = self.milvus_client.query(
                 collection_name=self.collection_name,
-                filter="id >= 0",
-                output_fields=["doc_id", "doc_type", "disease", "source",
-                               "filename", "chunk_id"],
+                filter='id != ""',
+                output_fields=[
+                    "doc_id",
+                    "doc_type",
+                    "disease",
+                    "source",
+                    "filename",
+                    "chunk_id",
+                ],
                 limit=16384,
             )
         except Exception as e:
-            logger.error(f"Failed to list documents: {e}")
+            logger.error(f"Failed to list documents: {type(e).__name__}")
             return []
 
         docs: Dict[str, Dict[str, Any]] = {}
@@ -599,18 +691,28 @@ class MedicalKnowledgeBase:
         try:
             rows = self.milvus_client.query(
                 collection_name=self.collection_name,
+                consistency_level="Strong",
                 filter=filter_expr,
                 output_fields=[
-                    "id", "chunk_id", "total_chunks", "text",
-                    "doc_type", "disease", "source", "filename",
-                    "content_hash", "document_id", "version_id",
-                    "document_version", "chunk_uid",
+                    "id",
+                    "chunk_id",
+                    "total_chunks",
+                    "text",
+                    "doc_type",
+                    "disease",
+                    "source",
+                    "filename",
+                    "content_hash",
+                    "document_id",
+                    "version_id",
+                    "document_version",
+                    "chunk_uid",
                 ],
                 limit=16384,
             )
         except Exception as e:
-            logger.error(f"Failed to get chunks for {doc_id}: {e}")
-            return []
+            logger.error("知识分块查询失败: {}", type(e).__name__)
+            raise
 
         chunks = []
         seen_chunk_ids: set = set()
@@ -619,26 +721,28 @@ class MedicalKnowledgeBase:
             if chunk_id in seen_chunk_ids:
                 continue
             seen_chunk_ids.add(chunk_id)
-            chunks.append({
-                "milvus_id": row["id"],
-                "chunk_id": chunk_id,
-                "content": row.get("text", ""),
-                "total_chunks": row.get("total_chunks", 0),
-                "metadata": {
-                    "doc_id": doc_id,
-                    "document_id": row.get("document_id") or doc_id,
-                    "version_id": row.get("version_id") or doc_id,
-                    "document_version": row.get("document_version", "1"),
-                    "chunk_uid": row.get("chunk_uid") or f"{doc_id}:{chunk_id}",
-                    "type": row.get("doc_type", ""),
-                    "disease": row.get("disease", ""),
-                    "source": row.get("source", ""),
-                    "filename": row.get("filename", ""),
-                    "content_hash": row.get("content_hash", ""),
+            chunks.append(
+                {
+                    "milvus_id": row["id"],
                     "chunk_id": chunk_id,
+                    "content": row.get("text", ""),
                     "total_chunks": row.get("total_chunks", 0),
-                },
-            })
+                    "metadata": {
+                        "doc_id": doc_id,
+                        "document_id": row.get("document_id") or doc_id,
+                        "version_id": row.get("version_id") or doc_id,
+                        "document_version": row.get("document_version", "1"),
+                        "chunk_uid": row.get("chunk_uid") or f"{doc_id}:{chunk_id}",
+                        "type": row.get("doc_type", ""),
+                        "disease": row.get("disease", ""),
+                        "source": row.get("source", ""),
+                        "filename": row.get("filename", ""),
+                        "content_hash": row.get("content_hash", ""),
+                        "chunk_id": chunk_id,
+                        "total_chunks": row.get("total_chunks", 0),
+                    },
+                }
+            )
 
         chunks.sort(key=lambda c: c["chunk_id"])
         return chunks
@@ -660,8 +764,8 @@ class MedicalKnowledgeBase:
             )
             logger.info(f"Deleted {len(chunks)} chunks for doc_id={doc_id}")
         except Exception as e:
-            logger.error(f"Failed to delete document {doc_id}: {e}")
-            return 0
+            logger.error("知识向量删除失败: {}", type(e).__name__)
+            raise
 
         # 同步更新实体索引（按逻辑文档重建，同一逻辑文档可能还有其它版本）
         self._index_document(document_id)

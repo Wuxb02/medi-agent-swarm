@@ -8,6 +8,7 @@
 """
 
 from unittest.mock import AsyncMock, MagicMock
+from langgraph.checkpoint.memory import InMemorySaver
 
 import pytest
 
@@ -21,10 +22,14 @@ def _make_worker(agent_id: str):
     worker = MagicMock()
     worker.agent_id = agent_id
     worker.config = {"max_iterations": 3, "temperature": 0.7}
-    worker.short_term_memory = type("STM", (), {
-        "get_history": AsyncMock(return_value=[]),
-        "add_message": AsyncMock(return_value=None),
-    })()
+    worker.short_term_memory = type(
+        "STM",
+        (),
+        {
+            "get_history": AsyncMock(return_value=[]),
+            "add_message": AsyncMock(return_value=None),
+        },
+    )()
     worker.user_context = None
     worker.on_thinking = None
     worker.on_tool_step = None
@@ -33,6 +38,7 @@ def _make_worker(agent_id: str):
 
     # LLM：流式/非流式均返回最终回答（无工具调用）
     from mediZJ.core.llm_client import LLMResponse
+
     final_response = LLMResponse(
         content="根据您的描述，建议尽快就医。",
         tool_calls=[],
@@ -57,18 +63,26 @@ def _make_coordinator(questionnaire_manager, lead_llm_response):
     coordinator.questionnaire_manager = questionnaire_manager
 
     # 记忆 / 档案
-    coordinator.short_term_memory = type("STM", (), {
-        "get_recent_messages": AsyncMock(return_value=[]),
-        "add_message": AsyncMock(return_value=None),
-        "merge_sub_session": MagicMock(),
-    })()
-    coordinator.long_term_memory = type("LTM", (), {
-        "search_similar_sessions": AsyncMock(return_value=[]),
-    })()
+    coordinator.short_term_memory = type(
+        "STM",
+        (),
+        {
+            "get_recent_messages": AsyncMock(return_value=[]),
+            "add_message": AsyncMock(return_value=None),
+            "merge_sub_session": AsyncMock(),
+        },
+    )()
+    coordinator.long_term_memory = type(
+        "LTM",
+        (),
+        {
+            "search_similar_sessions": AsyncMock(return_value=[]),
+        },
+    )()
     coordinator.personal_profile = type("PP", (), {"to_text": lambda self: "暂无"})()
     coordinator._refresh_worker_profiles = lambda *args, **kwargs: None
     coordinator._save_long_term_memory = AsyncMock(return_value=None)
-    coordinator._save_session_summary = MagicMock()
+    coordinator._save_session_summary = AsyncMock()
     coordinator.format_references_section = MagicMock(return_value="")
     coordinator.extract_suggestions = MagicMock(return_value=[])
 
@@ -88,24 +102,43 @@ def _make_coordinator(questionnaire_manager, lead_llm_response):
     else:
         llm_client.chat_with_tools = AsyncMock(return_value=lead_llm_response)
         llm_client.chat_with_tools_stream = AsyncMock(return_value=lead_llm_response)
-    coordinator.lead_agent = type("LA", (), {
-        "agent_id": "lead_agent",
-        "llm_client": llm_client,
-        "_get_clarify_system_prompt": lambda self: "clarify system prompt",
-        "assess_and_decompose": AsyncMock(return_value={
-            "subtasks": [{"description": "回答用户问题",
-                          "assigned_agent": "consultation_agent"}],
-        }),
-        "set_on_thinking": lambda *a, **k: None,
-        "set_on_thinking_done": lambda *a, **k: None,
-    })()
+    coordinator.lead_agent = type(
+        "LA",
+        (),
+        {
+            "agent_id": "lead_agent",
+            "llm_client": llm_client,
+            "_get_clarify_system_prompt": lambda self: "clarify system prompt",
+            "assess_and_decompose": AsyncMock(
+                return_value={
+                    "subtasks": [
+                        {
+                            "description": "回答用户问题",
+                            "assigned_agent": "consultation_agent",
+                        }
+                    ],
+                }
+            ),
+            "set_on_thinking": lambda *a, **k: None,
+            "set_on_thinking_done": lambda *a, **k: None,
+        },
+    )()
 
     # 意图分类
-    coordinator.intent_classifier = type("IC", (), {
-        "classify": AsyncMock(return_value=IntentResult(
-            intent="medical", confidence=0.9, source="llm", reason="test",
-        )),
-    })()
+    coordinator.intent_classifier = type(
+        "IC",
+        (),
+        {
+            "classify": AsyncMock(
+                return_value=IntentResult(
+                    intent="medical",
+                    confidence=0.9,
+                    source="llm",
+                    reason="test",
+                )
+            ),
+        },
+    )()
     return coordinator
 
 
@@ -113,15 +146,19 @@ def _questionnaire_response():
     """LeadAgent clarify LLM 返回 question_for_user 工具调用"""
     return LLMResponse(
         content=None,
-        tool_calls=[ToolCall(
-            id="call_q1",
-            name="question_for_user",
-            arguments={"questionnaire": (
-                "<questions>"
-                "<question header='年龄' type='input'><text>您的年龄是？</text></question>"
-                "</questions>"
-            )},
-        )],
+        tool_calls=[
+            ToolCall(
+                id="call_q1",
+                name="question_for_user",
+                arguments={
+                    "questionnaire": (
+                        "<questions>"
+                        "<question header='年龄' type='input'><text>您的年龄是？</text></question>"
+                        "</questions>"
+                    )
+                },
+            )
+        ],
         finish_reason="tool_calls",
     )
 
@@ -142,9 +179,6 @@ class TestClarifyInterrupt:
     async def test_clarify_interrupts_and_resumes(self):
         """含 questionnaire_manager 的图：clarify 发出问卷后 interrupt 挂起；
         Command(resume) 恢复后 collected_info 注入 assess_decompose。"""
-        from mediZJ.api.services.session_runtime import (
-            clear_answer_queue, release_runtime,
-        )
 
         manager = MagicMock()
         # 第一轮发问卷，resume 后第二轮判定无需澄清 → 结束澄清
@@ -155,8 +189,13 @@ class TestClarifyInterrupt:
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-clarify"}}
 
         # 首次执行：clarify_ask 节点 interrupt 挂起
@@ -175,6 +214,7 @@ class TestClarifyInterrupt:
 
         # Command(resume=...) 恢复：用户提交答案
         from langgraph.types import Command
+
         resumed = await graph.ainvoke(Command(resume={"q0": "35"}), config)
 
         # 恢复后图继续执行：assess_and_decompose 收到 collected_info
@@ -184,18 +224,11 @@ class TestClarifyInterrupt:
         assert "35" in context.get("collected_info", "")
         assert resumed.get("final_answer") is not None
 
-        clear_answer_queue("s-clarify")
-        release_runtime("s-clarify")
-
     @pytest.mark.asyncio
     async def test_clarify_emits_lead_reasoning_and_questionnaire_tool_steps(self):
         """流式澄清应输出 LeadAgent 思考、问卷等待与已回答状态。"""
         from langgraph.types import Command
 
-        from mediZJ.api.services.session_runtime import (
-            clear_answer_queue,
-            release_runtime,
-        )
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
 
         events = []
@@ -205,11 +238,12 @@ class TestClarifyInterrupt:
         )
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
-        graph = build_supervisor_graph(
+        graph = await build_supervisor_graph(
             coordinator,
             tool_registry=registry,
             event_callback=events.append,
             hitl_enabled=True,
+            checkpointer=InMemorySaver(),
         )
         config = {"configurable": {"thread_id": "s-clarify-events"}}
 
@@ -221,12 +255,14 @@ class TestClarifyInterrupt:
         await graph.ainvoke(Command(resume={"q0": "35"}), config)
 
         clarify_thinking = [
-            event for event in events
+            event
+            for event in events
             if event.type.value == "agent_thinking"
             and event.data.get("phase") == "clarify"
         ]
         questionnaire_steps = [
-            event for event in events
+            event
+            for event in events
             if event.type.value == "agent_tool_step"
             and event.data.get("tool_name") == "question_for_user"
         ]
@@ -237,32 +273,34 @@ class TestClarifyInterrupt:
             "completed",
         }
         completed_step = next(
-            step for step in questionnaire_steps
-            if step.data["status"] == "completed"
+            step for step in questionnaire_steps if step.data["status"] == "completed"
         )
         assert "年龄: 35" in completed_step.data["result"]
-
-        clear_answer_queue("s-clarify-events")
-        release_runtime("s-clarify-events")
 
     @pytest.mark.asyncio
     async def test_clarify_multi_round_follow_up(self):
         """LLM 判定需要追问：连续两轮问卷，两次 interrupt，collected_info 汇总两轮答案。"""
-        from mediZJ.api.services.session_runtime import (
-            clear_answer_queue, release_runtime,
-        )
 
         manager = MagicMock()
         # 三轮 LLM：发问卷 → 发问卷 → 无需澄清
         coordinator = _make_coordinator(
             manager,
-            [_questionnaire_response(), _questionnaire_response(), _no_clarify_response()],
+            [
+                _questionnaire_response(),
+                _questionnaire_response(),
+                _no_clarify_response(),
+            ],
         )
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-multi"}}
 
         # 第 1 轮 interrupt
@@ -274,6 +312,7 @@ class TestClarifyInterrupt:
         qid1 = result["__interrupt__"][0].value["questionnaire_id"]
 
         from langgraph.types import Command
+
         # 第 1 轮 resume → 又发第 2 份问卷 → 再 interrupt
         result2 = await graph.ainvoke(Command(resume={"q0": "35"}), config)
         assert "__interrupt__" in result2
@@ -285,20 +324,16 @@ class TestClarifyInterrupt:
         assert "__interrupt__" not in resumed
 
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
-        context = coordinator.lead_agent.assess_and_decompose.call_args.kwargs.get("context", {})
+        context = coordinator.lead_agent.assess_and_decompose.call_args.kwargs.get(
+            "context", {}
+        )
         collected = context.get("collected_info", "")
-        assert "35" in collected       # 第一轮答案（年龄）
+        assert "35" in collected  # 第一轮答案（年龄）
         assert "头痛一天" in collected  # 第二轮答案（症状描述）
-
-        clear_answer_queue("s-multi")
-        release_runtime("s-multi")
 
     @pytest.mark.asyncio
     async def test_clarify_hard_cap_three_rounds(self):
         """硬上限 3 轮：LLM 每轮都发问卷，第 4 次 LLM 不会被调用。"""
-        from mediZJ.api.services.session_runtime import (
-            clear_answer_queue, release_runtime,
-        )
 
         manager = MagicMock()
         # 每轮都返回问卷（模拟 LLM 永不满意）
@@ -306,17 +341,26 @@ class TestClarifyInterrupt:
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-cap"}}
         from langgraph.types import Command
 
         # 3 次 interrupt（每轮一次）
         for i in range(3):
-            result = await graph.ainvoke(
-                {"question": "头痛还恶心，怎么回事", "session_id": "s-cap"},
-                config,
-            ) if i == 0 else await graph.ainvoke(Command(resume={"q0": f"ans{i}"}), config)
+            result = (
+                await graph.ainvoke(
+                    {"question": "头痛还恶心，怎么回事", "session_id": "s-cap"},
+                    config,
+                )
+                if i == 0
+                else await graph.ainvoke(Command(resume={"q0": f"ans{i}"}), config)
+            )
             assert "__interrupt__" in result
 
         # 第 4 次执行：已到硬上限，不再调 LLM，直接完成
@@ -325,15 +369,9 @@ class TestClarifyInterrupt:
         # LLM 只被调用 3 次（decide 每轮一次，硬上限后不再调）
         assert coordinator.lead_agent.llm_client.chat_with_tools.await_count == 3
 
-        clear_answer_queue("s-cap")
-        release_runtime("s-cap")
-
     @pytest.mark.asyncio
     async def test_clarify_before_retrieve_memories(self):
         """节点顺序：medical 意图下，记忆检索发生在 clarify 完成后、任务分解之前。"""
-        from mediZJ.api.services.session_runtime import (
-            clear_answer_queue, release_runtime,
-        )
 
         manager = MagicMock()
         coordinator = _make_coordinator(
@@ -343,8 +381,13 @@ class TestClarifyInterrupt:
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-order"}}
         from langgraph.types import Command
 
@@ -364,27 +407,28 @@ class TestClarifyInterrupt:
         coordinator.short_term_memory.get_recent_messages.assert_awaited()
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
 
-        clear_answer_queue("s-order")
-        release_runtime("s-order")
-
     @pytest.mark.asyncio
-    async def test_clarify_skipped_when_no_questionnaire_manager(self):
-        """无 questionnaire_manager：clarify 直接跳过，不走 interrupt"""
+    async def test_persistent_interrupt_does_not_require_process_manager(self):
+        """持久化问卷不依赖进程内管理器。"""
         coordinator = _make_coordinator(None, _questionnaire_response())
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-skip"}}
 
         result = await graph.ainvoke(
             {"question": "头痛还恶心，怎么回事", "session_id": "s-skip"},
             config,
         )
-        # 无 interrupt 挂起：直接到达最终回答
-        assert "__interrupt__" not in result
-        assert result.get("final_answer") is not None
+        assert "__interrupt__" in result
+        assert not result.get("final_answer")
 
     @pytest.mark.asyncio
     async def test_clarify_skipped_when_llm_judges_no_clarification(self):
@@ -394,8 +438,13 @@ class TestClarifyInterrupt:
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=True)
+
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            hitl_enabled=True,
+            checkpointer=InMemorySaver(),
+        )
         config = {"configurable": {"thread_id": "s-nocl"}}
 
         result = await graph.ainvoke(
@@ -416,8 +465,10 @@ class TestClarifyInterrupt:
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        graph = build_supervisor_graph(coordinator, tool_registry=registry,
-                                       hitl_enabled=False)
+
+        graph = await build_supervisor_graph(
+            coordinator, tool_registry=registry, hitl_enabled=False
+        )
         config = {"configurable": {"thread_id": "s-nohitl"}}
 
         result = await graph.ainvoke(
@@ -456,12 +507,16 @@ class TestQuestionToolVisibility:
     def test_question_for_user_visible_only_to_lead_agent(self):
         registry = self._build_registry()
 
-        lead_tools = registry.get_visible_tools(active_skill=None, agent_id="lead_agent")
+        lead_tools = registry.get_visible_tools(
+            active_skill=None, agent_id="lead_agent"
+        )
         lead_names = {t["function"]["name"] for t in lead_tools}
         assert "question_for_user" in lead_names
         assert "activate_skill" in lead_names
 
-        worker_tools = registry.get_visible_tools(active_skill=None, agent_id="consultation_agent")
+        worker_tools = registry.get_visible_tools(
+            active_skill=None, agent_id="consultation_agent"
+        )
         worker_names = {t["function"]["name"] for t in worker_tools}
         assert "question_for_user" not in worker_names
         assert "activate_skill" in worker_names

@@ -11,7 +11,7 @@ _kb_instance = None
 def get_knowledge_base():
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -31,13 +31,13 @@ async def clinical_guideline(query: str, max_results: int = 1) -> Dict[str, Any]
             "organization": "发布机构"
         }
     """
-    logger.info(f"Searching clinical guidelines for: {query} (max_results={max_results})")
+    logger.info('执行医学检索工具')
 
     # 使用知识库单例
     kb = get_knowledge_base()
 
     # 使用 Milvus 检索临床指南
-    results = kb.search(
+    results = await kb.search(
         query=f"{query} 临床指南 诊疗规范",
         top_k=max_results,  # 使用传入的 max_results 参数
         filter_type="clinical_guideline"

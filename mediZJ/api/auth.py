@@ -26,7 +26,7 @@ class AuthService:
     def _hash_token(token: str) -> str:
         return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
-    def login(self, username: str) -> tuple[Dict[str, Any], str, datetime]:
+    async def login(self, username: str) -> tuple[Dict[str, Any], str, datetime]:
         """登录或自动创建用户，并返回原始会话令牌。"""
 
         username = username.strip()
@@ -34,12 +34,8 @@ class AuthService:
             raise ValueError("用户名仅允许字母、数字、下划线和连字符，长度 1-64")
 
         admin_username = os.getenv("MEDIZJ_ADMIN_USERNAME", "admin")
-        role = (
-            "admin"
-            if username.casefold() == admin_username.casefold()
-            else "user"
-        )
-        user = self.db.get_or_create_user(username=username, role=role)
+        role = "admin" if username.casefold() == admin_username.casefold() else "user"
+        user = await self.db.get_or_create_user(username=username, role=role)
         if not user.get("is_active", 1):
             raise PermissionError("用户已被停用")
 
@@ -47,33 +43,31 @@ class AuthService:
         expires_at = datetime.now(timezone.utc) + timedelta(
             days=int(os.getenv("AUTH_SESSION_DAYS", "7"))
         )
-        self.db.save_auth_session(
-            token_hash=self._hash_token(token),
-            user_id=user["user_id"],
-            expires_at=expires_at.isoformat(),
+        (
+            await self.db.save_auth_session(
+                token_hash=self._hash_token(token),
+                user_id=user["user_id"],
+                expires_at=expires_at.isoformat(),
+            )
         )
         return user, token, expires_at
 
-    def authenticate(self, token: Optional[str]) -> Optional[Dict[str, Any]]:
+    async def authenticate(self, token: Optional[str]) -> Optional[Dict[str, Any]]:
         """校验 Cookie 令牌，返回当前用户。"""
 
         if not token:
             return None
         token_hash = self._hash_token(token)
-        auth_session = self.db.get_auth_session(token_hash)
+        auth_session = await self.db.get_auth_session(token_hash)
         if auth_session is None:
             return None
         if not auth_session.get("is_active"):
-            self.db.delete_auth_session(token_hash)
+            (await self.db.delete_auth_session(token_hash))
             return None
         expires_at = datetime.fromisoformat(auth_session["expires_at"])
-        now = (
-            datetime.now(timezone.utc)
-            if expires_at.tzinfo is not None
-            else datetime.now()
-        )
+        now = datetime.now(timezone.utc)
         if expires_at <= now:
-            self.db.delete_auth_session(token_hash)
+            (await self.db.delete_auth_session(token_hash))
             return None
         return {
             "user_id": auth_session["user_id"],
@@ -81,11 +75,11 @@ class AuthService:
             "role": auth_session["role"],
         }
 
-    def logout(self, token: Optional[str]) -> None:
+    async def logout(self, token: Optional[str]) -> None:
         """撤销当前登录令牌。"""
 
         if token:
-            self.db.delete_auth_session(self._hash_token(token))
+            (await self.db.delete_auth_session(self._hash_token(token)))
 
 
 _auth_service = AuthService()
@@ -134,8 +128,7 @@ def set_auth_cookie(
         value=token,
         expires=expires_at,
         httponly=True,
-        secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower()
-        in {"1", "true", "yes"},
+        secure=os.getenv("AUTH_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
         samesite="strict",
         path="/",
     )

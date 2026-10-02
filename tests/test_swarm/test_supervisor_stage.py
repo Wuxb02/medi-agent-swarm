@@ -13,9 +13,7 @@ import pytest
 from mediZJ.core.llm_client import LLMResponse
 from mediZJ.swarm.intent_classifier import IntentResult
 
-DAG_QUESTION = (
-    "某肿瘤最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"
-)
+DAG_QUESTION = "某肿瘤最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"
 
 
 def _make_worker(agent_id: str, answer: str):
@@ -23,10 +21,14 @@ def _make_worker(agent_id: str, answer: str):
     worker = MagicMock()
     worker.agent_id = agent_id
     worker.config = {"max_iterations": 3, "temperature": 0.7}
-    worker.short_term_memory = type("STM", (), {
-        "get_history": AsyncMock(return_value=[]),
-        "add_message": AsyncMock(return_value=None),
-    })()
+    worker.short_term_memory = type(
+        "STM",
+        (),
+        {
+            "get_history": AsyncMock(return_value=[]),
+            "add_message": AsyncMock(return_value=None),
+        },
+    )()
     worker.user_context = None
     worker.on_thinking = None
     worker.on_tool_step = None
@@ -39,8 +41,12 @@ def _make_worker(agent_id: str, answer: str):
             content=answer,
             tool_calls=[],
             finish_reason="stop",
-            usage={"prompt_tokens": 5, "completion_tokens": 7,
-                   "total_tokens": 12, "cached_prompt_tokens": 0},
+            usage={
+                "prompt_tokens": 5,
+                "completion_tokens": 7,
+                "total_tokens": 12,
+                "cached_prompt_tokens": 0,
+            },
         )
 
     def _record(messages=None, **kwargs):
@@ -72,22 +78,28 @@ def _make_coordinator(lead_plan_response=None, has_plan_stages=True):
     coordinator = type("Coordinator", (), {})()
     coordinator.questionnaire_manager = None
 
-    coordinator.short_term_memory = type("STM", (), {
-        "get_recent_messages": AsyncMock(return_value=[]),
-        "add_message": AsyncMock(return_value=None),
-        "merge_sub_session": MagicMock(),
-    })()
+    coordinator.short_term_memory = type(
+        "STM",
+        (),
+        {
+            "get_recent_messages": AsyncMock(return_value=[]),
+            "add_message": AsyncMock(return_value=None),
+            "merge_sub_session": AsyncMock(),
+        },
+    )()
     coordinator.personal_profile = type("PP", (), {"to_text": lambda self: "暂无"})()
     coordinator.format_references_section = MagicMock(return_value="")
     coordinator.extract_suggestions = MagicMock(return_value=[])
-    coordinator._save_session_summary = MagicMock()
+    coordinator._save_session_summary = AsyncMock()
 
     workers = {
         "consultation_agent": _make_worker(
-            "consultation_agent", "针对该方案的不良反应，应密切监测并按指南分级处理。"),
+            "consultation_agent", "针对该方案的不良反应，应密切监测并按指南分级处理。"
+        ),
         "diagnostic_agent": _make_worker("diagnostic_agent", "无需额外的诊断信息。"),
         "research_agent": _make_worker(
-            "research_agent", "最新推荐方案：帕博利珠单抗联合化疗。"),
+            "research_agent", "最新推荐方案：帕博利珠单抗联合化疗。"
+        ),
     }
     coordinator.workers = workers
     coordinator.get_worker = lambda agent_id: workers.get(agent_id)
@@ -96,10 +108,16 @@ def _make_coordinator(lead_plan_response=None, has_plan_stages=True):
         "agent_id": "lead_agent",
         "set_on_thinking": lambda self, cb: None,
         "set_on_thinking_done": lambda self, cb: None,
-        "assess_and_decompose": AsyncMock(return_value={
-            "subtasks": [{"description": "回答用户问题",
-                          "assigned_agent": "consultation_agent"}],
-        }),
+        "assess_and_decompose": AsyncMock(
+            return_value={
+                "subtasks": [
+                    {
+                        "description": "回答用户问题",
+                        "assigned_agent": "consultation_agent",
+                    }
+                ],
+            }
+        ),
     }
     if has_plan_stages:
         methods["plan_stages"] = AsyncMock(
@@ -109,33 +127,52 @@ def _make_coordinator(lead_plan_response=None, has_plan_stages=True):
                 "mode": "dag",
                 "reason": "含依赖子问",
                 "stages": [
-                    {"stage_id": "s1", "title": "最新治疗方案",
-                     "question": "该肿瘤的最新治疗方案是什么？",
-                     "description": "检索并给出含具体方案名的治疗方案结论",
-                     "assigned_agent": "research_agent", "depends_on": []},
-                    {"stage_id": "s2", "title": "该方案不良反应应对",
-                     "question": "如果用这个方案出现不良反应怎么办？",
-                     "description": "在阶段 s1 给出的具体方案基础上说明不良反应应对",
-                     "assigned_agent": "consultation_agent", "depends_on": ["s1"]},
+                    {
+                        "stage_id": "s1",
+                        "title": "最新治疗方案",
+                        "question": "该肿瘤的最新治疗方案是什么？",
+                        "description": "检索并给出含具体方案名的治疗方案结论",
+                        "assigned_agent": "research_agent",
+                        "depends_on": [],
+                    },
+                    {
+                        "stage_id": "s2",
+                        "title": "该方案不良反应应对",
+                        "question": "如果用这个方案出现不良反应怎么办？",
+                        "description": "在阶段 s1 给出的具体方案基础上说明不良反应应对",
+                        "assigned_agent": "consultation_agent",
+                        "depends_on": ["s1"],
+                    },
                 ],
             },
         )
     coordinator.lead_agent = type("LA", (), methods)()
 
-    coordinator.intent_classifier = type("IC", (), {
-        "classify": AsyncMock(return_value=IntentResult(
-            intent="medical", confidence=0.9, source="llm", reason="test",
-        )),
-    })()
+    coordinator.intent_classifier = type(
+        "IC",
+        (),
+        {
+            "classify": AsyncMock(
+                return_value=IntentResult(
+                    intent="medical",
+                    confidence=0.9,
+                    source="llm",
+                    reason="test",
+                )
+            ),
+        },
+    )()
     return coordinator
 
 
-def _build_graph(coordinator):
+async def _build_graph(coordinator):
     from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
+
     registry = MagicMock()
     registry.get_visible_tools = MagicMock(return_value=[])
-    return build_supervisor_graph(coordinator, tool_registry=registry,
-                                  hitl_enabled=False)
+    return await build_supervisor_graph(
+        coordinator, tool_registry=registry, hitl_enabled=False
+    )
 
 
 def _user_texts(worker) -> list:
@@ -143,7 +180,7 @@ def _user_texts(worker) -> list:
     out = []
     for messages in worker.calls:
         for m in messages or []:
-            if (isinstance(m, dict) and m.get("role") == "user" and m.get("content")):
+            if isinstance(m, dict) and m.get("role") == "user" and m.get("content"):
                 out.append(str(m["content"]))
     return out
 
@@ -153,12 +190,14 @@ class TestDagResolution:
     async def test_chain_resolves_with_prereq_injection(self):
         """s1(方案) → s2(不良反应)：s2 的 worker 输入应包含 s1 的结论。"""
         coordinator = _make_coordinator()
-        graph = _build_graph(coordinator)
+        graph = await _build_graph(coordinator)
 
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION,
-            "session_id": "s-dag",
-        })
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-dag",
+            }
+        )
 
         research = coordinator.workers["research_agent"]
         consult = coordinator.workers["consultation_agent"]
@@ -187,13 +226,20 @@ class TestDagResolution:
     @pytest.mark.asyncio
     async def test_plan_returning_atomic_falls_back(self):
         """plan_stages 判 atomic → 走原 assess_decompose 路径。"""
-        coordinator = _make_coordinator(lead_plan_response={
-            "mode": "atomic", "reason": "可一次求解", "stages": [],
-        })
-        graph = _build_graph(coordinator)
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION, "session_id": "s-atomic",
-        })
+        coordinator = _make_coordinator(
+            lead_plan_response={
+                "mode": "atomic",
+                "reason": "可一次求解",
+                "stages": [],
+            }
+        )
+        graph = await _build_graph(coordinator)
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-atomic",
+            }
+        )
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
         assert result.get("final_answer")
 
@@ -201,10 +247,13 @@ class TestDagResolution:
     async def test_lead_without_plan_stages_falls_back(self):
         """旧式 LeadAgent（无 plan_stages）即使疑似多跳也不报错，走原子路径。"""
         coordinator = _make_coordinator(has_plan_stages=False)
-        graph = _build_graph(coordinator)
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION, "session_id": "s-legacy",
-        })
+        graph = await _build_graph(coordinator)
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-legacy",
+            }
+        )
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
         assert result.get("final_answer")
 
@@ -217,10 +266,13 @@ class TestDagResolution:
 
         coordinator = _make_coordinator()
         coordinator.lead_agent.plan_stages = AsyncMock(side_effect=_boom)
-        graph = _build_graph(coordinator)
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION, "session_id": "s-err",
-        })
+        graph = await _build_graph(coordinator)
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-err",
+            }
+        )
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
         assert result.get("final_answer")
 
@@ -228,10 +280,13 @@ class TestDagResolution:
     async def test_atomic_question_without_chain_skips_plan_llm(self):
         """不含回指链的单问：plan_stages 不应被调用（预筛短路）。"""
         coordinator = _make_coordinator()
-        graph = _build_graph(coordinator)
-        await graph.ainvoke({
-            "question": "头疼两天了，应该注意什么？", "session_id": "s-simple",
-        })
+        graph = await _build_graph(coordinator)
+        await graph.ainvoke(
+            {
+                "question": "头疼两天了，应该注意什么？",
+                "session_id": "s-simple",
+            }
+        )
         coordinator.lead_agent.plan_stages.assert_not_awaited()
         coordinator.lead_agent.assess_and_decompose.assert_awaited_once()
 
@@ -245,22 +300,30 @@ class TestDagResolution:
         events: list = []
         registry = MagicMock()
         registry.get_visible_tools = MagicMock(return_value=[])
-        graph = build_supervisor_graph(
-            coordinator, tool_registry=registry,
-            event_callback=events.append, hitl_enabled=False,
+        graph = await build_supervisor_graph(
+            coordinator,
+            tool_registry=registry,
+            event_callback=events.append,
+            hitl_enabled=False,
         )
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION, "session_id": "s-dag-events",
-        })
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-dag-events",
+            }
+        )
 
         completed_ids = {
             e.data.get("subtask_id")
-            for e in events if e.type == EventType.SUBTASK_COMPLETED
+            for e in events
+            if e.type == EventType.SUBTASK_COMPLETED
         }
         assert completed_ids == {"s1", "s2"}
 
         progress = [
-            e.data for e in events if e.type == EventType.AGENT_THINKING
+            e.data
+            for e in events
+            if e.type == EventType.AGENT_THINKING
             and e.data.get("phase") == "decompose"
             and e.data.get("title") == "分层求解推进"
         ]
@@ -272,11 +335,14 @@ class TestDagResolution:
         """总预算耗尽（负数触发）：剩余层置 skipped，仍返回带说明的回答且不抛错。"""
         monkeypatch.setenv("STAGE_TOTAL_BUDGET", "-1")
         coordinator = _make_coordinator()
-        graph = _build_graph(coordinator)
+        graph = await _build_graph(coordinator)
 
-        result = await graph.ainvoke({
-            "question": DAG_QUESTION, "session_id": "s-budget",
-        })
+        result = await graph.ainvoke(
+            {
+                "question": DAG_QUESTION,
+                "session_id": "s-budget",
+            }
+        )
         assert "未完成" in result["final_answer"]
         assert result["swarm_metadata"]["num_stages_completed"] == 0
         assert result["timeout_occurred"] is True

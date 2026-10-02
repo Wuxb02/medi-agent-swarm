@@ -138,8 +138,7 @@ async def _jev_call(client: JevIntentClient, case: IntentCase) -> dict[str, Any]
 def _choose_threshold(rows: list[dict[str, Any]]) -> float:
     candidates = [round(index / 100, 2) for index in range(50, 101)]
     safe = [
-        value for value in candidates
-        if _metrics(rows, value)["medical_to_others"] == 0
+        value for value in candidates if _metrics(rows, value)["medical_to_others"] == 0
     ]
     if not safe:
         return 1.0
@@ -204,9 +203,7 @@ async def run_comparison() -> dict[str, Any]:
         "llm_model": llm.model_name,
         "selected_threshold": threshold,
         "splits": {},
-        "limitations": (
-            "人工合成中文样本不能代表真实流量；零误判不证明医疗安全。"
-        ),
+        "limitations": ("人工合成中文样本不能代表真实流量；零误判不证明医疗安全。"),
     }
     for split in ("tune", "holdout"):
         report["splits"][split] = {}
@@ -219,8 +216,7 @@ async def run_comparison() -> dict[str, Any]:
             report["splits"][split][name] = {
                 **_metrics(subset, gate),
                 "scenarios": {
-                    key: _metrics(value, gate)
-                    for key, value in scenarios.items()
+                    key: _metrics(value, gate) for key, value in scenarios.items()
                 },
             }
             metrics = report["splits"][split][name]
@@ -236,10 +232,12 @@ async def run_comparison() -> dict[str, Any]:
                         (
                             metrics["input_tokens"] * float(input_price)
                             + metrics["output_tokens"] * float(output_price)
-                        ) / 1_000_000,
+                        )
+                        / 1_000_000,
                         6,
                     )
-                    if input_price and output_price else None
+                    if input_price and output_price
+                    else None
                 )
     holdout = report["splits"]["holdout"]
     llm_result, jev_result = holdout["llm"], holdout["jev"]
@@ -252,8 +250,7 @@ async def run_comparison() -> dict[str, Any]:
     latency_acceptable = jev_result["p95_ms"] <= llm_result["p95_ms"] * 1.05
     cost_acceptable = (
         not cost_known
-        or jev_result["estimated_cost_usd"]
-        <= llm_result["estimated_cost_usd"] * 1.05
+        or jev_result["estimated_cost_usd"] <= llm_result["estimated_cost_usd"] * 1.05
     )
     report["switch_review_pass"] = (
         jev_result["medical_to_others"] == 0
@@ -269,10 +266,10 @@ async def run_comparison() -> dict[str, Any]:
     return report
 
 
-def main() -> None:
+async def main() -> None:
     parser = argparse.ArgumentParser(description="中文合成问句意图识别对照")
     parser.parse_args()
-    report = asyncio.run(run_comparison())
+    report = asyncio.run((await run_comparison()))
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

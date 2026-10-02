@@ -27,7 +27,7 @@ async def login(
     """按用户名免密登录；不存在的普通用户名会自动创建。"""
 
     try:
-        user, token, expires_at = service.login(body.username)
+        user, token, expires_at = await service.login(body.username)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -49,7 +49,7 @@ async def logout(
 ):
     """退出并撤销当前会话。"""
 
-    service.logout(request.cookies.get(COOKIE_NAME))
+    (await service.logout(request.cookies.get(COOKIE_NAME)))
     clear_auth_cookie(response)
     return LogoutResponse()
 

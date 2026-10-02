@@ -14,8 +14,16 @@ from mediZJ.memory.prompt_prefix import PromptPrefixAssembler
 
 
 _HIGH_RISK = (
-    "胸痛", "呼吸困难", "昏厥", "剧烈头痛", "意识不清", "抽搐",
-    "突然无力", "大量出血", "自杀", "轻生",
+    "胸痛",
+    "呼吸困难",
+    "昏厥",
+    "剧烈头痛",
+    "意识不清",
+    "抽搐",
+    "突然无力",
+    "大量出血",
+    "自杀",
+    "轻生",
 )
 _CARE_TERMS = ("就医", "急诊", "医院", "120", "医生")
 _DIAGNOSIS_PATTERNS = (
@@ -58,18 +66,16 @@ class CitationValidator:
         self.catalog = catalog or KnowledgeCatalog()
         self.knowledge_base = knowledge_base
 
-    def validate(self, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    async def validate(self, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         valid: list[dict[str, Any]] = []
         for citation in citations:
             item = dict(citation)
-            document_id = str(
-                item.get("document_id") or item.get("doc_id") or ""
-            )
+            document_id = str(item.get("document_id") or item.get("doc_id") or "")
             version_id = str(item.get("version_id") or "")
             version = (
-                self.catalog.active_by_version(version_id)
+                (await self.catalog.active_by_version(version_id))
                 if version_id
-                else self.catalog.active_version(document_id)
+                else (await self.catalog.active_version(document_id))
             )
             if not version:
                 continue
@@ -123,13 +129,14 @@ class MedicalAnswerVerifier:
         answer: str,
         citations: list[dict[str, Any]],
     ) -> VerificationResult:
-        validated = self.citation_validator.validate(citations)
+        validated = await self.citation_validator.validate(citations)
         violations = self._deterministic_violations(
             question, answer, citations, validated
         )
         semantic = await self._semantic_verify(question, answer, validated)
         violations.extend(
-            str(item) for item in semantic.get("violations", [])
+            str(item)
+            for item in semantic.get("violations", [])
             if str(item) not in violations
         )
         passed = not violations and bool(semantic.get("passed", True))
@@ -192,9 +199,7 @@ class MedicalAnswerVerifier:
             return answer, first
         try:
             rewritten = await self.rewrite_once(question, answer, first)
-            second = await self.verify(
-                question, rewritten, first.validated_citations
-            )
+            second = await self.verify(question, rewritten, first.validated_citations)
         except Exception as exc:
             logger.warning("医疗安全重写失败: {}", exc)
             first.degraded = True

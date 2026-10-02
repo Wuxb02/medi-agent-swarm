@@ -2,10 +2,7 @@
 
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-from threading import Barrier
-
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from mediZJ.evolution.judge import ConversationJudge
@@ -15,70 +12,54 @@ from mediZJ.evolution.storage import EvolutionStorage
 from mediZJ.evolution.storage import RollbackBlockedError
 from mediZJ.memory.session_db import SessionDB
 
+pytestmark = [pytest.mark.integration, pytest.mark.infrastructure]
+
 
 @pytest.fixture
-def evolution(tmp_path):
-    db_path = str(tmp_path / "evolution.db")
+def evolution(mysql_infrastructure):
     SessionDB.reset()
     EvolutionStorage.reset()
     EvolutionService.reset()
-    session_db = SessionDB(db_path)
-    storage = EvolutionStorage(db_path)
+    session_db = SessionDB()
+    storage = EvolutionStorage()
     service = EvolutionService(storage=storage)
-    yield session_db, storage, service
-    session_db._get_conn().close()
-    storage._get_conn().close()
+    yield (session_db, storage, service)
     EvolutionService.reset()
     EvolutionStorage.reset()
     SessionDB.reset()
 
 
-def _save_answer(session_db: SessionDB, user_id: str = "patient") -> int:
-    saved = session_db.save_turn(
+async def _save_answer(session_db: SessionDB, user_id: str = "patient") -> int:
+    saved = await session_db.save_turn(
         session_id="session-1",
         turn_index=0,
         user_msg={"content": "头痛怎么办？"},
-        assistant_msg={
-            "content": "建议先评估危险信号。",
-            "trace_id": "trace-1",
-        },
+        assistant_msg={"content": "建议先评估危险信号。", "trace_id": "trace-1"},
         user_id=user_id,
     )
     return int(saved["assistant_message_id"])
 
 
-def test_feedback_is_isolated_and_enqueues_job(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-
-    feedback = service.submit_feedback(
-        message_id,
-        "patient",
-        "dislike",
-        ["incomplete"],
-        "缺少就医建议",
+async def test_feedback_is_isolated_and_enqueues_job(evolution):
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    feedback = await service.submit_feedback(
+        message_id, "patient", "dislike", ["incomplete"], "缺少就医建议"
     )
-
     assert feedback["version"] == 1
     assert feedback["evaluation_job_id"]
-    assert storage.get_feedback(message_id, "patient")["rating"] == "dislike"
-    updated = service.submit_feedback(
-        message_id,
-        "patient",
-        "like",
-        [],
-        "",
-    )
+    assert (await storage.get_feedback(message_id, "patient"))["rating"] == "dislike"
+    updated = await service.submit_feedback(message_id, "patient", "like", [], "")
     assert updated["version"] == 2
-    assert storage.get_feedback(message_id, "another-user") is None
+    assert await storage.get_feedback(message_id, "another-user") is None
     with pytest.raises(LookupError):
-        service.submit_feedback(message_id, "another-user", "like", [], "")
+        await service.submit_feedback(message_id, "another-user", "like", [], "")
 
 
-def test_high_scores_promote_private_experience_after_two_supports(evolution):
-    session_db, storage, _service = evolution
-    first_message = _save_answer(session_db)
-    second = session_db.save_turn(
+async def test_high_scores_promote_private_experience_after_two_supports(evolution):
+    (session_db, storage, _service) = evolution
+    first_message = await _save_answer(session_db)
+    second = await session_db.save_turn(
         session_id="session-2",
         turn_index=0,
         user_msg={"content": "偏头痛怎么办？"},
@@ -100,41 +81,27 @@ def test_high_scores_promote_private_experience_after_two_supports(evolution):
     for index, message_id in enumerate(
         [first_message, int(second["assistant_message_id"])]
     ):
-        job_id = storage.enqueue_job(
-            message_id,
-            "patient",
-            "manual",
-            index + 1,
-        )
-        job = storage.claim_job()
+        job_id = await storage.enqueue_job(message_id, "patient", "manual", index + 1)
+        job = await storage.claim_job()
         assert job and job["job_id"] == job_id
-        storage.save_evaluation(job, result, "fake-judge")
-        storage.complete_job(job_id)
-
-    experiences = storage.list_experiences()
+        await storage.save_evaluation(job, result, "fake-judge")
+        await storage.complete_job(job)
+    experiences = await storage.list_experiences()
     assert experiences[0]["status"] == "active"
     assert experiences[0]["support_count"] == 2
-    assert storage.list_releases()[0]["action"] == "auto_promote"
+    assert (await storage.list_releases())[0]["action"] == "auto_promote"
 
 
-def test_session_deletion_recalculates_and_demotes_experience(evolution):
-    session_db, storage, _service = evolution
-    first_message = _save_answer(session_db)
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        CREATE TABLE traces (
-            trace_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            tree_json TEXT NOT NULL
-        )
-        """
+async def test_session_deletion_recalculates_and_demotes_experience(
+    evolution, execute_sql
+):
+    (session_db, storage, _service) = evolution
+    first_message = await _save_answer(session_db)
+    None
+    await execute_sql(
+        "INSERT INTO traces(trace_id,session_id,user_id,start_time,tree_json,created_at) VALUES ('trace-1','session-1','patient','now','{}','now')"
     )
-    conn.execute(
-        "INSERT INTO traces VALUES ('trace-1', 'session-1', '{}')"
-    )
-    conn.commit()
-    second = session_db.save_turn(
+    second = await session_db.save_turn(
         session_id="session-2",
         turn_index=0,
         user_msg={"content": "偏头痛怎么办？"},
@@ -156,70 +123,47 @@ def test_session_deletion_recalculates_and_demotes_experience(evolution):
     for index, message_id in enumerate(
         [first_message, int(second["assistant_message_id"])]
     ):
-        job_id = storage.enqueue_job(
-            message_id,
-            "patient",
-            "manual",
-            index + 1,
-        )
-        job = storage.claim_job()
-        storage.save_evaluation(job, result, "fake-judge")
-        storage.complete_job(job_id)
-
-    experience_id = storage.list_experiences()[0]["experience_id"]
-    storage.record_exposures(
+        await storage.enqueue_job(message_id, "patient", "manual", index + 1)
+        job = await storage.claim_job()
+        await storage.save_evaluation(job, result, "fake-judge")
+        await storage.complete_job(job)
+    experience_id = (await storage.list_experiences())[0]["experience_id"]
+    await storage.record_exposures(
         first_message,
         "patient",
-        [
-            {
-                "experience_id": experience_id,
-                "bucket": "active",
-                "applied": True,
-            }
-        ],
+        [{"experience_id": experience_id, "bucket": "active", "applied": True}],
     )
-
-    deletion = storage.delete_session_data("session-1", "patient")
-
+    deletion = await storage.delete_session_data("session-1", "patient")
     assert deletion is not None
-    experience = storage.list_experiences()[0]
+    experience = (await storage.list_experiences())[0]
     assert experience["status"] == "candidate"
     assert experience["support_count"] == 1
     assert experience["distinct_users"] == 1
     assert experience["average_score"] == 90
-    assert deletion["demoted_experience_ids"] == [
-        experience["experience_id"]
-    ]
-    assert session_db.get_session("session-1", "patient") is None
-    assert session_db.get_session("session-2", "patient") is not None
-    assert storage.list_releases()[0]["action"] == (
-        "auto_demote_session_deleted"
-    )
-
-    audit = storage._get_conn().execute(
-        "SELECT * FROM session_deletion_audits"
-    ).fetchone()
+    assert deletion["demoted_experience_ids"] == [experience["experience_id"]]
+    assert await session_db.get_session("session-1", "patient") is None
+    assert await session_db.get_session("session-2", "patient") is not None
+    assert (await storage.list_releases())[0]["action"] == "auto_demote_session_deleted"
+    audit = (await execute_sql("SELECT * FROM session_deletion_audits")).fetchone()
     assert audit["deleted_message_count"] == 2
     assert audit["deleted_evaluation_count"] == 1
     assert audit["deleted_trace_count"] == 1
-    assert audit["affected_experience_ids"] == json.dumps(
-        [experience["experience_id"]]
-    )
+    assert audit["affected_experience_ids"] == json.dumps([experience["experience_id"]])
     assert "session-1" not in audit["session_id_hash"]
-    assert storage._get_conn().execute(
-        "SELECT COUNT(*) FROM traces"
-    ).fetchone()[0] == 0
-    assert storage._get_conn().execute(
-        "SELECT COUNT(*) FROM experience_exposures"
-    ).fetchone()[0] == 0
+    assert (await execute_sql("SELECT COUNT(*) AS count FROM traces")).fetchone()[
+        "count"
+    ] == 0
+    assert (
+        await execute_sql("SELECT COUNT(*) AS count FROM experience_exposures")
+    ).fetchone()["count"] == 0
 
 
-def test_session_deletion_removes_failure_and_is_idempotent(evolution):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
-    job_id = storage.enqueue_job(message_id, "patient", "manual", 1)
-    job = storage.claim_job()
-    storage.save_evaluation(
+async def test_session_deletion_removes_failure_and_is_idempotent(evolution):
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 1)
+    job = await storage.claim_job()
+    await storage.save_evaluation(
         job,
         {
             "overall_score": 40,
@@ -230,21 +174,19 @@ def test_session_deletion_removes_failure_and_is_idempotent(evolution):
         },
         "fake-judge",
     )
-    storage.complete_job(job_id)
-
-    assert storage.delete_session_data("session-1", "patient") is not None
-
-    assert storage.list_evaluations() == []
-    assert storage.list_failures() == []
-    assert storage.delete_session_data("session-1", "patient") is None
+    await storage.complete_job(job)
+    assert await storage.delete_session_data("session-1", "patient") is not None
+    assert await storage.list_evaluations() == []
+    assert await storage.list_failures() == []
+    assert await storage.delete_session_data("session-1", "patient") is None
 
 
-def test_session_deletion_retires_experience_without_sources(evolution):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
-    job_id = storage.enqueue_job(message_id, "patient", "manual", 1)
-    job = storage.claim_job()
-    storage.save_evaluation(
+async def test_session_deletion_retires_experience_without_sources(evolution):
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 1)
+    job = await storage.claim_job()
+    await storage.save_evaluation(
         job,
         {
             "overall_score": 92,
@@ -260,26 +202,22 @@ def test_session_deletion_retires_experience_without_sources(evolution):
         },
         "fake-judge",
     )
-    storage.complete_job(job_id)
-
-    assert storage.delete_session_data("session-1", "patient") is not None
-
-    experience = storage.list_experiences()[0]
+    await storage.complete_job(job)
+    assert await storage.delete_session_data("session-1", "patient") is not None
+    experience = (await storage.list_experiences())[0]
     assert experience["status"] == "retired"
     assert experience["support_count"] == 0
     assert experience["distinct_users"] == 0
     assert experience["average_score"] == 0
 
 
-def test_session_service_completes_external_cleanup_audit(
-    evolution,
-    monkeypatch,
-    tmp_path,
+async def test_session_service_completes_external_cleanup_audit(
+    evolution, monkeypatch, tmp_path, execute_sql
 ):
     from mediZJ.api.services import session_service
 
-    session_db, storage, _service = evolution
-    _save_answer(session_db)
+    (session_db, storage, _service) = evolution
+    await _save_answer(session_db)
 
     class FakeVectors:
         deleted_session_id = None
@@ -289,15 +227,22 @@ def test_session_service_completes_external_cleanup_audit(
 
     vectors = FakeVectors()
     monkeypatch.setattr(session_service, "_db", session_db)
-    monkeypatch.setattr(session_service, "_vectors", vectors)
-    monkeypatch.setattr(session_service, "SUMMARY_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "mediZJ.memory.session_vector_store.SessionVectorStore", lambda: vectors
+    )
+    assert await session_service.delete_session("session-1", "patient") is True
+    from mediZJ.infrastructure.handlers import cache_delete, session_delete
+    from mediZJ.infrastructure.jobs import JobWorker, claim
 
-    assert session_service.delete_session("session-1", "patient") is True
-
+    worker = JobWorker({"cache_delete": cache_delete, "session_delete": session_delete})
+    for kind in worker.handlers:
+        job = await claim(kind, worker.owner)
+        await worker._execute(job)
     assert vectors.deleted_session_id == "session-1"
-    audit = storage._get_conn().execute(
-        "SELECT cleanup_status, cleanup_errors "
-        "FROM session_deletion_audits"
+    audit = (
+        await execute_sql(
+            "SELECT cleanup_status, cleanup_errors FROM session_deletion_audits"
+        )
     ).fetchone()
     assert audit["cleanup_status"] == "completed"
     assert json.loads(audit["cleanup_errors"]) == []
@@ -305,6 +250,7 @@ def test_session_service_completes_external_cleanup_audit(
 
 @pytest.mark.asyncio
 async def test_judge_applies_dislike_and_safety_gates():
+
     class FakeLLM:
         model_name = "fake"
 
@@ -328,7 +274,6 @@ async def test_judge_applies_dislike_and_safety_gates():
     result = await ConversationJudge(FakeLLM()).evaluate(
         {"question": "q", "content": "a", "feedback": {"rating": "dislike"}}
     )
-
     assert result["overall_score"] == 100
     assert result["verdict"] == "low"
     assert result["attribution"] == ["prompt"]
@@ -336,6 +281,7 @@ async def test_judge_applies_dislike_and_safety_gates():
 
 @pytest.mark.asyncio
 async def test_judge_tolerates_malformed_structured_fields():
+
     class FakeLLM:
         model_name = "fake"
 
@@ -363,39 +309,30 @@ async def test_judge_tolerates_malformed_structured_fields():
     result = await ConversationJudge(FakeLLM()).evaluate(
         {"question": "q", "content": "a", "user_id": "patient"}
     )
-
     assert result["dimension_scores"]["medical_safety"] == 0
     assert result["attribution"] == ["other"]
     assert len(result["experiences"]) == 1
     assert result["experiences"][0]["risk_level"] == "medium"
 
 
-def test_runtime_context_only_uses_matching_active_experiences(evolution):
-    _session_db, storage, service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, owner_user_id,
-             query_pattern, content, status, created_at, updated_at)
-        VALUES ('exp-1', 'response_strategy', 'private', 'patient',
-                '头痛', '检查红旗征象', 'active', 'now', 'now')
-        """
+async def test_runtime_context_only_uses_matching_active_experiences(
+    evolution, execute_sql
+):
+    (_session_db, storage, service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, owner_user_id,\n             query_pattern, content, status, created_at, updated_at)\n        VALUES ('exp-1', 'response_strategy', 'private', 'patient',\n                '头痛', '检查红旗征象', 'active', 'now', 'now')\n        "
     )
-    conn.commit()
-
-    context = service.get_runtime_context("patient", "我最近头痛")
-
+    context = await service.get_runtime_context("patient", "我最近头痛")
     assert context["applied_experience_ids"] == ["exp-1"]
     assert "检查红旗征象" in context["verified_experiences"]
-    assert service.get_runtime_context("other", "我最近头痛") == {}
+    assert await service.get_runtime_context("other", "我最近头痛") == {}
 
 
 @pytest.mark.asyncio
 async def test_worker_saves_low_evaluation_and_failure(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    storage.enqueue_job(message_id, "patient", "manual", 10)
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 10)
 
     class FakeJudge:
         model_name = "fake"
@@ -414,14 +351,14 @@ async def test_worker_saves_low_evaluation_and_failure(evolution):
     service._judge = FakeJudge()
     assert await service.process_one() is True
     assert await service.process_one() is False
-    evaluation = storage.list_evaluations()[0]
+    evaluation = (await storage.list_evaluations())[0]
     assert evaluation["verdict"] == "low"
     assert evaluation["question"] == "头痛怎么办？"
     assert evaluation["answer"] == "建议先评估危险信号。"
     assert evaluation["session_id"] == "session-1"
     assert evaluation["trace_id"] == "trace-1"
     assert evaluation["trigger_type"] == "manual"
-    failure = storage.list_failures()[0]
+    failure = (await storage.list_failures())[0]
     assert failure["status"] == "open"
     assert failure["question"] == "头痛怎么办？"
     assert failure["trace_id"] == "trace-1"
@@ -430,14 +367,14 @@ async def test_worker_saves_low_evaluation_and_failure(evolution):
         "retrieval.memory",
         "retrieval.knowledge",
     }
-    assert storage.overview()["failure_count"] == 1
+    assert (await storage.overview())["failure_count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_worker_retries_failed_judge(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    storage.enqueue_job(message_id, "patient", "manual", 11)
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 11)
 
     class BrokenJudge:
         model_name = "broken"
@@ -447,17 +384,17 @@ async def test_worker_retries_failed_judge(evolution):
 
     service._judge = BrokenJudge()
     assert await service.process_one() is True
-    job = storage.claim_job()
-    assert job["attempts"] == 1
-    storage.fail_job(job["job_id"], "still broken", max_attempts=2)
-    assert storage.claim_job() is None
+    jobs = await storage.list_jobs()
+    assert jobs[0]["attempts"] == 1
+    assert jobs[0]["status"] == "pending"
+    assert await storage.claim_job() is None  # 退避期间不能立即领取。
 
 
 @pytest.mark.asyncio
 async def test_worker_times_out_slow_judge(evolution, monkeypatch):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
-    storage.enqueue_job(message_id, "patient", "manual", 12)
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 12)
     monkeypatch.setenv("EVOLUTION_JUDGE_TIMEOUT", "0.01")
     EvolutionService.reset()
     service = EvolutionService(storage=storage)
@@ -470,159 +407,103 @@ async def test_worker_times_out_slow_judge(evolution, monkeypatch):
             return {}
 
     service._judge = SlowJudge()
-
     assert await service.process_one() is True
-    job = storage.list_jobs()[0]
+    job = (await storage.list_jobs())[0]
     assert job["status"] == "pending"
     assert job["attempts"] == 1
 
 
-def test_manual_queue_sampling_and_release_rollback(evolution, monkeypatch):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    manual_id = service.enqueue_manual(message_id)
+async def test_manual_queue_sampling_and_release_rollback(
+    evolution, monkeypatch, execute_sql
+):
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    manual_id = await service.enqueue_manual(message_id)
     assert manual_id
     with pytest.raises(LookupError):
-        service.enqueue_manual(999999)
-
+        await service.enqueue_manual(999999)
     monkeypatch.setenv("EVOLUTION_SAMPLE_RATE", "1")
-    service.maybe_enqueue_sample(message_id, "patient")
-
-    conn = storage._get_conn()
+    await service.maybe_enqueue_sample(message_id, "patient")
     for experience_id in ("exp-active", "exp-candidate"):
-        conn.execute(
-            """
-            INSERT INTO learned_experiences
-                (experience_id, experience_type, scope, owner_user_id,
-                 query_pattern, content, status, average_score,
-                 support_count, distinct_users, created_at, updated_at)
-            VALUES (?, 'response_strategy', 'global', NULL,
-                    '头痛', '安全建议', 'candidate', 90,
-                    3, 3, 'now', 'now')
-            """,
+        await execute_sql(
+            "\n            INSERT INTO learned_experiences\n                (experience_id, experience_type, scope, owner_user_id,\n                 query_pattern, content, status, average_score,\n                 support_count, distinct_users, created_at, updated_at)\n            VALUES (%s, 'response_strategy', 'global', NULL,\n                    '头痛', '安全建议', 'candidate', 90,\n                    3, 3, 'now', 'now')\n            ",
             (experience_id,),
         )
-    conn.commit()
-    assert storage.set_experience_status("exp-active", "active", "admin")
-    first_version = storage.list_releases()[0]["version"]
-    assert storage.set_experience_status("exp-candidate", "active", "admin")
-    assert storage.rollback_release(first_version, "admin")
+    assert await storage.set_experience_status("exp-active", "active", "admin")
+    first_version = (await storage.list_releases())[0]["version"]
+    assert await storage.set_experience_status("exp-candidate", "active", "admin")
+    assert await storage.rollback_release(first_version, "admin")
     active_ids = {
         item["experience_id"]
-        for item in storage.get_active_experiences("patient")
+        for item in await storage.get_active_experiences("patient")
     }
     assert active_ids == {"exp-active"}
-    assert storage.set_experience_status("missing", "active", "admin") is False
-    assert storage.rollback_release(999999, "admin") is False
+    assert await storage.set_experience_status("missing", "active", "admin") is False
+    assert await storage.rollback_release(999999, "admin") is False
 
 
-def test_global_single_case_cannot_be_published(evolution):
-    _session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('single-case', 'response_strategy', 'global', '高血压',
-                '按结构回答', 'candidate', 98, 1, 1, 'now', 'now')
-        """
+async def test_global_single_case_cannot_be_published(evolution, execute_sql):
+    (_session_db, storage, _service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('single-case', 'response_strategy', 'global', '高血压',\n                '按结构回答', 'candidate', 98, 1, 1, 'now', 'now')\n        "
     )
-    conn.commit()
-
     with pytest.raises(ValueError, match="3 个不同用户"):
-        storage.set_experience_status("single-case", "active", "admin")
-    item = storage.list_experiences()[0]
+        await storage.set_experience_status("single-case", "active", "admin")
+    item = (await storage.list_experiences())[0]
     assert item["publishable"] is False
     assert item["status"] == "candidate"
 
 
-def test_global_support_threshold_is_configurable(evolution, monkeypatch):
+async def test_global_support_threshold_is_configurable(
+    evolution, monkeypatch, execute_sql
+):
     """全局经验的最少支持用户数可通过 EVOLUTION_GLOBAL_MIN_SUPPORT 调整。"""
-    _session_db, storage, _service = evolution
+    (_session_db, storage, _service) = evolution
     monkeypatch.setenv("EVOLUTION_GLOBAL_MIN_SUPPORT", "2")
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('enough', 'response_strategy', 'global', '头痛',
-                '按结构回答', 'candidate', 90, 2, 2, 'now', 'now')
-        """
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('enough', 'response_strategy', 'global', '头痛',\n                '按结构回答', 'candidate', 90, 2, 2, 'now', 'now')\n        "
     )
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('one-user', 'response_strategy', 'global', '发热',
-                '按结构回答', 'candidate', 90, 3, 1, 'now', 'now')
-        """
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('one-user', 'response_strategy', 'global', '发热',\n                '按结构回答', 'candidate', 90, 3, 1, 'now', 'now')\n        "
     )
-    conn.commit()
-
-    # 阈值降为 2 后，2 个不同用户即可进入观察
-    assert storage.set_experience_status("enough", "active", "admin") is True
-    # 3 条支持但仅 1 个不同用户仍被拒绝，distinct_users 是硬约束
+    assert await storage.set_experience_status("enough", "active", "admin") is True
     with pytest.raises(ValueError, match="全局经验至少需 2 个不同用户"):
-        storage.set_experience_status("one-user", "active", "admin")
+        await storage.set_experience_status("one-user", "active", "admin")
 
 
-def test_observing_experience_retires_after_negative_feedback(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    conn = storage._get_conn()
-    conn.execute(
-        "CREATE TABLE traces (trace_id TEXT PRIMARY KEY, tree_json TEXT)"
-    )
-    conn.execute(
-        "INSERT INTO traces VALUES (?, ?)",
+async def test_observing_experience_retires_after_negative_feedback(
+    evolution, execute_sql
+):
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    None
+    await execute_sql(
+        "INSERT INTO traces(trace_id,tree_json,session_id,user_id,start_time,created_at) VALUES (%s,%s,'session-1','patient','now','now')",
         (
             "trace-1",
-            json.dumps(
-                {"trace_attrs": {"applied_experience_ids": ["observing-exp"]}}
-            ),
+            json.dumps({"trace_attrs": {"applied_experience_ids": ["observing-exp"]}}),
         ),
     )
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('observing-exp', 'response_strategy', 'global', '头痛',
-                '安全回答', 'observing', 90, 3, 3, 'now', 'now')
-        """
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('observing-exp', 'response_strategy', 'global', '头痛',\n                '安全回答', 'observing', 90, 3, 3, 'now', 'now')\n        "
     )
-    conn.commit()
-    storage.record_exposures(
+    await storage.record_exposures(
         message_id,
         "patient",
-        [
-            {
-                "experience_id": "observing-exp",
-                "bucket": "treatment",
-                "applied": True,
-            }
-        ],
+        [{"experience_id": "observing-exp", "bucket": "treatment", "applied": True}],
     )
-
-    service.submit_feedback(message_id, "patient", "dislike", ["unsafe"], "")
-
-    item = storage.list_experiences()[0]
+    await service.submit_feedback(message_id, "patient", "dislike", ["unsafe"], "")
+    item = (await storage.list_experiences())[0]
     assert item["status"] == "retired"
     assert item["negative_count"] == 1
-    assert storage.list_releases()[0]["action"] == (
-        "auto_retire_negative_feedback"
-    )
+    assert (await storage.list_releases())[0][
+        "action"
+    ] == "auto_retire_negative_feedback"
 
 
 @pytest.mark.asyncio
 async def test_judge_caps_answer_and_discards_medical_knowledge():
+
     class FakeLLM:
         model_name = "fake"
 
@@ -665,7 +546,6 @@ async def test_judge_caps_answer_and_discards_medical_knowledge():
     result = await ConversationJudge(FakeLLM()).evaluate(
         {"question": "q", "content": "a", "user_id": "patient"}
     )
-
     assert result["overall_score"] == 79
     assert result["verdict"] == "medium"
     assert len(result["experiences"]) == 1
@@ -674,6 +554,7 @@ async def test_judge_caps_answer_and_discards_medical_knowledge():
 
 @pytest.mark.asyncio
 async def test_judge_creates_strategy_for_retrieval_issue():
+
     class FakeLLM:
         model_name = "fake"
 
@@ -698,20 +579,18 @@ async def test_judge_creates_strategy_for_retrieval_issue():
     result = await ConversationJudge(FakeLLM()).evaluate(
         {"question": "头痛发热怎么办", "content": "回答", "user_id": "patient"}
     )
-
     assert result["recommendations"] == ["过滤无关结果并校验引用"]
     assert result["experiences"][0]["type"] == "retrieval_hint"
     assert "过滤无关结果" in result["experiences"][0]["content"]
 
 
-def test_storage_does_not_record_medical_knowledge(evolution):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
-    job_id = storage.enqueue_job(message_id, "patient", "manual", 1)
-    job = storage.claim_job()
+async def test_storage_does_not_record_medical_knowledge(evolution):
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
+    job_id = await storage.enqueue_job(message_id, "patient", "manual", 1)
+    job = await storage.claim_job()
     assert job and job["job_id"] == job_id
-
-    storage.save_evaluation(
+    await storage.save_evaluation(
         job,
         {
             "overall_score": 90,
@@ -729,75 +608,32 @@ def test_storage_does_not_record_medical_knowledge(evolution):
         },
         "fake-judge",
     )
-
-    assert storage.list_experiences() == []
-    extracted = storage.list_evaluations()[0]["extracted_experience"]
+    assert await storage.list_experiences() == []
+    extracted = (await storage.list_evaluations())[0]["extracted_experience"]
     assert json.loads(extracted) == []
 
 
-def test_only_rejected_experience_can_be_deleted(evolution):
-    _session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, created_at, updated_at)
-        VALUES ('delete-exp', 'response_strategy', 'private', '头痛',
-                '先检查危险信号', 'candidate', 'now', 'now')
-        """
+async def test_only_rejected_experience_can_be_deleted(evolution, execute_sql):
+    (_session_db, storage, _service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, created_at, updated_at)\n        VALUES ('delete-exp', 'response_strategy', 'private', '头痛',\n                '先检查危险信号', 'candidate', 'now', 'now')\n        "
     )
-    conn.commit()
-
     with pytest.raises(ValueError, match="仅已驳回的经验可以删除"):
-        storage.apply_experience_action("delete-exp", "delete", "admin")
-
-    assert storage.apply_experience_action(
-        "delete-exp",
-        "reject",
-        "admin",
-    )
-    assert storage.apply_experience_action(
-        "delete-exp",
-        "reapply",
-        "admin",
-    )
-    assert storage.list_experiences()[0]["status"] == "candidate"
+        await storage.apply_experience_action("delete-exp", "delete", "admin")
+    assert await storage.apply_experience_action("delete-exp", "reject", "admin")
+    assert await storage.apply_experience_action("delete-exp", "reapply", "admin")
+    assert (await storage.list_experiences())[0]["status"] == "candidate"
     with pytest.raises(ValueError, match="仅已驳回的经验可以重新应用"):
-        storage.apply_experience_action("delete-exp", "reapply", "admin")
-    assert storage.apply_experience_action(
-        "delete-exp",
-        "reject",
-        "admin",
+        await storage.apply_experience_action("delete-exp", "reapply", "admin")
+    assert await storage.apply_experience_action("delete-exp", "reject", "admin")
+    assert await storage.apply_experience_action("delete-exp", "delete", "admin")
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, created_at, updated_at)\n        VALUES ('retired-exp', 'response_strategy', 'private', '头痛',\n                '已停用策略', 'retired', 'now', 'now')\n        "
     )
-    assert storage.apply_experience_action(
-        "delete-exp",
-        "delete",
-        "admin",
-    )
-
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, created_at, updated_at)
-        VALUES ('retired-exp', 'response_strategy', 'private', '头痛',
-                '已停用策略', 'retired', 'now', 'now')
-        """
-    )
-    conn.commit()
-    assert storage.apply_experience_action(
-        "retired-exp",
-        "reject",
-        "admin",
-    )
-    assert storage.list_experiences()[0]["status"] == "rejected"
-    assert storage.apply_experience_action(
-        "retired-exp",
-        "delete",
-        "admin",
-    )
-    assert storage.list_experiences() == []
+    assert await storage.apply_experience_action("retired-exp", "reject", "admin")
+    assert (await storage.list_experiences())[0]["status"] == "rejected"
+    assert await storage.apply_experience_action("retired-exp", "delete", "admin")
+    assert await storage.list_experiences() == []
 
 
 def test_judge_deidentifies_global_experience():
@@ -818,9 +654,9 @@ def test_source_snippet_is_limited_to_catalog():
         read_source_snippet("../../.env")
 
 
-def test_same_answer_only_counts_as_one_experience_support(evolution):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
+async def test_same_answer_only_counts_as_one_experience_support(evolution):
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
     result = {
         "overall_score": 92,
         "dimension_scores": {"medical_safety": 5},
@@ -836,84 +672,57 @@ def test_same_answer_only_counts_as_one_experience_support(evolution):
         ],
     }
     for version in (101, 102):
-        storage.enqueue_job(message_id, "patient", "manual", version)
-        job = storage.claim_job()
-        storage.save_evaluation(job, result, "fake")
-
-    experience = storage.list_experiences()[0]
+        await storage.enqueue_job(message_id, "patient", "manual", version)
+        job = await storage.claim_job()
+        await storage.save_evaluation(job, result, "fake")
+    experience = (await storage.list_experiences())[0]
     assert experience["support_count"] == 1
     assert experience["status"] == "candidate"
 
 
-def test_concurrent_workers_only_claim_job_once(evolution):
-    session_db, storage, _service = evolution
-    message_id = _save_answer(session_db)
-    storage.enqueue_job(message_id, "patient", "manual", 201)
-    barrier = Barrier(2)
-
-    def claim():
-        barrier.wait()
-        job = storage.claim_job()
-        storage._get_conn().close()
-        storage._local.conn = None
-        return job
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        jobs = list(executor.map(lambda _index: claim(), range(2)))
-
-    assert sum(job is not None for job in jobs) == 1
+async def test_concurrent_workers_only_claim_job_once(evolution):
+    (session_db, storage, _service) = evolution
+    message_id = await _save_answer(session_db)
+    await storage.enqueue_job(message_id, "patient", "manual", 201)
+    jobs = await asyncio.gather(storage.claim_job(), storage.claim_job())
+    assert sum((job is not None for job in jobs)) == 1
 
 
-def test_old_feedback_job_is_superseded_without_side_effects(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    first = service.submit_feedback(
-        message_id,
-        "patient",
-        "dislike",
-        ["unsafe"],
-        "旧反馈",
+async def test_old_feedback_job_is_superseded_without_side_effects(evolution):
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    first = await service.submit_feedback(
+        message_id, "patient", "dislike", ["unsafe"], "旧反馈"
     )
-    second = service.submit_feedback(message_id, "patient", "like", [], "")
-
-    jobs = {job["feedback_version"]: job for job in storage.list_jobs()}
+    second = await service.submit_feedback(message_id, "patient", "like", [], "")
+    jobs = {job["feedback_version"]: job for job in await storage.list_jobs()}
     assert jobs[first["version"]]["status"] == "superseded"
     assert jobs[second["version"]]["status"] == "pending"
-    claimed = storage.claim_job()
+    claimed = await storage.claim_job()
     assert claimed["feedback_version"] == second["version"]
     assert json.loads(claimed["feedback_snapshot"])["rating"] == "like"
 
 
-def test_control_feedback_does_not_retire_experience(evolution):
-    session_db, storage, service = evolution
-    message_id = _save_answer(session_db)
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('control-exp', 'response_strategy', 'global', '头痛',
-                '安全回答', 'observing', 90, 3, 3, 'now', 'now')
-        """
+async def test_control_feedback_does_not_retire_experience(evolution, execute_sql):
+    (session_db, storage, service) = evolution
+    message_id = await _save_answer(session_db)
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('control-exp', 'response_strategy', 'global', '头痛',\n                '安全回答', 'observing', 90, 3, 3, 'now', 'now')\n        "
     )
-    conn.commit()
-    storage.record_exposures(
+    await storage.record_exposures(
         message_id,
         "patient",
         [{"experience_id": "control-exp", "bucket": "control", "applied": False}],
     )
-
-    service.submit_feedback(message_id, "patient", "dislike", ["unsafe"], "")
-
-    experience = storage.list_experiences()[0]
+    await service.submit_feedback(message_id, "patient", "dislike", ["unsafe"], "")
+    experience = (await storage.list_experiences())[0]
     assert experience["status"] == "observing"
     assert experience["negative_count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_global_experience_with_personal_data_is_forced_private():
+
     class FakeLLM:
         model_name = "fake"
 
@@ -944,116 +753,66 @@ async def test_global_experience_with_personal_data_is_forced_private():
     result = await ConversationJudge(FakeLLM()).evaluate(
         {"question": "q", "content": "a", "user_id": "patient"}
     )
-
     assert result["experiences"][0]["scope"] == "private"
 
 
-def test_publication_rechecks_personal_data_in_all_fields(evolution):
-    _session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             prerequisites, created_at, updated_at)
-        VALUES ('pii-exp', 'response_strategy', 'global', '头痛',
-                '先做安全分层', 'candidate', 90, 3, 3,
-                '["联系 13812345678"]', 'now', 'now')
-        """
+async def test_publication_rechecks_personal_data_in_all_fields(evolution, execute_sql):
+    (_session_db, storage, _service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             prerequisites, created_at, updated_at)\n        VALUES ('pii-exp', 'response_strategy', 'global', '头痛',\n                '先做安全分层', 'candidate', 90, 3, 3,\n                '[\"联系 13812345678\"]', 'now', 'now')\n        "
     )
-    conn.commit()
-
     with pytest.raises(ValueError, match="个人身份信息"):
-        storage.apply_experience_action("pii-exp", "observe", "admin")
+        await storage.apply_experience_action("pii-exp", "observe", "admin")
 
 
-def test_medical_knowledge_requires_trusted_evidence_and_expiry(evolution):
-    _session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    expires_at = (datetime.now() + timedelta(days=30)).isoformat()
+async def test_medical_knowledge_requires_trusted_evidence_and_expiry(
+    evolution, execute_sql
+):
+    (_session_db, storage, _service) = evolution
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
     evidence = json.dumps(
-        [
-            {
-                "doc_id": "guide-1",
-                "source": "临床指南数据库",
-                "content": "指南原文",
-            }
-        ],
+        [{"doc_id": "guide-1", "source": "临床指南数据库", "content": "指南原文"}],
         ensure_ascii=False,
     )
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             prerequisites, safety_notes, evidence_refs, risk_level,
-             expires_at, created_at, updated_at)
-        VALUES ('medical-exp', 'medical_knowledge', 'global', '高血压',
-                '依据指南评估', 'candidate', 90, 3, 3, '["确认诊断"]',
-                '不能替代医生', ?, 'high', ?, 'now', 'now')
-        """,
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             prerequisites, safety_notes, evidence_refs, risk_level,\n             expires_at, created_at, updated_at)\n        VALUES ('medical-exp', 'medical_knowledge', 'global', '高血压',\n                '依据指南评估', 'candidate', 90, 3, 3, '[\"确认诊断\"]',\n                '不能替代医生', %s, 'high', %s, 'now', 'now')\n        ",
         (evidence, expires_at),
     )
-    conn.commit()
-
-    assert storage.apply_experience_action("medical-exp", "observe", "admin")
+    assert await storage.apply_experience_action("medical-exp", "observe", "admin")
 
 
-def test_rollback_rejects_currently_unsafe_experience(evolution):
-    _session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('unsafe-exp', 'response_strategy', 'global', '头痛',
-                '先做安全分层', 'active', 90, 5, 5, 'now', 'now')
-        """
+async def test_rollback_rejects_currently_unsafe_experience(evolution, execute_sql):
+    (_session_db, storage, _service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('unsafe-exp', 'response_strategy', 'global', '头痛',\n                '先做安全分层', 'active', 90, 5, 5, 'now', 'now')\n        "
     )
-    storage._create_release(conn, "activate", "admin")
-    version = storage.list_releases()[0]["version"]
-    conn.execute(
-        "UPDATE learned_experiences SET status = 'retired', negative_count = 1 "
-        "WHERE experience_id = 'unsafe-exp'"
-    )
-    conn.commit()
+    from mediZJ.infrastructure.database import transaction
 
+    async with transaction() as conn:
+        await storage._create_release(conn, "activate", "admin")
+    version = (await storage.list_releases())[0]["version"]
+    await execute_sql(
+        "UPDATE learned_experiences SET status = 'retired', negative_count = 1 WHERE experience_id = 'unsafe-exp'"
+    )
     with pytest.raises(RollbackBlockedError) as exc_info:
-        storage.rollback_release(version, "admin")
-
+        await storage.rollback_release(version, "admin")
     assert exc_info.value.blockers[0]["experience_id"] == "unsafe-exp"
-    assert storage.list_experiences()[0]["status"] == "retired"
+    assert (await storage.list_experiences())[0]["status"] == "retired"
 
 
-def test_global_experience_requires_observation_before_activation(evolution):
-    session_db, storage, _service = evolution
-    conn = storage._get_conn()
-    conn.execute(
-        """
-        INSERT INTO learned_experiences
-            (experience_id, experience_type, scope, query_pattern, content,
-             status, average_score, support_count, distinct_users,
-             created_at, updated_at)
-        VALUES ('observe-exp', 'response_strategy', 'global', '头痛',
-                '先做安全分层', 'candidate', 90, 3, 3, 'now', 'now')
-        """
+async def test_global_experience_requires_observation_before_activation(
+    evolution, execute_sql
+):
+    (session_db, storage, _service) = evolution
+    await execute_sql(
+        "\n        INSERT INTO learned_experiences\n            (experience_id, experience_type, scope, query_pattern, content,\n             status, average_score, support_count, distinct_users,\n             created_at, updated_at)\n        VALUES ('observe-exp', 'response_strategy', 'global', '头痛',\n                '先做安全分层', 'candidate', 90, 3, 3, 'now', 'now')\n        "
     )
-    conn.commit()
-
     with pytest.raises(ValueError, match="必须先完成观察"):
-        storage.apply_experience_action("observe-exp", "activate", "admin")
-    assert storage.apply_experience_action(
-        "observe-exp",
-        "observe",
-        "admin",
-    )
-
+        await storage.apply_experience_action("observe-exp", "activate", "admin")
+    assert await storage.apply_experience_action("observe-exp", "observe", "admin")
     for index in range(10):
         user_id = f"observer-{index}"
-        saved = session_db.save_turn(
+        saved = await session_db.save_turn(
             session_id=f"observe-session-{index}",
             turn_index=0,
             user_msg={"content": "头痛怎么办"},
@@ -1062,7 +821,7 @@ def test_global_experience_requires_observation_before_activation(evolution):
         )
         message_id = int(saved["assistant_message_id"])
         bucket = "treatment" if index < 5 else "control"
-        storage.record_exposures(
+        await storage.record_exposures(
             message_id,
             user_id,
             [
@@ -1073,9 +832,9 @@ def test_global_experience_requires_observation_before_activation(evolution):
                 }
             ],
         )
-        storage.enqueue_job(message_id, user_id, "manual", index + 1000)
-        job = storage.claim_job()
-        storage.save_evaluation(
+        await storage.enqueue_job(message_id, user_id, "manual", index + 1000)
+        job = await storage.claim_job()
+        await storage.save_evaluation(
             job,
             {
                 "overall_score": 90,
@@ -1085,12 +844,7 @@ def test_global_experience_requires_observation_before_activation(evolution):
             },
             "fake",
         )
-
-    item = storage.list_experiences()[0]
+    item = (await storage.list_experiences())[0]
     assert item["eligible_for_activation"] is True
-    assert storage.apply_experience_action(
-        "observe-exp",
-        "activate",
-        "admin",
-    )
-    assert storage.list_experiences()[0]["status"] == "active"
+    assert await storage.apply_experience_action("observe-exp", "activate", "admin")
+    assert (await storage.list_experiences())[0]["status"] == "active"

@@ -21,24 +21,22 @@ async def search_similar_cases(query: str, max_results: int = 3) -> Dict[str, An
             "query": "原始查询"
         }
     """
-    logger.info(f"Searching similar cases: query={query}, max_results={max_results}")
+    logger.info('执行医学检索工具')
 
     try:
-        # 导入长期记忆系统
-        from memory.long_term import LongTermMemory
+        import asyncio
+        from mediZJ.infrastructure.context import get_identity
+        from mediZJ.memory.session_db import SessionDB
+        from mediZJ.memory.session_vector_store import SessionVectorStore
 
-        # 获取长期记忆实例
-        memory = LongTermMemory()
-
-        if not memory.enabled:
-            return {
-                "answer": "长期记忆功能未启用。无法搜索历史案例。",
-                "total_found": 0,
-                "query": query
-            }
-
-        # 搜索相似会话
-        results = await memory.search_similar_sessions(query=query, limit=max_results)
+        user_id, _ = get_identity()
+        hits = await asyncio.to_thread(
+            SessionVectorStore().search_similar, query, max_results, user_id,
+        )
+        results = []
+        for hit in hits:
+            if await SessionDB().get_session(hit['session_id'], user_id):
+                results.append(hit)
 
         if not results:
             return {

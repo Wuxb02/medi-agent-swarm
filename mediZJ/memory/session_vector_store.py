@@ -2,29 +2,24 @@
 Milvus 会话向量存储
 
 功能：
-- 将会话摘要向量化并存入 Milvus Lite
+- 将会话摘要向量化并存入 Milvus 服务端
 - 语义搜索相似会话
 - 支持会话向量的增删查
 
-存储路径：memory/data/session_vectors.db
+存储：Milvus 服务端
 Collection：session_summaries
 """
-import os
+
 import threading
-from pathlib import Path
 from typing import Any, Dict, List
 
 from loguru import logger
 
-from pymilvus import MilvusClient
+from pymilvus import MilvusClient, DataType
 
 from .embedding import load_embedding_model
 
 
-# 默认路径
-_DEFAULT_VEC_DB_PATH = os.path.join(
-    os.path.dirname(__file__), "data", "session_vectors.db"
-)
 _COLLECTION_NAME = "session_summaries"
 _EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 
@@ -41,38 +36,59 @@ class SessionVectorStore:
 
     def __init__(
         self,
-        db_path: str = _DEFAULT_VEC_DB_PATH,
-        embedding_model_name: str = _EMBEDDING_MODEL,
+        embedding_model_name: str = None,
+        initialize: bool = False,
     ):
         if hasattr(self, "_initialized"):
             return
 
-        self.db_path = db_path
-        self.collection_name = _COLLECTION_NAME
+        from mediZJ.infrastructure.settings import get_settings
 
-        # 确保目录存在
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        settings = get_settings()
+        self.collection_name = settings.session_collection
 
         # 加载 embedding 模型（进程内共享缓存实例）
+        if (
+            embedding_model_name is not None
+            and embedding_model_name != settings.embedding_model_name
+        ):
+            raise ValueError("禁止更换固定 embedding 模型")
         self._load_embedding_model(embedding_model_name)
 
-        # Milvus Lite 客户端调用串行化（pymilvus 对本地文件型客户端无线程安全保证）
+        # Milvus 客户端调用串行化
         self._client_lock = threading.RLock()
 
-        # 初始化 Milvus Lite
-        logger.info(f"Connecting to session vector store: {db_path}")
-        self.milvus_client = MilvusClient(db_path)
+        # 初始化 Milvus 服务端客户端
+        self.milvus_client = MilvusClient(
+            uri=settings.milvus_uri, token=settings.milvus_token
+        )
 
         # 创建 collection（如不存在）
         if not self.milvus_client.has_collection(self.collection_name):
-            logger.info(f"Creating collection: {self.collection_name}")
+            if not initialize:
+                raise RuntimeError("会话 collection 不存在，请先执行 bootstrap")
+            from mediZJ.infrastructure.vector_schema import SCHEMA_DESCRIPTION
+
             self.milvus_client.create_collection(
                 collection_name=self.collection_name,
                 dimension=self.embedding_dim,
+                description=SCHEMA_DESCRIPTION,
                 metric_type="COSINE",
-                auto_id=True,
+                auto_id=False,
+                id_type="string",
+                max_length=191,
             )
 
+        from mediZJ.infrastructure.vector_schema import validate_collection
+
+        validate_collection(
+            self.milvus_client.describe_collection(self.collection_name),
+            {
+                "id": DataType.VARCHAR,
+                "vector": DataType.FLOAT_VECTOR,
+            },
+            self.embedding_dim,
+        )
         self._initialized = True
         logger.info(
             f"SessionVectorStore initialized "
@@ -82,9 +98,7 @@ class SessionVectorStore:
     def _load_embedding_model(self, model_name: str):
         """加载 embedding 模型（经共享缓存，全进程同一实例）"""
         self.embedding_model = load_embedding_model(model_name)
-        self.embedding_dim = (
-            self.embedding_model.get_sentence_embedding_dimension()
-        )
+        self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
 
     def index_session(
         self,
@@ -98,17 +112,18 @@ class SessionVectorStore:
         """
         将会话摘要向量化并存入 Milvus
 
-        如果同 session_id 已存在，先删除旧记录再插入新记录。
+        同 session_id 使用稳定主键幂等 upsert。
         """
         if not summary_text.strip():
             logger.warning(f"Empty summary for session {session_id}, skip indexing")
             return
 
-        # 向量化（CPU 推理，无需持锁）
+        # 向量化（自动选择推理设备，无需持锁）
         vector = self.embedding_model.encode([summary_text])[0]
 
         data = [
             {
+                "id": session_id,
                 "vector": vector.tolist(),
                 "session_id": session_id,
                 "user_id": user_id,
@@ -119,16 +134,8 @@ class SessionVectorStore:
             }
         ]
 
-        # delete + insert 在同一临界区内，保证更新原子性
         with self._client_lock:
-            self.delete_session(session_id)
-            try:
-                self.milvus_client.insert(
-                    collection_name=self.collection_name, data=data
-                )
-                logger.debug(f"Indexed session: {session_id}")
-            except Exception as e:
-                logger.error(f"Failed to index session {session_id}: {e}")
+            self.milvus_client.upsert(collection_name=self.collection_name, data=data)
 
     def search_similar(
         self,
@@ -157,10 +164,15 @@ class SessionVectorStore:
                     collection_name=self.collection_name,
                     data=[query_vector.tolist()],
                     limit=top_k,
+                    consistency_level="Strong",
                     filter=f'user_id == "{user_id}"',
                     output_fields=[
-                        "session_id", "user_id", "summary", "mode",
-                        "created_at", "total_tokens",
+                        "session_id",
+                        "user_id",
+                        "summary",
+                        "mode",
+                        "created_at",
+                        "total_tokens",
                     ],
                 )
 
@@ -175,7 +187,7 @@ class SessionVectorStore:
                             "mode": entity.get("mode", "single"),
                             "created_at": entity.get("created_at", ""),
                             "total_tokens": entity.get("total_tokens", 0),
-                            "score": round(1 - hit["distance"], 4),
+                            "score": round(hit["distance"], 4),
                         }
                     )
 
@@ -183,8 +195,8 @@ class SessionVectorStore:
             return hits
 
         except Exception as e:
-            logger.error(f"Session similarity search failed: {e}")
-            return []
+            logger.error("会话向量检索失败: {}", type(e).__name__)
+            raise
 
     def delete_session(self, session_id: str):
         """删除会话的向量记录"""
@@ -196,18 +208,20 @@ class SessionVectorStore:
                 )
             logger.debug(f"Deleted vector for session: {session_id}")
         except Exception as e:
-            logger.warning(
-                f"Failed to delete vector for session {session_id}: {e}"
-            )
+            logger.error("会话向量删除失败: {}", type(e).__name__)
+            raise
 
     def count_sessions(self) -> int:
         """统计已索引的会话数量"""
         try:
             with self._client_lock:
-                stats = self.milvus_client.describe_collection(
-                    self.collection_name
+                rows = self.milvus_client.query(
+                    collection_name=self.collection_name,
+                    filter="",
+                    output_fields=["count(*)"],
+                    consistency_level="Strong",
                 )
-            return stats.get("num_entities", 0)
+            return int(rows[0]["count(*)"])
         except Exception as e:
-            logger.warning(f"Failed to count sessions: {e}")
+            logger.warning(f"Failed to count sessions: {type(e).__name__}")
             return 0

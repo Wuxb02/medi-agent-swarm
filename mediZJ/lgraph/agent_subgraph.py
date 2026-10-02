@@ -10,6 +10,7 @@ AgentSubGraph — 替代 AgentLoop.run() 的 LangGraph 子图
 每个 Worker Agent 独立运行一个 AgentSubGraph 实例。
 子图不含 interrupt/checkpoint：问卷澄清仅由主图 clarify 阶段（LeadAgent）负责。
 """
+
 import json
 import asyncio
 from typing import Dict, Any, List, Optional, Callable
@@ -35,15 +36,15 @@ _CHINESE_REASONING_REMINDER = (
 
 # 约束验证和自动修复
 try:
-    from mediZJ.constraints import ConstraintValidator
-    from mediZJ.validation import AutoFixer
+    from mediZJ.constraints.validator import get_shared_validator
+
     CONSTRAINTS_ENABLED = True
 except ImportError:
     CONSTRAINTS_ENABLED = False
 
 
-def build_agent_subgraph(
-    worker,                         # Worker 实例（持有 LLMClient、流式回调等）
+async def build_agent_subgraph(
+    worker,  # Worker 实例（持有 LLMClient、流式回调等）
     tool_registry: ToolRegistry,
     max_iterations: int = 10,
     max_tool_calls: int = 2,
@@ -69,16 +70,12 @@ def build_agent_subgraph(
         编译后的 CompiledStateGraph
     """
     if CONSTRAINTS_ENABLED:
-        from mediZJ.constraints.validator import get_shared_validator
-        from mediZJ.validation.auto_fixer import get_shared_auto_fixer
         validator = get_shared_validator()
-        auto_fixer = get_shared_auto_fixer()
     else:
         validator = None
-        auto_fixer = None
 
     # 工具执行节点
-    _tool_execution_node = make_tool_execution_node(
+    _tool_execution_node = await make_tool_execution_node(
         tool_registry=tool_registry,
         validator=validator,
         on_tool_step=on_tool_step,
@@ -108,13 +105,19 @@ def build_agent_subgraph(
                 "## 前置结论（由前一阶段求得，须在此具体方案/结论的基础上回答当前阶段）\n"
                 f"{stage_prereq}\n\n{question}"
             )
-        user_input = worker.format_user_input({
-            "question": question,
-            "subtask_id": state.get("subtask_id", ""),
-            "subtask_type": state.get("subtask_type", ""),
-            "session_id": effective_id,
-        })
+        user_input = worker.format_user_input(
+            {
+                "question": question,
+                "subtask_id": state.get("subtask_id", ""),
+                "subtask_type": state.get("subtask_type", ""),
+                "session_id": effective_id,
+            }
+        )
         memory_context = state.get("memory_context")
+        if isinstance(memory_context, dict):
+            from mediZJ.memory.context_builder import MedicalMemoryContext
+
+            memory_context = MedicalMemoryContext.from_dict(memory_context)
         if memory_context is not None:
             messages = memory_context.prompt_messages(question=user_input)
         else:
@@ -125,8 +128,7 @@ def build_agent_subgraph(
             messages.append({"role": "user", "content": user_input})
 
         # 记录用户消息到短期记忆
-        if (worker.short_term_memory
-                and session_id):
+        if worker.short_term_memory and session_id:
             await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="user",
@@ -152,18 +154,14 @@ def build_agent_subgraph(
                 "total_tokens": 0,
                 "cached_prompt_tokens": 0,
                 "cache_hit_ratio": None,
-                "global_prefix_hash": getattr(
-                    memory_context, "global_prefix_hash", ""
-                ),
+                "global_prefix_hash": getattr(memory_context, "global_prefix_hash", ""),
                 "profile_prefix_hash": getattr(
                     memory_context, "profile_prefix_hash", ""
                 ),
                 "global_prefix_version": getattr(
                     memory_context, "global_prefix_version", ""
                 ),
-                "profile_revision": getattr(
-                    memory_context, "profile_revision", 0
-                ),
+                "profile_revision": getattr(memory_context, "profile_revision", 0),
                 "call_type": getattr(memory_context, "call_type", ""),
                 "model": str(worker.llm_client.model_name),
             },
@@ -184,7 +182,8 @@ def build_agent_subgraph(
         # 根据 active_skill 过滤可见工具
         active_skill = state.get("active_skill")
         visible_tools = tool_registry.get_visible_tools(
-            active_skill, agent_id=state.get("agent_id"),
+            active_skill,
+            agent_id=state.get("agent_id"),
         )
 
         messages = state.get("messages", [])
@@ -212,29 +211,33 @@ def build_agent_subgraph(
                     ),
                 )
 
-                llm_response: LLMResponse = await worker.llm_client.chat_with_tools_stream(
-                    messages=messages,
-                    tools=visible_tools if visible_tools else None,
-                    tool_choice="auto",
-                    temperature=worker.config.get('temperature', 0.7),
-                    on_content_token=router.on_content_token,
-                    on_reasoning_token=router.on_reasoning_token,
-                    on_tools_detected=router.on_tools_detected,
+                llm_response: LLMResponse = (
+                    await worker.llm_client.chat_with_tools_stream(
+                        messages=messages,
+                        tools=visible_tools if visible_tools else None,
+                        tool_choice="auto",
+                        temperature=worker.config.get("temperature", 0.7),
+                        on_content_token=router.on_content_token,
+                        on_reasoning_token=router.on_reasoning_token,
+                        on_tools_detected=router.on_tools_detected,
+                    )
                 )
 
                 if not router.tools_detected:
                     router.flush_content_buffer()
             else:
-                llm_response: LLMResponse = await worker.llm_client.chat_with_tools_retry(
-                    messages=messages,
-                    tools=visible_tools if visible_tools else None,
-                    tool_choice="auto",
-                    temperature=worker.config.get('temperature', 0.7),
+                llm_response: LLMResponse = (
+                    await worker.llm_client.chat_with_tools_retry(
+                        messages=messages,
+                        tools=visible_tools if visible_tools else None,
+                        tool_choice="auto",
+                        temperature=worker.config.get("temperature", 0.7),
+                    )
                 )
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"LLM 调用异常 (iteration={iteration}): {e}")
+            logger.error(f"LLM 调用异常 (iteration={iteration}): {type(e).__name__}")
             return {
                 "iteration": iteration,
                 "completed": True,
@@ -243,12 +246,15 @@ def build_agent_subgraph(
             }
 
         # 累加 token 用量
-        usage = state.get("usage", {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "cached_prompt_tokens": 0,
-        })
+        usage = state.get(
+            "usage",
+            {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cached_prompt_tokens": 0,
+            },
+        )
         if llm_response.usage:
             usage["prompt_tokens"] += llm_response.usage.get("prompt_tokens", 0)
             usage["completion_tokens"] += llm_response.usage.get("completion_tokens", 0)
@@ -287,11 +293,13 @@ def build_agent_subgraph(
             ]
 
         # 记录到短期记忆
-        if (worker.short_term_memory
-                and state.get("session_id")):
+        if worker.short_term_memory and state.get("session_id"):
             effective_id = state.get("sub_session_id") or state.get("session_id")
-            stm_content = f"调用工具：{', '.join(tc.name for tc in llm_response.tool_calls)}" \
-                if llm_response.has_tool_calls() else (llm_response.content or "")
+            stm_content = (
+                f"调用工具：{', '.join(tc.name for tc in llm_response.tool_calls)}"
+                if llm_response.has_tool_calls()
+                else (llm_response.content or "")
+            )
             await worker.short_term_memory.add_message(
                 session_id=effective_id,
                 role="assistant",
@@ -319,8 +327,8 @@ def build_agent_subgraph(
 
         last_msg = messages[-1]
         # 兼容 LangChain AIMessage 对象和 dict
-        if hasattr(last_msg, 'type') and not isinstance(last_msg, dict):
-            content = getattr(last_msg, 'content', "") or ""
+        if hasattr(last_msg, "type") and not isinstance(last_msg, dict):
+            content = getattr(last_msg, "content", "") or ""
         else:
             content = last_msg.get("content", "") if isinstance(last_msg, dict) else ""
 
@@ -367,12 +375,13 @@ def build_agent_subgraph(
 
             final_answer = response.content or "抱歉，未能完成任务。"
         except Exception as e:
-            logger.error(f"强制收尾 LLM 调用失败: {e}")
-            final_answer = "抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。"
+            logger.error(f"强制收尾 LLM 调用失败: {type(e).__name__}")
+            final_answer = (
+                "抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。"
+            )
 
         # 记录到短期记忆
-        if (worker.short_term_memory
-                and state.get("session_id")):
+        if worker.short_term_memory and state.get("session_id"):
             effective_id = state.get("sub_session_id") or state.get("session_id")
             await worker.short_term_memory.add_message(
                 session_id=effective_id,
@@ -392,7 +401,9 @@ def build_agent_subgraph(
             "usage": usage,
             "message_count": msg_count,
             "references": references,
-            "warning": "max_iterations_reached" if iteration >= max_iterations else "max_tool_calls_reached",
+            "warning": "max_iterations_reached"
+            if iteration >= max_iterations
+            else "max_tool_calls_reached",
         }
 
         # 后处理
@@ -422,27 +433,34 @@ def build_agent_subgraph(
         last_message = messages[-1]
 
         # 兼容 LangChain AIMessage 对象（add_messages reducer 转换后）和 dict
-        if hasattr(last_message, 'type') and not isinstance(last_message, dict):
+        if hasattr(last_message, "type") and not isinstance(last_message, dict):
             # LangChain AIMessage
             if last_message.type != "ai":
                 return "done"
-            tool_calls = getattr(last_message, 'tool_calls', []) or []
+            tool_calls = getattr(last_message, "tool_calls", []) or []
+
             # AIMessage.tool_calls 格式: [{"name": "...", "args": {}, "id": "...", "type": "tool_call"}]
-            _get_tc_name = lambda tc: tc.get("name", "") if isinstance(tc, dict) else getattr(tc, 'name', '')
+            def _get_tc_name(tc):
+                return (
+                    tc.get("name", "")
+                    if isinstance(tc, dict)
+                    else getattr(tc, "name", "")
+                )
         else:
             # dict 格式
             if last_message.get("role") != "assistant":
                 return "done"
             tool_calls = last_message.get("tool_calls", [])
-            _get_tc_name = lambda tc: tc.get("function", {}).get("name", "")
+
+            def _get_tc_name(tc):
+                return tc.get("function", {}).get("name", "")
 
         if not tool_calls:
             # 无 tool_calls → 最终回答
             return "done"
 
         # 检查是否达到最大工具调用次数（activate_skill 不计入）
-        non_activate = [tc for tc in tool_calls
-                        if _get_tc_name(tc) != "activate_skill"]
+        non_activate = [tc for tc in tool_calls if _get_tc_name(tc) != "activate_skill"]
         tool_call_count = state.get("tool_call_count", 0)
         if non_activate and tool_call_count >= max_tool_calls:
             logger.warning(f"达到最大工具调用次数 {max_tool_calls}，强制收尾")
@@ -488,7 +506,7 @@ def build_agent_subgraph(
             "tool_execution": "tool_execution",
             "force_answer": "force_answer",
             "done": "finalize_answer",
-        }
+        },
     )
 
     # 工具执行后的条件路由
@@ -499,7 +517,7 @@ def build_agent_subgraph(
             "llm_call": "llm_call",
             "force_answer": "force_answer",
             "done": "finalize_answer",
-        }
+        },
     )
 
     # 正常结束 → END
@@ -513,6 +531,7 @@ def build_agent_subgraph(
 
 
 # ===== 辅助函数 =====
+
 
 def _format_answers(questions_ref: List[Dict], answers: Dict[str, Any]) -> str:
     """将用户回答格式化为 LLM 可读文本"""

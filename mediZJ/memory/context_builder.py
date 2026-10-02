@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
 from .prompt_prefix import GLOBAL_PREFIX_VERSION, PromptPrefixAssembler, stable_hash
@@ -33,6 +33,13 @@ class MedicalMemoryContext:
     query: str = ""
     collected_info: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MedicalMemoryContext":
+        return cls(**data)
+
     def prompt_messages(self, question: Optional[str] = None) -> list[dict[str, str]]:
         """按 KV cache 友好顺序输出消息。"""
         messages = [{"role": "system", "content": self.global_static_prefix}]
@@ -44,8 +51,7 @@ class MedicalMemoryContext:
                 "content": str(message.get("content", "")),
             }
             for message in self.recent_messages
-            if message.get("role") in {"user", "assistant"}
-            and message.get("content")
+            if message.get("role") in {"user", "assistant"} and message.get("content")
         )
         dynamic = self._dynamic_text(question or self.query)
         if dynamic:
@@ -60,15 +66,15 @@ class MedicalMemoryContext:
         context["agent_id"] = agent_id
         return context
 
-    async def record_usage(
-        self, store: StructuredMemoryStore, trace_id: str
-    ) -> None:
-        store.record_usage(
-            self.used_memory_ids,
-            session_id=self.session_id,
-            trace_id=trace_id,
-            agent_id=self.agent_id,
-            user_id=self.user_id,
+    async def record_usage(self, store: StructuredMemoryStore, trace_id: str) -> None:
+        (
+            await store.record_usage(
+                self.used_memory_ids,
+                session_id=self.session_id,
+                trace_id=trace_id,
+                agent_id=self.agent_id,
+                user_id=self.user_id,
+            )
         )
 
     def _consumer_context(self) -> dict[str, Any]:
@@ -104,8 +110,7 @@ class MedicalMemoryContext:
             sections.append("## 本轮医学证据\n" + evidence)
         if self.procedural_strategies:
             sections.append(
-                "## 已验证执行策略（不可作为医学证据）\n"
-                + self.procedural_strategies
+                "## 已验证执行策略（不可作为医学证据）\n" + self.procedural_strategies
             )
         if question:
             sections.append("## 当前任务\n" + question)
@@ -140,7 +145,7 @@ class MedicalMemoryContextBuilder:
     ) -> MedicalMemoryContext:
         user_memories = [
             item
-            for item in self.store.list_items(user_id, statuses=("active",))
+            for item in await self.store.list_items(user_id, statuses=("active",))
             if item["consent_scope"] == "personalization"
             and (
                 item["sensitivity_level"] != "highly_sensitive"
@@ -150,13 +155,13 @@ class MedicalMemoryContextBuilder:
         user_prefix = PromptPrefixAssembler.user_prefix(user_memories)
         global_prefix = PromptPrefixAssembler.global_prefix(base_system_prompt)
         profile_hash = stable_hash(user_prefix)
-        self.store.set_profile_hash(user_id, profile_hash)
+        await self.store.set_profile_hash(user_id, profile_hash)
         recent = []
         if include_history:
             recent = await self.working_memory.get_recent_messages(
                 session_id=session_id, limit=None
             )
-        episodes = self.store.recall_episodes(user_id, session_id)
+        episodes = await self.store.recall_episodes(user_id, session_id)
         return MedicalMemoryContext(
             global_static_prefix=global_prefix,
             user_stable_prefix=user_prefix,
@@ -169,7 +174,7 @@ class MedicalMemoryContextBuilder:
             used_memory_ids=[item["memory_id"] for item in user_memories],
             global_prefix_hash=stable_hash(global_prefix),
             profile_prefix_hash=profile_hash,
-            profile_revision=self.store.get_profile_revision(user_id),
+            profile_revision=await self.store.get_profile_revision(user_id),
             session_id=session_id,
             user_id=user_id,
             agent_id=agent_id,

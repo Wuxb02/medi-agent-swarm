@@ -3,6 +3,7 @@
 
 编排多步骤研究流程：查询规划 → 搜索 → 检索 → 综合 → 验证
 """
+
 from typing import List, Dict, Any, Optional
 from loguru import logger
 import asyncio
@@ -15,6 +16,7 @@ from mediZJ.research.evidence_synthesizer import EvidenceSynthesizer, ResearchRe
 
 # 全局知识库实例（单例）
 _kb_instance = None
+
 
 def get_knowledge_base():
     """获取知识库单例"""
@@ -39,7 +41,7 @@ class DeepResearchWorkflow:
         self,
         llm_client: Optional[LLMClient] = None,
         use_web_search: bool = True,
-        use_knowledge_base: bool = True
+        use_knowledge_base: bool = True,
     ):
         """
         初始化工作流
@@ -60,10 +62,7 @@ class DeepResearchWorkflow:
         self.synthesizer = EvidenceSynthesizer(llm_client=self.llm_client)
 
     async def run(
-        self,
-        question: str,
-        max_web_results: int = 10,
-        max_kb_results: int = 5
+        self, question: str, max_web_results: int = 10, max_kb_results: int = 5
     ) -> ResearchReport:
         """
         执行深度研究
@@ -76,7 +75,7 @@ class DeepResearchWorkflow:
         Returns:
             研究报告
         """
-        logger.info(f"Starting DeepResearch for: {question}")
+        logger.info("Starting DeepResearch")
 
         # Step 1: 查询规划
         sub_queries = await self._plan_queries(question)
@@ -84,7 +83,7 @@ class DeepResearchWorkflow:
 
         # Step 2: 并行搜索
         web_results: List[SearchResult] = []
-        kb_results: List[Document] = []
+        kb_results: List[Dict[str, Any]] = []
 
         search_tasks = []
 
@@ -92,14 +91,20 @@ class DeepResearchWorkflow:
             # 网络搜索
             for query in sub_queries[:3]:  # 限制子查询数量
                 search_tasks.append(
-                    self.web_search.search(query, max_results=max_web_results // len(sub_queries))
+                    self.web_search.search(
+                        query, max_results=max_web_results // len(sub_queries)
+                    )
                 )
 
         if self.use_knowledge_base and self.knowledge_base:
             # 从 Milvus 知识库检索
             for query in sub_queries[:3]:
                 search_tasks.append(
-                    self._search_milvus(query, top_k=max_kb_results // len(sub_queries))
+                    (
+                        await self._search_milvus(
+                            query, top_k=max_kb_results // len(sub_queries)
+                        )
+                    )
                 )
 
         # 并行执行
@@ -120,13 +125,13 @@ class DeepResearchWorkflow:
                             # Milvus 返回的是字典列表
                             kb_results.extend(result)
 
-        logger.info(f"Collected {len(web_results)} web results, {len(kb_results)} KB results")
+        logger.info(
+            f"Collected {len(web_results)} web results, {len(kb_results)} KB results"
+        )
 
         # Step 3: 证据综合
         report = await self.synthesizer.synthesize(
-            query=question,
-            web_results=web_results,
-            kb_results=kb_results
+            query=question, web_results=web_results, kb_results=kb_results
         )
         if not report.key_findings:
             logger.warning("Report has no key findings")
@@ -149,11 +154,15 @@ class DeepResearchWorkflow:
             文档列表（字典格式）
         """
         try:
-            results = self.knowledge_base.search(query=query, top_k=top_k, filter_type=None)
-            logger.debug(f"Milvus search returned {len(results)} results for: {query[:50]}...")
+            results = self.knowledge_base.search(
+                query=query, top_k=top_k, filter_type=None
+            )
+            logger.debug(
+                f"Milvus search returned {len(results)} results for: {query[:50]}..."
+            )
             return results
         except Exception as e:
-            logger.error(f"Milvus search failed: {e}")
+            logger.error(f"Milvus search failed: {type(e).__name__}")
             return []
 
     async def _plan_queries(self, question: str) -> List[str]:
@@ -169,18 +178,16 @@ class DeepResearchWorkflow:
         prompt = PromptLoader.render("research/query_planning.j2", question=question)
 
         try:
-            response = await self.llm_client.chat([
-                {"role": "user", "content": prompt}
-            ])
+            response = await self.llm_client.chat([{"role": "user", "content": prompt}])
 
             # 解析子查询
-            lines = response.strip().split('\n')
+            lines = response.strip().split("\n")
             sub_queries = []
 
             for line in lines:
                 line = line.strip()
                 # 移除可能的编号
-                line = line.lstrip('0123456789.-:：）) ')
+                line = line.lstrip("0123456789.-:：）) ")
                 if line and len(line) > 5:  # 过滤太短的行
                     sub_queries.append(line)
 
@@ -194,14 +201,12 @@ class DeepResearchWorkflow:
             return sub_queries
 
         except Exception as e:
-            logger.error(f"Query planning error: {e}")
+            logger.error(f"Query planning error: {type(e).__name__}")
             # 降级：返回原始问题
             return [question]
 
     async def research_with_refinement(
-        self,
-        question: str,
-        max_iterations: int = 2
+        self, question: str, max_iterations: int = 2
     ) -> ResearchReport:
         """
         带细化的研究（多轮迭代）
@@ -225,7 +230,9 @@ class DeepResearchWorkflow:
 
             # 检查质量
             if report.confidence >= 0.7 and len(report.key_findings) >= 3:
-                logger.info(f"High-quality report achieved in iteration {iteration + 1}")
+                logger.info(
+                    f"High-quality report achieved in iteration {iteration + 1}"
+                )
                 break
 
             # 如果是最后一轮，直接返回
@@ -241,9 +248,7 @@ class DeepResearchWorkflow:
 
 # 便捷函数
 async def deep_research(
-    question: str,
-    use_web: bool = True,
-    use_kb: bool = True
+    question: str, use_web: bool = True, use_kb: bool = True
 ) -> ResearchReport:
     """
     快速执行深度研究
@@ -256,8 +261,5 @@ async def deep_research(
     Returns:
         研究报告
     """
-    workflow = DeepResearchWorkflow(
-        use_web_search=use_web,
-        use_knowledge_base=use_kb
-    )
+    workflow = DeepResearchWorkflow(use_web_search=use_web, use_knowledge_base=use_kb)
     return await workflow.run(question)

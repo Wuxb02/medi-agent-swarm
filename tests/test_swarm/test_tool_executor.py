@@ -6,7 +6,6 @@
   不再由工具执行节点检测（见 supervisor_graph._clarify）
 """
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -25,20 +24,24 @@ class TestToolExecutionNode:
         registry = MagicMock()
         registry.execute = _make_normal_tool()
 
-        node = make_tool_execution_node(tool_registry=registry)
+        node = await make_tool_execution_node(tool_registry=registry)
         state = {
             "agent_id": "consultation_agent",
-            "messages": [{
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": "call_x1",
-                    "type": "function",
-                    "function": {
-                        "name": "search_knowledge",
-                        "arguments": "{}",
-                    },
-                }],
-            }],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_x1",
+                            "type": "function",
+                            "function": {
+                                "name": "search_knowledge",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                }
+            ],
         }
 
         result = await node(state)
@@ -56,10 +59,12 @@ class TestExtractToolCalls:
 
     def test_extracts_from_dict(self):
         last = {
-            "tool_calls": [{
-                "id": "c1",
-                "function": {"name": "foo", "arguments": '{"a": 1}'},
-            }],
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "function": {"name": "foo", "arguments": '{"a": 1}'},
+                }
+            ],
         }
         calls = _extract_tool_calls(last)
         assert len(calls) == 1
@@ -72,12 +77,14 @@ class TestExtractToolCalls:
 
     def test_extracts_from_langchain_ai_message(self):
         ai_message = MagicMock()
-        ai_message.tool_calls = [{
-            "id": "c2",
-            "name": "bar",
-            "args": {"b": 2},
-            "type": "tool_call",
-        }]
+        ai_message.tool_calls = [
+            {
+                "id": "c2",
+                "name": "bar",
+                "args": {"b": 2},
+                "type": "tool_call",
+            }
+        ]
         calls = _extract_tool_calls(ai_message)
         assert len(calls) == 1
         assert calls[0].id == "c2"

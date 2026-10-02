@@ -7,6 +7,7 @@ MediZJ Agent Swarm 评估框架 - 统一入口
     uv run python -m eval.runner --metrics routing,retrieval  # 运行指定指标
     uv run python -m eval.runner --score-abtest           # 计算已有 AB 测试评分结果
 """
+
 import asyncio
 import argparse
 import json
@@ -16,25 +17,40 @@ from datetime import datetime
 from typing import Dict, Any, List
 
 # 确保项目根目录在 path 中
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+project_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 # 加载 .env 环境变量
-import dotenv
+import dotenv  # noqa: E402
+
 dotenv.load_dotenv()
 
-from loguru import logger
+from loguru import logger  # noqa: E402
 
-from mediZJ.eval.config import REPORTS_DIR, THRESHOLDS
+from mediZJ.eval.config import REPORTS_DIR  # noqa: E402
 
 
 # ===== 评估器注册表 =====
 EVAL_REGISTRY = {
-    "routing": ("mediZJ.eval.evaluators.routing_eval", "run_routing_eval", "智能路由准确率"),
-    "retrieval": ("mediZJ.eval.evaluators.retrieval_eval", "run_retrieval_eval", "知识库检索准确率"),
+    "routing": (
+        "mediZJ.eval.evaluators.routing_eval",
+        "run_routing_eval",
+        "智能路由准确率",
+    ),
+    "retrieval": (
+        "mediZJ.eval.evaluators.retrieval_eval",
+        "run_retrieval_eval",
+        "知识库检索准确率",
+    ),
     "latency": ("mediZJ.eval.evaluators.latency_eval", "run_latency_eval", "响应时间"),
-    "multiturn": ("mediZJ.eval.evaluators.multiturn_eval", "run_multiturn_eval", "多轮对话上下文理解"),
+    "multiturn": (
+        "mediZJ.eval.evaluators.multiturn_eval",
+        "run_multiturn_eval",
+        "多轮对话上下文理解",
+    ),
     "abtest": ("mediZJ.eval.evaluators.abtest_eval", "run_abtest_eval", "AB 测试"),
 }
 
@@ -43,9 +59,9 @@ async def _run_evaluations(metrics: List[str], coordinator) -> Dict[str, Any]:
     """执行评估列表，返回结果字典"""
     all_results = {}
     for metric in metrics:
-        logger.info(f"\n{'='*50}")
+        logger.info(f"\n{'=' * 50}")
         logger.info(f"开始评估: {EVAL_REGISTRY[metric][2]}")
-        logger.info(f"{'='*50}")
+        logger.info(f"{'=' * 50}")
 
         eval_func, _ = _import_evaluator(metric)
 
@@ -66,6 +82,7 @@ def _import_evaluator(metric: str):
     """动态导入评估器"""
     module_path, func_name, display_name = EVAL_REGISTRY[metric]
     import importlib
+
     module = importlib.import_module(module_path)
     return getattr(module, func_name), display_name
 
@@ -74,21 +91,25 @@ def _generate_report(all_results: Dict[str, Any]) -> str:
     """生成 Markdown 评估报告"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
-        f"# MediZJ Agent Swarm 评估报告",
-        f"",
+        "# MediZJ Agent Swarm 评估报告",
+        "",
         f"生成时间：{now}",
-        f"",
-        f"## 概览",
-        f"",
-        f"| 指标 | 结果 | 阈值 | 状态 |",
-        f"|------|------|------|------|",
+        "",
+        "## 概览",
+        "",
+        "| 指标 | 结果 | 阈值 | 状态 |",
+        "|------|------|------|------|",
     ]
 
     for metric, result in all_results.items():
         if metric == "routing":
             acc = result.get("agent_exact_accuracy", result.get("mode_accuracy", 0))
             threshold = result.get("threshold", 0)
-            status = "PASS" if result.get("agent_pass") or result.get("mode_pass") else "FAIL"
+            status = (
+                "PASS"
+                if result.get("agent_pass") or result.get("mode_pass")
+                else "FAIL"
+            )
             lines.append(f"| 路由准确率 | {acc:.1%} | ≥{threshold:.0%} | {status} |")
 
         elif metric == "retrieval":
@@ -102,19 +123,25 @@ def _generate_report(all_results: Dict[str, Any]) -> str:
             swarm = result.get("swarm", {})
             s_status = "PASS" if single.get("pass") else "FAIL"
             w_status = "PASS" if swarm.get("pass") else "FAIL"
-            lines.append(f"| 单Agent延迟 (P50) | {single.get('p50', 0)}s | ≤{single.get('threshold_max', 15)}s | {s_status} |")
-            lines.append(f"| Swarm延迟 (P50) | {swarm.get('p50', 0)}s | ≤{swarm.get('threshold_max', 30)}s | {w_status} |")
+            lines.append(
+                f"| 单Agent延迟 (P50) | {single.get('p50', 0)}s | ≤{single.get('threshold_max', 15)}s | {s_status} |"
+            )
+            lines.append(
+                f"| Swarm延迟 (P50) | {swarm.get('p50', 0)}s | ≤{swarm.get('threshold_max', 30)}s | {w_status} |"
+            )
 
         elif metric == "multiturn":
             acc = result.get("accuracy", 0)
             threshold = result.get("threshold", 0)
             status = "PASS" if result.get("pass") else "FAIL"
-            lines.append(f"| 多轮对话准确率 | {acc:.1%} | ≥{threshold:.0%} | {status} |")
+            lines.append(
+                f"| 多轮对话准确率 | {acc:.1%} | ≥{threshold:.0%} | {status} |"
+            )
 
         elif metric == "abtest":
             status_text = result.get("status", "awaiting_scoring")
             if status_text == "awaiting_scoring":
-                lines.append(f"| AB 测试 | 待评分 | - | - |")
+                lines.append("| AB 测试 | 待评分 | - | - |")
             else:
                 score = result.get("system_total", 0)
                 threshold = result.get("threshold", 0)
@@ -128,16 +155,18 @@ def _generate_report(all_results: Dict[str, Any]) -> str:
 
         if metric == "routing":
             lines.append(f"- 模式准确率: {result.get('mode_accuracy', 0):.1%}")
-            lines.append(f"- Agent 完全匹配: {result.get('agent_exact_accuracy', 0):.1%}")
+            lines.append(
+                f"- Agent 完全匹配: {result.get('agent_exact_accuracy', 0):.1%}"
+            )
             lines.append(f"- 测试题数: {result.get('total_cases', 0)}")
-            lines.append(f"\n### 各题详情\n")
+            lines.append("\n### 各题详情\n")
             for d in result.get("details", []):
                 c = d.get("comparison", {})
                 lines.append(
                     f"- **{d['case_id']}** ({d['difficulty']}): "
                     f"模式={'✓' if c.get('mode_match') else '✗'} "
                     f"Agent={'✓' if c.get('agent_exact_match') else '✗'} "
-                   f"→ {d['question'][:30]}"
+                    f"→ {d['question'][:30]}"
                 )
 
         elif metric == "retrieval":
@@ -152,7 +181,9 @@ def _generate_report(all_results: Dict[str, Any]) -> str:
                 s = result.get(key, {})
                 lines.append(f"\n### {label}\n")
                 lines.append(f"- 样本数: {s.get('count', 0)}")
-                lines.append(f"- P50: {s.get('p50', 0)}s | P90: {s.get('p90', 0)}s | P95: {s.get('p95', 0)}s")
+                lines.append(
+                    f"- P50: {s.get('p50', 0)}s | P90: {s.get('p90', 0)}s | P95: {s.get('p95', 0)}s"
+                )
                 lines.append(f"- 超时率: {s.get('timeout_rate', 0):.1%}")
 
         elif metric == "multiturn":
@@ -174,12 +205,10 @@ async def main():
         "--metrics",
         type=str,
         default="all",
-        help="要运行的评估指标，逗号分隔。可选: all, routing, retrieval, latency, multiturn, abtest"
+        help="要运行的评估指标，逗号分隔。可选: all, routing, retrieval, latency, multiturn, abtest",
     )
     parser.add_argument(
-        "--score-abtest",
-        action="store_true",
-        help="计算已有 AB 测试评分结果"
+        "--score-abtest", action="store_true", help="计算已有 AB 测试评分结果"
     )
     args = parser.parse_args()
 
@@ -196,6 +225,7 @@ async def main():
     # AB 测试评分模式
     if args.score_abtest:
         from mediZJ.eval.evaluators.abtest_eval import compute_abtest_scores
+
         result = await compute_abtest_scores()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -206,12 +236,27 @@ async def main():
     needs_coordinator = any(m != "retrieval" for m in metrics)
     all_results = {}
 
-    if needs_coordinator:
-        from mediZJ.eval.helpers import isolated_coordinator
-        with isolated_coordinator() as coordinator:
-            all_results = await _run_evaluations(metrics, coordinator)
-    else:
-        all_results = await _run_evaluations(metrics, None)
+    from mediZJ.infrastructure.database import (
+        close_database,
+        initialize_database,
+        validate_runtime_schema,
+    )
+    from mediZJ.infrastructure.redis_client import close_redis, initialize_redis
+
+    try:
+        await initialize_database()
+        await validate_runtime_schema()
+        await initialize_redis()
+        if needs_coordinator:
+            from mediZJ.eval.helpers import isolated_coordinator
+
+            async with isolated_coordinator() as coordinator:
+                all_results = await _run_evaluations(metrics, coordinator)
+        else:
+            all_results = await _run_evaluations(metrics, None)
+    finally:
+        await close_redis()
+        await close_database()
 
     # 生成报告
     report = _generate_report(all_results)

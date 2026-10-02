@@ -1,4 +1,5 @@
 """仪表盘路由"""
+
 import time
 from fastapi import APIRouter, Depends
 
@@ -16,7 +17,7 @@ _start_time = time.time()
 async def get_stats(user: dict = Depends(get_current_user)):
     """获取仪表盘统计数据"""
     user_id = None if user["role"] == "admin" else user["user_id"]
-    return get_dashboard_stats(user_id=user_id)
+    return await get_dashboard_stats(user_id=user_id)
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -31,6 +32,7 @@ async def health_check():
     knowledge_base_ready = False
     try:
         from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
+
         kb = MedicalKnowledgeBase()
         knowledge_base_ready = kb.collection is not None
     except Exception:

@@ -10,7 +10,7 @@ SwarmCoordinator：Swarm 入口和智能路由
 
 处理链路：统一走 LangGraph SupervisorGraph + Send API（Map-Reduce）。
 """
-import os
+
 import re
 import uuid
 from datetime import datetime
@@ -23,8 +23,6 @@ from mediZJ.swarm.lead_agent import LeadAgent
 from mediZJ.swarm.intent_classifier import IntentClassifier
 from mediZJ.lgraph.worker import create_worker, Worker
 from mediZJ.memory import (
-    SessionSummaryManager,
-    SessionSummary,
     ShortTermMemory,
     MedicalMemoryContextBuilder,
     PersonalProfile,
@@ -34,10 +32,11 @@ from mediZJ.memory import (
 try:
     from mediZJ.lgraph.tool_registry import ToolRegistry
     from mediZJ.core.skill_loader import discover_skills
+
     _LANGGRAPH_AVAILABLE = True
 except ImportError as e:
     _LANGGRAPH_AVAILABLE = False
-    logger.warning(f"langgraph 模块不可用: {e}")
+    logger.warning(f"langgraph 模块不可用: {type(e).__name__}")
 
 
 class SwarmCoordinator:
@@ -61,7 +60,7 @@ class SwarmCoordinator:
         llm_client: Optional[LLMClient] = None,
         event_callback: Optional[Any] = None,
         questionnaire_manager: Optional[Any] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.event_callback = event_callback
@@ -80,12 +79,7 @@ class SwarmCoordinator:
         }
 
         # 记忆管理器
-        self.session_manager = SessionSummaryManager()
-        self.short_term_memory = ShortTermMemory(
-            storage_type=os.getenv("WORKING_MEMORY_STORAGE", "redis"),
-            llm_client=self.llm_client,
-            enable_compression=False,
-        )
+        self.short_term_memory = ShortTermMemory(user_id=user_id or "default")
         self.personal_profile = PersonalProfile(user_id=user_id or "default")
         self.memory_context_builder = MedicalMemoryContextBuilder(
             store=self.personal_profile._structured,
@@ -105,8 +99,8 @@ class SwarmCoordinator:
 
         logger.info(f"SwarmCoordinator initialized with {len(self._workers)} workers")
         logger.info(
-            "Memory system: working={}, structured=sqlite",
-            self.short_term_memory.storage_type,
+            "Memory system: working={}, structured=mysql",
+            "redis",
         )
 
     def get_worker(self, agent_id: str) -> Optional[Worker]:
@@ -121,6 +115,7 @@ class SwarmCoordinator:
             return
 
         from pathlib import Path
+
         # __file__ = mediZJ/swarm/swarm_coordinator.py
         # parent = mediZJ/swarm/, parent.parent = mediZJ/
         # parent.parent.parent = 项目根目录
@@ -130,8 +125,6 @@ class SwarmCoordinator:
         discovered = discover_skills(project_root)
         if not discovered:
             logger.warning("未发现任何 Skill，LangGraph 模式将只有基础工具")
-            return
-
         self._tool_registry = ToolRegistry()
         self._tool_registry.register_from_skills(discovered)
 
@@ -185,7 +178,7 @@ class SwarmCoordinator:
         question: str,
         context: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
-        trace_id: Optional[str] = None
+        trace_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """处理用户问题
 
@@ -198,22 +191,28 @@ class SwarmCoordinator:
 
         start_time = datetime.now()
         if session_id is None:
-            session_id = f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+            session_id = (
+                f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
+            )
         trace_id = trace_id or str(uuid.uuid4())
         trace_collector = self._init_trace(trace_id)
 
-        logger.info(f"[LangGraph] Processing (session={session_id}): {question[:300]}{'...' if len(question) > 300 else ''}")
+        logger.info(f"[LangGraph] Processing (session={session_id})")
 
-        graph = self.build_graph(event_callback=self.event_callback)
+        graph = await self.build_graph(event_callback=self.event_callback)
         config = {"configurable": {"thread_id": session_id}}
         initial_state = self.build_initial_state(
-            question, context, session_id, start_time, trace_id,
+            question,
+            context,
+            session_id,
+            start_time,
+            trace_id,
         )
 
         try:
             result_state = await self.run_graph(graph, initial_state, config)
         except Exception as e:
-            logger.error(f"[LangGraph] 图执行异常: {e}")
+            logger.error(f"[LangGraph] 图执行异常: {type(e).__name__}")
             return {
                 "answer": f"系统处理异常: {e}",
                 "session_id": session_id,
@@ -222,7 +221,9 @@ class SwarmCoordinator:
                 "error": str(e),
             }
 
-        result = self.compose_result(question, result_state, start_time, session_id, trace_id=trace_id)
+        result = self.compose_result(
+            question, result_state, start_time, session_id, trace_id=trace_id
+        )
 
         await self._flush_trace(
             trace_collector,
@@ -236,20 +237,26 @@ class SwarmCoordinator:
 
     # ===== SupervisorGraph 构建与执行（供 API 层流式路径复用）=====
 
-    def build_graph(self, event_callback: Optional[Callable] = None,
-                    hitl_enabled: bool = False):
-        """构建 SupervisorGraph（每次调用返回新图，含独立 MemorySaver）
+    async def build_graph(
+        self,
+        event_callback: Optional[Callable] = None,
+        hitl_enabled: bool = False,
+        checkpointer=None,
+    ):
+        """构建 SupervisorGraph，检查点由持久化执行服务注入
 
         Args:
             event_callback: 事件回调（流式 SSE 推送）
             hitl_enabled: 是否启用 HITL 问卷（流式路径 True，非流式 False）
         """
         from mediZJ.lgraph.supervisor_graph import build_supervisor_graph
-        return build_supervisor_graph(
+
+        return await build_supervisor_graph(
             self,
             self._tool_registry,
             event_callback,
             hitl_enabled=hitl_enabled,
+            checkpointer=checkpointer,
         )
 
     def build_initial_state(
@@ -277,8 +284,13 @@ class SwarmCoordinator:
             "_swarm_finalized": False,
         }
 
-    async def run_graph(self, graph, initial_state: Dict[str, Any],
-                        config: Dict[str, Any], resume: Any = None) -> Dict[str, Any]:
+    async def run_graph(
+        self,
+        graph,
+        initial_state: Dict[str, Any],
+        config: Dict[str, Any],
+        resume: Any = None,
+    ) -> Dict[str, Any]:
         """执行 SupervisorGraph；interrupt 挂起时返回 {"_interrupted": True}
 
         Args:
@@ -311,11 +323,16 @@ class SwarmCoordinator:
 
         return result
 
-    def compose_result(self, question: str, result_state: Dict[str, Any],
-                       start_time: datetime, session_id: str,
-                       trace_id: Optional[str] = None) -> Dict[str, Any]:
+    def compose_result(
+        self,
+        question: str,
+        result_state: Dict[str, Any],
+        start_time: datetime,
+        session_id: str,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """将 SupervisorState 结果组装为对外 result。"""
-        end_time = datetime.now()
+        end_time = datetime.now(start_time.tzinfo)
         trace_id = trace_id or str(uuid.uuid4())
 
         result = {
@@ -326,14 +343,18 @@ class SwarmCoordinator:
             "swarm_enabled": result_state.get("swarm_enabled", False),
             "agents_involved": result_state.get("agents_involved", []),
             "subtasks_completed": len(result_state.get("swarm_contributions", {})),
-            "total_time": result_state.get("total_time", (end_time - start_time).total_seconds()),
+            "total_time": result_state.get(
+                "total_time", (end_time - start_time).total_seconds()
+            ),
             "swarm_metadata": result_state.get("swarm_metadata", {}),
             "timeout_occurred": result_state.get("timeout_occurred", False),
             "usage": result_state.get("usage", {}),
             "citations": result_state.get("citations", []),
             "mode": result_state.get("mode", "langgraph"),
             "intent": result_state.get("intent"),
-            "skip_long_term_retrieval": result_state.get("skip_long_term_retrieval", False),
+            "skip_long_term_retrieval": result_state.get(
+                "skip_long_term_retrieval", False
+            ),
             "_swarm_finalized": True,
             "applied_experience_ids": (result_state.get("context") or {}).get(
                 "applied_experience_ids", []
@@ -356,13 +377,13 @@ class SwarmCoordinator:
         """惰性初始化 Trace 收集器"""
         try:
             from mediZJ.trace.collector import TraceCollector
-            from mediZJ.trace.storage import TraceSqliteStorage
+            from mediZJ.trace.storage import TraceStorage
             from mediZJ.trace.context import _current_trace_id
 
             collector = TraceCollector()
             collector.begin_trace(trace_id)
             if not hasattr(collector, "_storage_set") or not collector._storage_set:
-                collector.set_storage(TraceSqliteStorage())
+                collector.set_storage(TraceStorage())
                 collector._storage_set = True
             _current_trace_id.set(trace_id)
             logger.debug(f"[Trace] Started for trace={trace_id[:12]}...")
@@ -378,13 +399,16 @@ class SwarmCoordinator:
             return
         try:
             from mediZJ.trace.models import TraceAttributes
-            agents = result.get("agents_involved", []) if isinstance(result, dict) else []
+
+            agents = (
+                result.get("agents_involved", []) if isinstance(result, dict) else []
+            )
             usage = result.get("usage", {}) if isinstance(result, dict) else {}
             tokens = usage.get("total_tokens", 0) if isinstance(usage, dict) else 0
             q = question[:200] if question else ""
 
             root_spans = collector.get_flat_spans(trace_id)
-            for s in (root_spans or []):
+            for s in root_spans or []:
                 if s.span_type.value == "trace":
                     s.trace_attrs = TraceAttributes(
                         session_id=session_id,
@@ -404,8 +428,8 @@ class SwarmCoordinator:
                     )
                     break
             await collector.flush(trace_id)
-        except Exception as e:
-            logger.warning(f"[Trace] Flush failed: {e}")
+        except Exception:
+            raise
         finally:
             try:
                 from mediZJ.trace.context import _current_trace_id
@@ -433,26 +457,22 @@ class SwarmCoordinator:
 
     # ===== 会话摘要 =====
 
-    def _save_session_summary(
-        self, session_id, question, agent_id, final_answer,
-        start_time, usage, message_count,
+    async def _save_session_summary(
+        self,
+        session_id,
+        question,
+        agent_id,
+        final_answer,
+        start_time,
+        usage,
+        message_count,
     ):
         """保存单 Agent / Fallback 模式的 SessionSummary"""
-        try:
-            end_time = datetime.now()
-            summary = SessionSummary.from_single_agent(
-                session_id=session_id, question=question, agent_id=agent_id,
-                final_answer=final_answer, start_time=start_time, end_time=end_time,
-                usage=usage, total_messages=message_count,
-            )
-            self.session_manager.save_summary(summary)
-            self.personal_profile._structured.save_episodic_summary(
-                session_id=session_id,
-                user_id=self.user_id,
-                summary=f"问题：{question}\n回答：{final_answer}",
-            )
-        except Exception as e:
-            logger.error(f"Failed to save session summary: {e}")
+        await self.personal_profile._structured.save_episodic_summary(
+            session_id=session_id,
+            user_id=self.user_id,
+            summary=f"问题：{question}\n回答：{final_answer}",
+        )
 
     # ===== 静态工具（供 SupervisorGraph 复用）=====
 
@@ -484,10 +504,12 @@ class SwarmCoordinator:
         # 匹配 ## 核心建议 章节（兼容【核心建议】旧格式）
         if "## 核心建议" in final_answer or "【核心建议】" in final_answer:
             # 查找章节起始位置
-            start_marker = "## 核心建议" if "## 核心建议" in final_answer else "【核心建议】"
+            start_marker = (
+                "## 核心建议" if "## 核心建议" in final_answer else "【核心建议】"
+            )
             start_idx = final_answer.find(start_marker) + len(start_marker)
             # 查找下一个 ## 标题作为结束边界
-            end_match = re.search(r'\n## ', final_answer[start_idx:])
+            end_match = re.search(r"\n## ", final_answer[start_idx:])
             if end_match:
                 end_idx = start_idx + end_match.start()
             else:
@@ -496,7 +518,7 @@ class SwarmCoordinator:
             suggestions_text = final_answer[start_idx:end_idx]
 
             # 提取编号列表
-            matches = re.findall(r'\d+\.\s*([^\n]+)', suggestions_text)
+            matches = re.findall(r"\d+\.\s*([^\n]+)", suggestions_text)
             suggestions = matches[:5]  # 最多5条
 
         return suggestions or ["请遵循医嘱，注意休息和营养"]
@@ -505,7 +527,7 @@ class SwarmCoordinator:
 async def process_with_swarm(
     question: str,
     context: Optional[Dict[str, Any]] = None,
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     便捷函数：使用 Swarm 处理问题

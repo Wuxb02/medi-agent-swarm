@@ -21,7 +21,7 @@ async def submit_feedback(
     user: dict = Depends(get_current_user),
 ):
     try:
-        return EvolutionService().submit_feedback(
+        return await EvolutionService().submit_feedback(
             payload.assistant_message_id,
             user["user_id"],
             payload.rating,
@@ -37,7 +37,7 @@ async def get_feedback(
     message_id: int,
     user: dict = Depends(get_current_user),
 ):
-    feedback = EvolutionService().storage.get_feedback(
+    feedback = await EvolutionService().storage.get_feedback(
         message_id,
         user["user_id"],
     )
@@ -46,7 +46,7 @@ async def get_feedback(
 
 @router.get("/overview")
 async def get_overview(_admin: dict = Depends(require_admin)):
-    return EvolutionService().storage.overview()
+    return await EvolutionService().storage.overview()
 
 
 @router.get("/evaluations")
@@ -54,7 +54,7 @@ async def list_evaluations(
     limit: int = Query(100, ge=1, le=500),
     _admin: dict = Depends(require_admin),
 ):
-    return {"items": EvolutionService().storage.list_evaluations(limit)}
+    return {"items": (await EvolutionService().storage.list_evaluations(limit))}
 
 
 @router.get("/failures")
@@ -62,7 +62,7 @@ async def list_failures(
     limit: int = Query(100, ge=1, le=500),
     _admin: dict = Depends(require_admin),
 ):
-    return {"items": EvolutionService().storage.list_failures(limit)}
+    return {"items": (await EvolutionService().storage.list_failures(limit))}
 
 
 @router.get("/sources/{source_id}")
@@ -84,9 +84,7 @@ async def list_experiences(
     status: str | None = None,
     _admin: dict = Depends(require_admin),
 ):
-    return {
-        "items": EvolutionService().storage.list_experiences(limit, status)
-    }
+    return {"items": (await EvolutionService().storage.list_experiences(limit, status))}
 
 
 @router.get("/releases")
@@ -94,7 +92,7 @@ async def list_releases(
     limit: int = Query(50, ge=1, le=200),
     _admin: dict = Depends(require_admin),
 ):
-    return {"items": EvolutionService().storage.list_releases(limit)}
+    return {"items": (await EvolutionService().storage.list_releases(limit))}
 
 
 @router.get("/jobs")
@@ -106,7 +104,7 @@ async def list_jobs(
     allowed = {None, "pending", "running", "failed", "superseded", "completed"}
     if status not in allowed:
         raise HTTPException(status_code=422, detail="非法任务状态")
-    return {"items": EvolutionService().storage.list_jobs(limit, status)}
+    return {"items": (await EvolutionService().storage.list_jobs(limit, status))}
 
 
 @router.post("/jobs/{job_id}/retry")
@@ -114,7 +112,7 @@ async def retry_job(
     job_id: str,
     _admin: dict = Depends(require_admin),
 ):
-    if not EvolutionService().storage.retry_job(job_id):
+    if not (await EvolutionService().storage.retry_job(job_id)):
         raise HTTPException(status_code=404, detail="失败任务不存在")
     return {"queued": True}
 
@@ -125,7 +123,7 @@ async def enqueue_evaluation(
     admin: dict = Depends(require_admin),
 ):
     try:
-        job_id = EvolutionService().enqueue_manual(payload.assistant_message_id)
+        job_id = await EvolutionService().enqueue_manual(payload.assistant_message_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"job_id": job_id, "queued": job_id is not None}
@@ -138,7 +136,7 @@ async def update_experience_status(
     admin: dict = Depends(require_admin),
 ):
     try:
-        updated = EvolutionService().storage.apply_experience_action(
+        updated = await EvolutionService().storage.apply_experience_action(
             experience_id,
             payload.action,
             admin["user_id"],
@@ -156,7 +154,7 @@ async def rollback_release(
     admin: dict = Depends(require_admin),
 ):
     try:
-        rolled_back = EvolutionService().storage.rollback_release(
+        rolled_back = await EvolutionService().storage.rollback_release(
             version,
             admin["user_id"],
         )

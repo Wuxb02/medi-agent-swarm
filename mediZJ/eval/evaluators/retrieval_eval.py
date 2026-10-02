@@ -6,6 +6,7 @@
 - 计算 Precision@K、Recall@K、MRR、Hit Rate
 - 综合得分 = 0.4*Recall + 0.3*Precision + 0.3*MRR
 """
+
 import json
 from typing import Dict, Any, List
 from loguru import logger
@@ -14,9 +15,7 @@ from mediZJ.eval.config import RETRIEVAL_CASES_PATH, RETRIEVAL_TOP_K, THRESHOLDS
 
 
 def _compute_metrics(
-    retrieved_doc_ids: List[str],
-    expected_doc_ids: List[str],
-    top_k: int
+    retrieved_doc_ids: List[str], expected_doc_ids: List[str], top_k: int
 ) -> Dict[str, float]:
     """计算单个查询的检索指标"""
     retrieved_set = set(retrieved_doc_ids)
@@ -27,7 +26,9 @@ def _compute_metrics(
 
     # Precision@K: 返回结果中相关文档占比
     if retrieved_doc_ids:
-        relevant_count = sum(1 for doc_id in retrieved_doc_ids if doc_id in expected_set)
+        relevant_count = sum(
+            1 for doc_id in retrieved_doc_ids if doc_id in expected_set
+        )
         precision = relevant_count / len(retrieved_doc_ids)
     else:
         precision = 0.0
@@ -45,12 +46,7 @@ def _compute_metrics(
             mrr = 1.0 / rank
             break
 
-    return {
-        "hit": hit,
-        "precision": precision,
-        "recall": recall,
-        "mrr": mrr
-    }
+    return {"hit": hit, "precision": precision, "recall": recall, "mrr": mrr}
 
 
 async def run_retrieval_eval() -> Dict[str, Any]:
@@ -83,12 +79,14 @@ async def run_retrieval_eval() -> Dict[str, Any]:
         logger.info(f"评估 [{case_id}]: {query[:30]}...")
 
         try:
-            search_results = kb.search(query, top_k=RETRIEVAL_TOP_K)
+            search_results = await kb.search(query, top_k=RETRIEVAL_TOP_K)
             # 提取检索到的文档 ID（从 metadata 中提取）
             retrieved_doc_ids = []
             for r in search_results:
                 metadata = r.get("metadata", {})
-                doc_id = metadata.get("doc_id", "") if isinstance(metadata, dict) else ""
+                doc_id = (
+                    metadata.get("doc_id", "") if isinstance(metadata, dict) else ""
+                )
                 if doc_id and doc_id not in retrieved_doc_ids:
                     retrieved_doc_ids.append(doc_id)
         except Exception as e:
@@ -102,13 +100,15 @@ async def run_retrieval_eval() -> Dict[str, Any]:
         total_mrr += metrics["mrr"]
         total_hit += metrics["hit"]
 
-        results.append({
-            "case_id": case_id,
-            "query": query,
-            "expected_doc_ids": expected_doc_ids,
-            "retrieved_doc_ids": retrieved_doc_ids,
-            "metrics": metrics
-        })
+        results.append(
+            {
+                "case_id": case_id,
+                "query": query,
+                "expected_doc_ids": expected_doc_ids,
+                "retrieved_doc_ids": retrieved_doc_ids,
+                "metrics": metrics,
+            }
+        )
 
         logger.info(
             f"  Hit={'✓' if metrics['hit'] else '✗'} | "
@@ -136,7 +136,7 @@ async def run_retrieval_eval() -> Dict[str, Any]:
         "composite_score": round(composite_score, 4),
         "threshold": threshold,
         "pass": composite_score >= threshold,
-        "details": results
+        "details": results,
     }
 
     logger.info(

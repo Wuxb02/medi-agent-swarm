@@ -22,7 +22,7 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "confidence": "high/medium/low"
         }
     """
-    logger.info(f"Starting deep research: query={query}, max_iterations={max_iterations}")
+    logger.info('执行医学检索工具')
 
     # 调用深度研究工作流
     import sys
@@ -32,7 +32,7 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    from research.deep_research_workflow import DeepResearchWorkflow
+    from mediZJ.research.deep_research_workflow import DeepResearchWorkflow
 
     workflow = DeepResearchWorkflow()
 

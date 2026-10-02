@@ -6,6 +6,7 @@
 - A/B 随机分配，生成盲评数据
 - 输出 JSON 供人工/LLM 三维度评分
 """
+
 import json
 import random
 import os
@@ -17,7 +18,7 @@ from mediZJ.eval.config import (
     BASELINE_LLM_API_KEY,
     BASELINE_LLM_BASE_URL,
     BASELINE_LLM_MODEL_NAME,
-    THRESHOLDS
+    THRESHOLDS,
 )
 from mediZJ.eval.helpers import make_session_id, isolated_coordinator
 
@@ -26,6 +27,7 @@ async def _get_baseline_answer(question: str) -> str:
     """获取 Baseline 回答（同模型无包装）"""
     from mediZJ.core.llm_client import LLMClient
     import dotenv
+
     dotenv.load_dotenv()
 
     # 使用独立配置的 Baseline LLM
@@ -40,25 +42,30 @@ async def _get_baseline_answer(question: str) -> str:
         os.environ["LLM_MODEL_NAME"] = BASELINE_LLM_MODEL_NAME
 
         client = LLMClient()
-        response = await client.chat([
-            {
-                "role": "system",
-                "content": "你是一个医学健康助手，请回答用户的健康问题。请注意你不能提供诊断或处方，建议用户咨询专业医生。"
-            },
-            {"role": "user", "content": question}
-        ])
+        response = await client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "你是一个医学健康助手，请回答用户的健康问题。请注意你不能提供诊断或处方，建议用户咨询专业医生。",
+                },
+                {"role": "user", "content": question},
+            ]
+        )
         return response
     except Exception as e:
         logger.error(f"Baseline 调用失败: {e}")
         return f"[Baseline 调用失败: {e}]"
     finally:
         # 恢复原始配置
-        if original_key:
-            os.environ["LLM_API_KEY"] = original_key
-        if original_url:
-            os.environ["LLM_BASE_URL"] = original_url
-        if original_model:
-            os.environ["LLM_MODEL_NAME"] = original_model
+        for name, original in (
+            ("LLM_API_KEY", original_key),
+            ("LLM_BASE_URL", original_url),
+            ("LLM_MODEL_NAME", original_model),
+        ):
+            if original is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = original
 
 
 async def run_abtest_eval(coordinator=None) -> Dict[str, Any]:
@@ -67,7 +74,6 @@ async def run_abtest_eval(coordinator=None) -> Dict[str, Any]:
 
     生成盲评数据文件，不进行自动评分
     """
-    from mediZJ.swarm.swarm_coordinator import SwarmCoordinator
 
     with open(ABTEST_CASES_PATH, "r", encoding="utf-8") as f:
         cases = json.load(f)
@@ -75,7 +81,7 @@ async def run_abtest_eval(coordinator=None) -> Dict[str, Any]:
     logger.info(f"AB 测试评估：加载 {len(cases)} 道题目")
 
     if coordinator is None:
-        with isolated_coordinator() as coord:
+        async with isolated_coordinator() as coord:
             return await _run_abtest_cases(coord, cases)
     return await _run_abtest_cases(coordinator, cases)
 
@@ -93,12 +99,13 @@ async def _run_abtest_cases(coordinator, cases: List[Dict]) -> Dict[str, Any]:
         session_id = make_session_id(f"abtest-{case_id}")
         try:
             system_result = await coordinator.process(
-                question=question,
-                session_id=session_id
+                question=question, session_id=session_id
             )
             system_answer = system_result.get("answer", "")
             system_time = system_result.get("total_time", 0)
-            system_mode = "swarm" if system_result.get("swarm_enabled") else "single_agent"
+            system_mode = (
+                "swarm" if system_result.get("swarm_enabled") else "single_agent"
+            )
         except Exception as e:
             logger.error(f"  系统调用失败: {e}")
             system_answer = f"[系统调用失败: {e}]"
@@ -115,25 +122,31 @@ async def _run_abtest_cases(coordinator, cases: List[Dict]) -> Dict[str, Any]:
         else:
             answer_a, answer_b = baseline_answer, system_answer
 
-        blind_data.append({
-            "case_id": case_id,
-            "question": question,
-            "difficulty": case.get("difficulty", "unknown"),
-            "category": case.get("category", "unknown"),
-            "dimensions": case.get("dimensions", ["accuracy", "completeness", "safety"]),
-            "answer_A": answer_a,
-            "answer_B": answer_b,
-            "is_system_A": is_system_a,
-            "system_mode": system_mode,
-            "system_time": system_time,
-            # 评分模板（留空，待人工/LLM 填写）
-            "scores": {
-                "A": {"accuracy": None, "completeness": None, "safety": None},
-                "B": {"accuracy": None, "completeness": None, "safety": None}
+        blind_data.append(
+            {
+                "case_id": case_id,
+                "question": question,
+                "difficulty": case.get("difficulty", "unknown"),
+                "category": case.get("category", "unknown"),
+                "dimensions": case.get(
+                    "dimensions", ["accuracy", "completeness", "safety"]
+                ),
+                "answer_A": answer_a,
+                "answer_B": answer_b,
+                "is_system_A": is_system_a,
+                "system_mode": system_mode,
+                "system_time": system_time,
+                # 评分模板（留空，待人工/LLM 填写）
+                "scores": {
+                    "A": {"accuracy": None, "completeness": None, "safety": None},
+                    "B": {"accuracy": None, "completeness": None, "safety": None},
+                },
             }
-        })
+        )
 
-        logger.info(f"  系统={system_mode} ({system_time:.1f}s) | A/B={'System=A' if is_system_a else 'System=B'}")
+        logger.info(
+            f"  系统={system_mode} ({system_time:.1f}s) | A/B={'System=A' if is_system_a else 'System=B'}"
+        )
 
     # 保存盲评数据
     output_path = os.path.join(REPORTS_DIR, "abtest_blind_review.json")
@@ -148,7 +161,7 @@ async def _run_abtest_cases(coordinator, cases: List[Dict]) -> Dict[str, Any]:
         "total_cases": len(cases),
         "blind_review_path": output_path,
         "status": "awaiting_scoring",
-        "details": blind_data
+        "details": blind_data,
     }
 
 
@@ -212,5 +225,5 @@ async def compute_abtest_scores(blind_review_path: str = None) -> Dict[str, Any]
         "baseline_total": baseline_total,
         "system_pass": system_total >= threshold,
         "threshold": threshold,
-        "improvement": round(system_total - baseline_total, 2)
+        "improvement": round(system_total - baseline_total, 2),
     }

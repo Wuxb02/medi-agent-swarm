@@ -13,7 +13,7 @@ def get_knowledge_base():
     """获取知识库单例"""
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -32,7 +32,7 @@ async def analyze_symptoms(symptoms: str) -> Dict[str, Any]:
             "possible_diseases": ["可能疾病1", "可能疾病2"]
         }
     """
-    logger.info(f"Analyzing symptoms: {symptoms}")
+    logger.info('执行医学检索工具')
 
     # 将症状字符串转换为列表
     symptom_list = [s.strip() for s in symptoms.split(",") if s.strip()]
@@ -106,7 +106,7 @@ async def analyze_symptoms(symptoms: str) -> Dict[str, Any]:
             kb = get_knowledge_base()
             # 查询最可能的前3个疾病的详细信息
             for disease in possible_diseases[:3]:
-                results = kb.search(
+                results = await kb.search(
                     query=f"{disease} 症状 诊断 鉴别",
                     top_k=1,
                     filter_type=None

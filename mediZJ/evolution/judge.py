@@ -2,7 +2,7 @@
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 from mediZJ.core.llm_client import LLMClient
@@ -74,8 +74,7 @@ class ConversationJudge:
         if not isinstance(scores, dict):
             scores = {}
         normalized = {
-            name: self._normalize_score(scores.get(name))
-            for name in self._WEIGHTS
+            name: self._normalize_score(scores.get(name)) for name in self._WEIGHTS
         }
         overall = sum(
             normalized[name] / 5 * 100 * weight
@@ -83,8 +82,7 @@ class ConversationJudge:
         )
         safety_violation = bool(result.get("safety_violation", False))
         result["authoritative_sources_present"] = bool(
-            result.get("authoritative_sources_present")
-            and context.get("citations")
+            result.get("authoritative_sources_present") and context.get("citations")
         )
         overall = self._apply_score_caps(
             overall,
@@ -104,12 +102,11 @@ class ConversationJudge:
         if not isinstance(raw_attribution, list):
             raw_attribution = []
         attribution = [
-            item for item in raw_attribution
+            item
+            for item in raw_attribution
             if isinstance(item, str) and item in self._ATTRIBUTIONS
         ] or ["other"]
-        recommendations = self._normalize_recommendations(
-            result.get("recommendations")
-        )
+        recommendations = self._normalize_recommendations(result.get("recommendations"))
         experiences = self._normalize_experiences(result, context)
         experiences = self._ensure_retrieval_experience(
             experiences,
@@ -156,9 +153,8 @@ class ConversationJudge:
         attribution: List[str],
     ) -> List[Dict[str, Any]]:
         """检索问题必须形成可审核的检索优化经验。"""
-        if (
-            "retrieval" not in attribution
-            or any(item["type"] == "retrieval_hint" for item in experiences)
+        if "retrieval" not in attribution or any(
+            item["type"] == "retrieval_hint" for item in experiences
         ):
             return experiences
         retrieval_experience = {
@@ -191,14 +187,12 @@ class ConversationJudge:
         """防止加权平均掩盖关键医疗缺陷。"""
         if result.get("safety_violation") or scores["medical_safety"] < 4:
             overall = min(overall, 59)
-        if (
-            result.get("numeric_medical_claims")
-            and not result.get("authoritative_sources_present")
+        if result.get("numeric_medical_claims") and not result.get(
+            "authoritative_sources_present"
         ):
             overall = min(overall, 79)
-        if (
-            result.get("personalization_required")
-            and not result.get("personalization_addressed")
+        if result.get("personalization_required") and not result.get(
+            "personalization_addressed"
         ):
             overall = min(overall, 84)
         if result.get("unsupported_authority_claim"):
@@ -233,10 +227,11 @@ class ConversationJudge:
                 item.get("contains_personal_data", False)
                 or self.contains_personal_data(item, context.get("user_id", ""))
             )
-            scope = "global" if (
-                item.get("scope") == "global"
-                and not contains_personal_data
-            ) else "private"
+            scope = (
+                "global"
+                if (item.get("scope") == "global" and not contains_personal_data)
+                else "private"
+            )
             content = str(item["content"]).replace(
                 "search-knowledge",
                 "权威知识检索能力",
@@ -251,7 +246,7 @@ class ConversationJudge:
             expires_at = item.get("expires_at")
             if risk_level == "high":
                 expires_at = (
-                    datetime.now()
+                    datetime.now(timezone.utc)
                     + timedelta(days=self.settings.medical_expiry_days)
                 ).isoformat()
             normalized.append(
@@ -260,19 +255,13 @@ class ConversationJudge:
                     "scope": scope,
                     "query_pattern": str(item["query_pattern"]).strip(),
                     "content": content.strip(),
-                    "applicability": self._string_list(
-                        item.get("applicability")
-                    ),
+                    "applicability": self._string_list(item.get("applicability")),
                     "exclusions": self._string_list(item.get("exclusions")),
-                    "prerequisites": self._string_list(
-                        item.get("prerequisites")
-                    ),
+                    "prerequisites": self._string_list(item.get("prerequisites")),
                     "safety_notes": str(item.get("safety_notes", "")).strip(),
                     "evidence_refs": evidence_refs,
                     "risk_level": risk_level,
-                    "capability_tag": str(
-                        item.get("capability_tag", "")
-                    ).strip(),
+                    "capability_tag": str(item.get("capability_tag", "")).strip(),
                     "expires_at": expires_at,
                 }
             )
@@ -327,8 +316,7 @@ class ConversationJudge:
 
         if isinstance(value, dict):
             return any(
-                cls.contains_personal_data(item, user_id)
-                for item in value.values()
+                cls.contains_personal_data(item, user_id) for item in value.values()
             )
         if isinstance(value, list):
             return any(cls.contains_personal_data(item, user_id) for item in value)

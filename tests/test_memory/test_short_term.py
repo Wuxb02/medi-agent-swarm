@@ -1,95 +1,57 @@
-"""test_memory/test_short_term.py — ShortTermMemory 单元测试"""
+"""真实 Redis 的短期记忆基础操作与用户隔离。"""
 
 import pytest
-from mediZJ.memory.short_term import ShortTermMemory
+from mediZJ.memory.short_term import ShortTermMemory, ConversationHistory
+
+pytestmark = [pytest.mark.integration, pytest.mark.infrastructure]
 
 
-@pytest.fixture(autouse=True)
-def _reset_singleton():
-    ShortTermMemory._instance = None
-    yield
-    ShortTermMemory._instance = None
+@pytest.fixture
+def stm(mysql_infrastructure):
+    return ShortTermMemory("alice")
 
 
-class TestSingleton:
-    def test_singleton_instance(self):
-        ShortTermMemory._instance = None
-        stm1 = ShortTermMemory(storage_type="memory")
-        stm2 = ShortTermMemory()
-        assert stm1 is stm2
-
-    def test_reset_singleton(self):
-        ShortTermMemory._instance = None
-        stm1 = ShortTermMemory(storage_type="memory")
-        ShortTermMemory._instance = None
-        stm2 = ShortTermMemory(storage_type="memory")
-        assert stm1 is not stm2
+async def test_create_and_get_session(stm):
+    history = await stm.create_session("s1", {"purpose": "test"})
+    assert history.session_id == "s1"
+    assert history.messages == []
+    assert (await stm.get_session("s1")).metadata == {"purpose": "test"}
+    assert await stm.get_session("missing") is None
+    await stm.add_message("s1", "user", "问题")
+    assert (await stm.create_session("s1")).messages[0]["content"] == "问题"
 
 
-class TestSessionManagement:
-    @pytest.fixture
-    def stm(self):
-        ShortTermMemory._instance = None
-        return ShortTermMemory(storage_type="memory")
+async def test_messages_and_recent_limits(stm):
+    for index in range(10):
+        await stm.add_message("s1", "user", f"msg-{index}")
+    assert len(await stm.get_all_messages("s1")) == 10
+    assert len(await stm.get_recent_messages("s1", 3)) == 3
+    assert (await stm.get_history("s1", 1))[-1]["content"] == "msg-9"
+    assert await stm.get_recent_messages("missing") == []
 
-    def test_create_session(self, stm):
-        history = stm.create_session("sess-1")
-        assert history.session_id == "sess-1"
-        assert history.messages == []
 
-    def test_get_session(self, stm):
-        stm.create_session("sess-1")
-        sess = stm.get_session("sess-1")
-        assert sess is not None
-        assert sess.session_id == "sess-1"
+async def test_user_and_session_isolation_and_delete(stm):
+    await stm.add_message("s1", "user", "alice")
+    await stm.add_message("s2", "user", "second")
+    other = ShortTermMemory("bob")
+    assert await other.get_session("s1") is None
+    await other.add_message("s1", "user", "bob")
+    await stm.clear_session("s1")
+    assert await stm.get_session("s1") is None
+    assert (await other.get_session("s1")).messages[0]["content"] == "bob"
+    assert (await stm.get_session("s2")).messages[0]["content"] == "second"
 
-    def test_get_session_nonexistent(self, stm):
-        assert stm.get_session("no-exist") is None
 
-    @pytest.mark.asyncio
-    async def test_add_message_to_existing_session(self, stm):
-        stm.create_session("sess-1")
-        await stm.add_message("sess-1", "user", "测试消息")
-        messages = await stm.get_history("sess-1")
-        assert len(messages) == 1
-        assert messages[0]["content"] == "测试消息"
+async def test_merge_sub_session(stm):
+    await stm.add_message("sub", "user", "详情")
+    await stm.merge_sub_session("main", "sub", "摘要")
+    assert await stm.get_session("sub") is None
+    assert (await stm.get_history("main"))[0]["content"] == "摘要"
 
-    @pytest.mark.asyncio
-    async def test_add_message_auto_creates_session(self, stm):
-        await stm.add_message("new-session", "user", "hello")
-        history = stm.get_session("new-session")
-        assert history is not None
-        assert history.session_id == "new-session"
 
-    @pytest.mark.asyncio
-    async def test_get_recent_messages(self, stm):
-        stm.create_session("sess-1")
-        history = stm.get_session("sess-1")
-        for i in range(10):
-            history.add_message("user", f"msg-{i}")
-        messages = await stm.get_recent_messages("sess-1", limit=3)
-        assert len(messages) == 3
-        assert messages[-1]["content"] == "msg-9"
-
-    @pytest.mark.asyncio
-    async def test_get_recent_nonexistent_session(self, stm):
-        messages = await stm.get_recent_messages("no-such-session")
-        assert messages == []
-
-    @pytest.mark.asyncio
-    async def test_multiple_sessions_isolated(self, stm):
-        await stm.add_message("s1", "user", "msg-1")
-        await stm.add_message("s2", "user", "msg-2")
-        msgs1 = await stm.get_history("s1")
-        msgs2 = await stm.get_history("s2")
-        assert len(msgs1) == 1
-        assert len(msgs2) == 1
-        assert msgs1[0]["content"] == "msg-1"
-        assert msgs2[0]["content"] == "msg-2"
-
-    def test_clear_session(self, stm):
-        stm.create_session("sess-1")
-        history = stm.get_session("sess-1")
-        history.add_message("user", "test")
-        stm.clear_session("sess-1")
-        assert stm.get_session("sess-1") is None
+def test_snapshot_round_trip():
+    history = ConversationHistory("s")
+    history.add_message("user", "内容")
+    restored = ConversationHistory.from_dict(history.to_dict())
+    assert restored.to_dict() == history.to_dict()
+    assert restored.get_recent_messages(None) == history.messages

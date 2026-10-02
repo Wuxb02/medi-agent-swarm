@@ -1,94 +1,60 @@
-"""短期记忆 per-session 锁的并发安全测试"""
+"""真实 Redis 多实例 CAS、TTL 与连接故障测试。"""
+
 import asyncio
-from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
-
+from redis.exceptions import ConnectionError
 from mediZJ.memory.short_term import ShortTermMemory
+from mediZJ.infrastructure.redis_client import get_redis
+
+pytestmark = [pytest.mark.integration, pytest.mark.infrastructure]
 
 
-@pytest.fixture
-def memory():
-    """隔离的 ShortTermMemory 实例（关闭熵管理以避免加载模型）"""
-    ShortTermMemory._instance = None
-    stm = ShortTermMemory(storage_type="memory")
-    stm.entropy_manager = None
-    yield stm
-    ShortTermMemory._instance = None
-
-
-async def test_concurrent_add_message_same_session(memory):
-    """同会话并发写入不丢消息：2 协程 × 20 条 = 40 条"""
-    session_id = "s-concurrent"
-
-    async def writer(prefix: str):
-        for i in range(20):
-            await memory.add_message(session_id, "user", f"{prefix}-{i}")
-            # 主动让出事件循环，制造交错机会
-            await asyncio.sleep(0)
+async def test_concurrent_instances_preserve_messages(mysql_infrastructure):
+    async def writer(prefix):
+        memory = ShortTermMemory("alice")
+        for index in range(20):
+            await memory.add_message("s", "user", f"{prefix}-{index}")
 
     await asyncio.gather(writer("a"), writer("b"))
-
-    messages = memory.get_all_messages(session_id)
-    assert len(messages) == 40
-    contents = {m["content"] for m in messages}
-    assert contents == {f"a-{i}" for i in range(20)} | {f"b-{i}" for i in range(20)}
-
-
-async def test_concurrent_add_message_different_sessions(memory):
-    """不同会话并发写入互不影响"""
-    async def writer(session_id: str):
-        for i in range(10):
-            await memory.add_message(session_id, "user", f"{session_id}-{i}")
-            await asyncio.sleep(0)
-
-    await asyncio.gather(*[writer(f"s-{n}") for n in range(5)])
-
-    for n in range(5):
-        messages = memory.get_all_messages(f"s-{n}")
-        assert len(messages) == 10
-        assert all(m["content"].startswith(f"s-{n}-") for m in messages)
+    messages = await ShortTermMemory("alice").get_all_messages("s")
+    assert {m["content"] for m in messages} == {
+        f"{prefix}-{index}" for prefix in ("a", "b") for index in range(20)
+    }
 
 
-async def test_session_lock_reused_and_cleaned(memory):
-    """同会话返回同一把锁；clear_session 后锁被回收"""
-    lock1 = memory._get_session_lock("s-lock")
-    lock2 = memory._get_session_lock("s-lock")
-    assert lock1 is lock2
-
-    await memory.add_message("s-lock", "user", "hello")
-    memory.clear_session("s-lock")
-    assert "s-lock" not in memory._session_locks
-
-
-async def test_expired_session_evicted_with_lock(memory):
-    """过期会话被 get_session 惰性清除时，其写锁一并回收"""
-    memory.ttl_seconds = 1
-    await memory.add_message("s-old", "user", "hello")
-    assert "s-old" in memory._session_locks
-
-    # 手动把 last_updated 拨到过去，使其过期
-    memory.sessions["s-old"].last_updated -= timedelta(seconds=10)
-
-    assert memory.get_session("s-old") is None
-    assert "s-old" not in memory.sessions
-    assert "s-old" not in memory._session_locks
+async def test_old_revision_and_watermark_cannot_overwrite(mysql_infrastructure):
+    memory = ShortTermMemory("alice")
+    await memory.restore_session("s", [{"id": 2, "role": "user", "content": "新"}])
+    history, revision = await memory._read("s")
+    await memory.add_message("s", "assistant", "临时执行状态")
+    assert not await memory._write(history, revision)
+    assert not await memory.restore_session(
+        "s", [{"id": 1, "role": "user", "content": "旧"}]
+    )
+    assert len(await memory.get_all_messages("s")) == 2
 
 
-async def test_add_message_triggers_full_eviction(memory):
-    """add_message 周期性触发全量过期清理：过期会话连同锁一起移除"""
-    memory.ttl_seconds = 1
-    await memory.add_message("s-old-1", "user", "a")
-    await memory.add_message("s-old-2", "user", "b")
-    for sid in ("s-old-1", "s-old-2"):
-        memory.sessions[sid].last_updated -= timedelta(seconds=10)
-    # 重置节流计时器，确保下一次写入触发全量清理
-    memory._last_evict_at = 0.0
+async def test_ttl_slides_and_expired_cache_rebuilds(mysql_infrastructure):
+    memory = ShortTermMemory("alice")
+    memory.settings = memory.settings.model_copy(update={"short_term_ttl": 2})
+    messages = [{"id": 3, "role": "user", "content": "历史"}]
+    await memory.restore_session("s", messages)
+    client = get_redis()
+    await client.expire(memory._key("s"), 1)
+    await memory.get_session("s")
+    assert await client.ttl(memory._key("s")) == 2
+    await client.pexpire(memory._key("s"), 1)
+    await asyncio.sleep(0.02)
+    assert await memory.get_session("s") is None
+    assert await memory.restore_session("s", messages)
+    assert await memory.get_all_messages("s") == messages
 
-    await memory.add_message("s-new", "user", "c")
 
-    assert "s-old-1" not in memory.sessions
-    assert "s-old-2" not in memory.sessions
-    assert "s-old-1" not in memory._session_locks
-    assert "s-old-2" not in memory._session_locks
-    assert memory.get_session("s-new") is not None
+async def test_connection_failure_is_reported(mysql_infrastructure):
+    memory = ShortTermMemory("alice")
+    with patch("mediZJ.memory.short_term.get_redis", side_effect=ConnectionError):
+        with pytest.raises(ConnectionError):
+            await memory.get_session("s")
+    assert not hasattr(memory, "sessions")

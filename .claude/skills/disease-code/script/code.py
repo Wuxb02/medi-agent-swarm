@@ -11,7 +11,7 @@ _kb_instance = None
 def get_knowledge_base():
     global _kb_instance
     if _kb_instance is None:
-        from knowledge.milvus_kb import MedicalKnowledgeBase
+        from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
         _kb_instance = MedicalKnowledgeBase()
     return _kb_instance
 
@@ -36,7 +36,7 @@ async def disease_code(disease_name: str) -> Dict[str, Any]:
     kb = get_knowledge_base()
 
     # 使用 Milvus 检索疾病编码
-    results = kb.search(
+    results = await kb.search(
         query=f"{disease_name} ICD-10编码 疾病分类",
         top_k=1,
         filter_type="disease_classification"

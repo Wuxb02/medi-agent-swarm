@@ -2,6 +2,7 @@
 图片分析服务
 使用独立的多模态 Vision 模型将图片解析为文字描述
 """
+
 import base64
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ from loguru import logger
 
 from mediZJ.core.llm_client import LLMClient
 
-_UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "uploads"
+_UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "/data/uploads"))
 
 VISION_PROMPT = """
 请仔细分析这张医学相关的图片，用中文按以下结构输出：
@@ -39,7 +40,9 @@ class ImageAnalyzer:
     """图片分析器：用 Vision 模型将图片转为文字描述"""
 
     def __init__(self):
-        self.model_name = os.getenv("VISION_MODEL_NAME") or os.getenv("LLM_MODEL_NAME", "gpt-4o")
+        self.model_name = os.getenv("VISION_MODEL_NAME") or os.getenv(
+            "LLM_MODEL_NAME", "gpt-4o"
+        )
         self.api_key = os.getenv("VISION_API_KEY") or os.getenv("LLM_API_KEY")
         self.base_url = os.getenv("VISION_BASE_URL") or os.getenv("LLM_BASE_URL")
         self.temperature = float(os.getenv("VISION_TEMPERATURE", "0.3"))
@@ -53,24 +56,12 @@ class ImageAnalyzer:
 
     def _get_client(self) -> LLMClient:
         """创建临时 LLMClient 实例，使用 Vision 模型配置"""
-        prev = {}
-        for key in ("LLM_MODEL_NAME", "LLM_API_KEY", "LLM_BASE_URL",
-                     "LLM_TEMPERATURE", "LLM_MAX_TOKENS"):
-            prev[key] = os.environ.get(key)
-
-        try:
-            os.environ["LLM_MODEL_NAME"] = self.model_name
-            os.environ["LLM_API_KEY"] = self.api_key or ""
-            os.environ["LLM_BASE_URL"] = self.base_url or ""
-            os.environ["LLM_TEMPERATURE"] = str(self.temperature)
-            os.environ["LLM_MAX_TOKENS"] = str(self.max_tokens)
-            return LLMClient(model_type="openai_compatible")
-        finally:
-            for k, v in prev.items():
-                if v is not None:
-                    os.environ[k] = v
-                else:
-                    os.environ.pop(k, None)
+        client = LLMClient(
+            api_key=self.api_key, base_url=self.base_url, model_name=self.model_name
+        )
+        client.temperature = self.temperature
+        client.max_tokens = self.max_tokens
+        return client
 
     def _image_to_base64(self, image_path: str) -> Optional[str]:
         """将本地图片路径转为 base64 data URI"""
@@ -78,16 +69,16 @@ class ImageAnalyzer:
         file_path = _UPLOAD_DIR / filename
 
         if not file_path.exists():
-            file_path = Path(image_path)
-
-        if not file_path.exists():
             logger.warning(f"图片文件不存在: {image_path}")
             return None
 
         ext = file_path.suffix.lower()
         mime_map = {
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
         }
         mime = mime_map.get(ext, "image/jpeg")
 
@@ -125,13 +116,15 @@ class ImageAnalyzer:
                 descriptions.append(f"图片{i}（{img_path}）：无法加载")
                 continue
 
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                    {"type": "text", "text": VISION_PROMPT},
-                ]
-            }]
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                        {"type": "text", "text": VISION_PROMPT},
+                    ],
+                }
+            ]
 
             try:
                 response = await client.chat(messages)

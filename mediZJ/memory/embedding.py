@@ -4,16 +4,20 @@
 提供统一的模型加载和余弦相似度计算，
 供 entropy_manager、session_vector_store 等模块复用。
 """
+
 import os
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+import torch
 from loguru import logger
 from sentence_transformers import SentenceTransformer
 
 
-_DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
+from mediZJ.infrastructure.vector_schema import MODEL_ID, MODEL_REVISION
+
+_DEFAULT_MODEL = MODEL_ID
 
 
 def _get_local_cache_path(model_name: str) -> Path | None:
@@ -27,15 +31,17 @@ def _get_local_cache_path(model_name: str) -> Path | None:
         / f"models--{cache_dir_name}"
         / "snapshots"
     )
-    if local_path.exists():
-        snapshots = sorted(
-            local_path.iterdir(),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if snapshots:
-            return snapshots[0]
-    return None
+    pinned = local_path / MODEL_REVISION
+    return pinned if pinned.is_dir() else None
+
+
+def select_embedding_device() -> str:
+    """按 CUDA、macOS MPS、CPU 的顺序选择可用设备。"""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 @lru_cache(maxsize=4)
@@ -64,9 +70,13 @@ def load_embedding_model(model_name: str | None = None) -> SentenceTransformer:
         logger.info(f"Loading embedding model from local cache: {model_path}")
 
     try:
-        model = SentenceTransformer(model_path, device="cpu")
+        device = select_embedding_device()
+        options = {"revision": MODEL_REVISION} if model_name == MODEL_ID else {}
+        model = SentenceTransformer(model_path, device=device, **options)
         dim = model.get_sentence_embedding_dimension()
-        logger.info(f"Embedding model loaded: {model_name} (dim={dim})")
+        logger.info(
+            f"Embedding model loaded: {model_name} (dim={dim}, device={device})"
+        )
         return model
     except Exception as e:
         raise RuntimeError(f"Failed to load embedding model '{model_name}': {e}") from e

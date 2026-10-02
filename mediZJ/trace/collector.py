@@ -1,4 +1,5 @@
 """Trace Span 收集器（单例，线程安全）"""
+
 import asyncio
 import threading
 from typing import Dict, List, Optional, Callable, Any
@@ -33,7 +34,9 @@ class TraceCollector:
         self._spans: Dict[str, List[Span]] = {}  # trace_id -> span 列表
         self._storage = None  # SQLite 存储后端
         self._write_lock = asyncio.Lock()  # 并发保护 _spans 写入
-        self._callbacks: Dict[str, List[Callable[[Span], Any]]] = {}  # trace_id -> 回调列表
+        self._callbacks: Dict[
+            str, List[Callable[[Span], Any]]
+        ] = {}  # trace_id -> 回调列表
 
     @classmethod
     def reset(cls):
@@ -82,8 +85,9 @@ class TraceCollector:
         self._spans[span.trace_id].append(span)
         logger.debug(
             f"[Trace] {span.span_type.value}/{span.name} "
-            f"({span.timing.duration_ms:.0f}ms)" if span.timing.duration_ms else
-            f"[Trace] {span.span_type.value}/{span.name}"
+            f"({span.timing.duration_ms:.0f}ms)"
+            if span.timing.duration_ms
+            else f"[Trace] {span.span_type.value}/{span.name}"
         )
         # 实时回调（用于 SSE 推送），按 trace_id 路由
         for cb in self._callbacks.get(span.trace_id, []):
@@ -103,9 +107,10 @@ class TraceCollector:
 
         if self._storage:
             try:
-                self._storage.save(root, spans)
-            except Exception as e:
-                logger.error(f"[Trace] 存储写入失败: {e}")
+                (await self._storage.save(root, spans))
+            except Exception:
+                self._spans[trace_id] = spans
+                raise
 
         # 清理回调
         self._callbacks.pop(trace_id, None)
