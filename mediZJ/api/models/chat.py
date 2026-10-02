@@ -1,10 +1,12 @@
 """问答接口的请求/响应模型"""
+
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
 
 class Citation(BaseModel):
     """知识库引用"""
+
     index: int
     doc_id: str = ""
     source: str = ""
@@ -25,6 +27,7 @@ class Citation(BaseModel):
 
 class ChatRequest(BaseModel):
     """问答请求"""
+
     question: str
     session_id: Optional[str] = None
     context: Optional[Dict[str, Any]] = None
@@ -36,6 +39,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     """问答响应"""
+
     answer: str
     suggestions: List[str] = []
     session_id: str
@@ -47,13 +51,16 @@ class ChatResponse(BaseModel):
     total_time: float = 0.0
     swarm_metadata: Dict[str, Any] = {}
     timeout_occurred: bool = False
-    usage: Dict[str, int] = {}  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
+    usage: Dict[
+        str, int
+    ] = {}  # {"prompt_tokens": N, "completion_tokens": N, "total_tokens": N}
     citations: List[Citation] = []
     verification: Optional[Dict[str, Any]] = None
 
 
 class MessageItem(BaseModel):
     """单条消息"""
+
     role: str
     content: str
     images: Optional[List[str]] = None
@@ -62,11 +69,13 @@ class MessageItem(BaseModel):
 
 class MessageHistory(BaseModel):
     """会话历史"""
+
     session_id: str
     messages: List[MessageItem] = []
 
 
 class AnswerRequest(BaseModel):
+    run_id: str
     """问卷答案提交请求"""
     questionnaire_id: str
     answers: Dict[str, Any]
@@ -75,5 +84,6 @@ class AnswerRequest(BaseModel):
 
 class AnswerResponse(BaseModel):
     """问卷答案提交响应"""
+
     success: bool
     message: str = ""

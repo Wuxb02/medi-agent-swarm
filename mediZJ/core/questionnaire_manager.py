@@ -7,6 +7,7 @@ QuestionnaireManager — 基于 asyncio.Future 的问卷暂停/恢复管理器
 3. 用户提交答案 → POST /api/chat/answer → resolve Future
 4. Agent 恢复执行，用户答案作为 tool_result
 """
+
 import asyncio
 from typing import Dict, Any, Optional
 from loguru import logger
@@ -23,9 +24,7 @@ class QuestionnaireManager:
         self._pending: Dict[str, asyncio.Future] = {}
 
     async def create_pending(
-        self,
-        questionnaire_id: str,
-        timeout: Optional[float] = None
+        self, questionnaire_id: str, timeout: Optional[float] = None
     ) -> Dict[str, Any]:
         """创建 Future 并等待用户回答。
 
@@ -45,7 +44,9 @@ class QuestionnaireManager:
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[questionnaire_id] = future
 
-        logger.info(f"问卷 {questionnaire_id} 等待用户回答（超时: {timeout if timeout is not None else '∞'}s）")
+        logger.info(
+            f"问卷 {questionnaire_id} 等待用户回答（超时: {timeout if timeout is not None else '∞'}s）"
+        )
 
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
@@ -79,7 +80,7 @@ class QuestionnaireManager:
             return False
 
         future.set_result(answers)
-        logger.info(f"问卷 {questionnaire_id} 已解析，答案: {answers}")
+        logger.info(f"问卷 {questionnaire_id} 已解析")
         return True
 
     def cancel(self, questionnaire_id: str) -> bool:
