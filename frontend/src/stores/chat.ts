@@ -19,7 +19,7 @@ export const useChatStore = defineStore('chat', () => {
   const error = ref<string | null>(null)
   let typewriter: TypewriterController | null = null
 
-  const { connect, disconnect } = useSSE()
+  const { connect, disconnect, getRunId } = useSSE()
 
   async function sendMessage(question: string, images?: string[]) {
     if (isStreaming.value || (!question.trim() && !images?.length)) return
@@ -381,6 +381,7 @@ export const useChatStore = defineStore('chat', () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          run_id: getRunId(),
           questionnaire_id: questionnaireId,
           answers,
           session_id: sessionId.value,
@@ -406,6 +407,28 @@ export const useChatStore = defineStore('chat', () => {
       fresh.questionnaireError = undefined
     }
   }
+
+  async function restoreActiveRun() {
+    const runId = sessionStorage.getItem('medizj.activeRun')
+    if (!runId) return
+    const response = await fetch(`/api/chat/runs/${runId}`)
+    if (!response.ok) {
+      if (response.status === 404) sessionStorage.removeItem('medizj.activeRun')
+      return
+    }
+    const run = await response.json()
+    sessionId.value = run.session_id
+    if (run.status === 'completed') {
+      sessionStorage.removeItem('medizj.activeRun')
+      await loadHistory(run.session_id)
+    } else {
+      await sendMessage(run.request.question, run.request.images)
+    }
+  }
+
+  void restoreActiveRun().catch((failure: unknown) => {
+    error.value = failure instanceof Error ? failure.message : String(failure)
+  })
 
   return {
     sessionId,
