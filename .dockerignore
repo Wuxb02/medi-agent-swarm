@@ -10,7 +10,9 @@ frontend/dist
 mediZJ/memory/data
 mediZJ/memory/profile
 mediZJ/memory/swarm/session_summaries
-mediZJ/knowledge/data
+mediZJ/knowledge/data/*
+!mediZJ/knowledge/data/documents
+!mediZJ/knowledge/data/documents/*.txt
 mediZJ/data/uploads
 logs
 .claude/*

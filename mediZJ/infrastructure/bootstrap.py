@@ -1,4 +1,4 @@
-"""部署前单次初始化；不导入或修改旧业务数据。"""
+"""部署前初始化基础设施并登记共享默认知识，不迁移旧业务数据。"""
 
 import asyncio
 
@@ -56,6 +56,9 @@ async def setup():
 
         await asyncio.to_thread(MedicalKnowledgeBase, initialize=True)
         await asyncio.to_thread(SessionVectorStore, initialize=True)
+        from mediZJ.knowledge.default_documents import seed_default_documents
+
+        await seed_default_documents()
     finally:
         await close_database()
 

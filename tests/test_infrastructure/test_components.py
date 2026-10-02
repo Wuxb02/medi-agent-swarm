@@ -134,6 +134,10 @@ async def test_bootstrap_is_explicit_and_idempotent(mysql_infrastructure, monkey
     # 模型边界由索引测试覆盖；这里验证真实 MySQL/checkpointer 初始化。
     monkeypatch.setattr(bootstrap, "initialize_database", AsyncMock())
     monkeypatch.setattr(bootstrap, "close_database", AsyncMock())
+    seed = AsyncMock()
+    monkeypatch.setattr(
+        "mediZJ.knowledge.default_documents.seed_default_documents", seed
+    )
     knowledge = MagicMock()
     vectors = MagicMock()
     monkeypatch.setattr("mediZJ.knowledge.milvus_kb.MedicalKnowledgeBase", knowledge)
@@ -144,6 +148,7 @@ async def test_bootstrap_is_explicit_and_idempotent(mysql_infrastructure, monkey
     await bootstrap.setup()
     assert knowledge.call_count == 2
     assert vectors.call_count == 2
+    assert seed.await_count == 2
 
 
 @pytest.mark.integration
