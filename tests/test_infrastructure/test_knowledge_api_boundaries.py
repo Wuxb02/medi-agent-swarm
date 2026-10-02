@@ -33,7 +33,7 @@ def knowledge(monkeypatch):
         get_document_chunks=MagicMock(
             return_value=[
                 {
-                    "milvus_id": 1,
+                    "milvus_id": "v1:0",
                     "chunk_id": 0,
                     "content": "来源",
                     "total_chunks": 1,
@@ -68,7 +68,10 @@ async def test_document_views_keep_version_metadata(knowledge):
     assert documents.documents[0].version_id == "v1"
     assert documents.documents[0].chunk_count == 1
     kb.get_document_chunks.assert_not_called()
-    assert (await service.get_document_chunks("doc")).total == 1
+    detail = await service.get_document_chunks("doc")
+    assert detail.total == 1
+    assert detail.chunks[0].milvus_id == "v1:0"
+    assert detail.chunks[0].content == "来源"
     catalog.active_version.return_value = None
     assert (await service.get_document_chunks("missing")).total == 0
     assert service.get_knowledge_types()

@@ -125,6 +125,7 @@ const documentsLoaded = ref(false)
 const selectedDocId = ref<string | null>(null)
 const chunks = ref<ChunkDetail[]>([])
 const chunkLoading = ref(false)
+const chunkError = ref('')
 const versions = ref<DocumentVersion[]>([])
 const confirmDeleteId = ref<string | null>(null)
 
@@ -153,12 +154,14 @@ async function viewChunks(docId: string) {
   selectedDocId.value = docId
   editing.value = false
   chunkLoading.value = true
+  chunkError.value = ''
   try {
     const data = await getDocumentChunks(docId)
     chunks.value = data.chunks || []
     versions.value = await getDocumentVersions(docId)
   } catch (e) {
     console.error('Load chunks error:', e)
+    chunkError.value = '文档内容加载失败，请重试。'
     chunks.value = []
   } finally {
     chunkLoading.value = false
@@ -717,6 +720,7 @@ const tabs = [
             <div v-else-if="chunkLoading" class="text-center py-12 text-slate-400 text-sm">
               加载中...
             </div>
+            <div v-else-if="chunkError" class="text-red-600 text-sm">{{ chunkError }}</div>
             <div v-else class="space-y-4">
               <div
                 v-for="chunk in chunks"

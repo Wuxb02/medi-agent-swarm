@@ -314,7 +314,7 @@ export interface DocumentVersion {
 }
 
 export interface ChunkDetail {
-  milvus_id: number
+  milvus_id: string
   chunk_id: number
   content: string
   total_chunks: number

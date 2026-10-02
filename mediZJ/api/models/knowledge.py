@@ -70,7 +70,7 @@ class DocumentListResponse(BaseModel):
 class ChunkDetail(BaseModel):
     """文档块详情"""
 
-    milvus_id: int
+    milvus_id: str
     chunk_id: int
     content: str
     total_chunks: int
