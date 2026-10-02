@@ -687,6 +687,7 @@ spans = Table(
 knowledge_documents = Table(
     "knowledge_documents",
     metadata,
+    Column("chunk_count", Integer, nullable=False, server_default=text("0")),
     Column("content", LONGTEXT, nullable=False, server_default=text("('')")),
     Column("version_id", String(191), primary_key=True),
     Column("document_id", String(191), nullable=False),

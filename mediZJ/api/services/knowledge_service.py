@@ -123,11 +123,9 @@ async def get_knowledge_base_size() -> int:
 
 async def list_all_documents() -> DocumentListResponse:
     """获取知识库文档列表（含当前有效与已过期）。"""
-    kb = MedicalKnowledgeBase()
-    catalog = await _get_catalog(kb)
+    catalog = KnowledgeCatalog()
     summaries = []
     for version in await catalog.list_active_and_expired():
-        chunks = kb.get_document_chunks(version["version_id"])
         summaries.append(
             DocumentSummary(
                 doc_id=version["document_id"],
@@ -135,7 +133,7 @@ async def list_all_documents() -> DocumentListResponse:
                 type=version["doc_type"],
                 disease=version["disease"],
                 source=version["source"],
-                chunk_count=len(chunks),
+                chunk_count=version["chunk_count"],
                 version_id=version["version_id"],
                 document_version=str(version["version"]),
                 status=version["status"],

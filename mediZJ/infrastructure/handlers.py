@@ -119,7 +119,7 @@ async def knowledge_index(job):
         "document_version": version["version"],
     }
     kb = MedicalKnowledgeBase()
-    await asyncio.to_thread(
+    chunk_count = await asyncio.to_thread(
         kb.add_documents,
         [
             {
@@ -161,6 +161,10 @@ async def knowledge_index(job):
             )
             await catalog.delete_version_record(version["version_id"])
             return
+        await conn.execute(
+            "UPDATE knowledge_documents SET chunk_count=%s WHERE version_id=%s",
+            (chunk_count, version["version_id"]),
+        )
         await catalog.activate(version["version_id"])
         await MemoryLineageStore().invalidate_document(
             version["document_id"], "document_superseded"

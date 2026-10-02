@@ -13,6 +13,7 @@ def knowledge(monkeypatch):
         "document_id": "doc",
         "version_id": "v1",
         "version": 1,
+        "chunk_count": 1,
         "filename": "指南.txt",
         "doc_type": "clinical_guideline",
         "disease": "",
@@ -42,6 +43,7 @@ def knowledge(monkeypatch):
     )
     monkeypatch.setattr(service, "MedicalKnowledgeBase", lambda: kb)
     monkeypatch.setattr(service, "_get_catalog", AsyncMock(return_value=catalog))
+    monkeypatch.setattr(service, "KnowledgeCatalog", lambda: catalog)
     return kb, catalog, version
 
 
@@ -65,6 +67,7 @@ async def test_document_views_keep_version_metadata(knowledge):
     documents = await service.list_all_documents()
     assert documents.documents[0].version_id == "v1"
     assert documents.documents[0].chunk_count == 1
+    kb.get_document_chunks.assert_not_called()
     assert (await service.get_document_chunks("doc")).total == 1
     catalog.active_version.return_value = None
     assert (await service.get_document_chunks("missing")).total == 0
@@ -121,3 +124,20 @@ async def test_rollback_accepts_only_same_document_previous_version(
     assert (await service.activate_document_version("doc", "v1"))["version_id"] == "v1"
     catalog.list_versions = AsyncMock(return_value=[version])
     assert await service.list_document_versions("doc") == [version]
+
+
+async def test_large_document_list_never_initializes_vector_store(
+    knowledge, monkeypatch
+):
+    _, catalog, version = knowledge
+    catalog.list_active_and_expired.return_value = [
+        {**version, "document_id": f"doc-{index}", "chunk_count": index + 1}
+        for index in range(94)
+    ]
+    vector_store = MagicMock(side_effect=AssertionError("列表不应连接向量库"))
+    monkeypatch.setattr(service, "MedicalKnowledgeBase", vector_store)
+    documents = await service.list_all_documents()
+    assert documents.total == 94
+    assert documents.documents[-1].chunk_count == 94
+    catalog.list_active_and_expired.assert_awaited_once()
+    vector_store.assert_not_called()

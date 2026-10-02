@@ -63,7 +63,7 @@ async def initialize_database() -> None:
         version = (
             await connection.exec_driver_sql("SELECT version_num FROM alembic_version")
         ).scalar_one()
-        if version != "0003_feedback_versions":
+        if version != "0004_knowledge_chunk_count":
             raise RuntimeError("数据库版本不匹配，请先执行 alembic upgrade head")
 
 

@@ -342,7 +342,10 @@ class KnowledgeCatalog:
             rows = (
                 await conn.execute(
                     """
-                SELECT * FROM knowledge_documents
+                SELECT version_id, document_id, version, status, filename,
+                       doc_type, disease, source, authority_level, effective_at,
+                       expires_at, chunk_count
+                FROM knowledge_documents
                 WHERE status IN ('active', 'expired')
                 ORDER BY document_id, version DESC
                 """
