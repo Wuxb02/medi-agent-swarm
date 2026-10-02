@@ -334,22 +334,21 @@ retrieve_memories → plan_stages（纯函数启发式预筛 + LeadAgent.plan_st
 
 ### 1. 环境准备
 
-需要 Python 3.10+（建议 3.12）。
+推荐使用 Docker 一键启动，宿主机无需安装 Python、Node.js 或数据库。先配置下方 `.env`，再执行 `./start.sh`；详细说明见文末「MySQL、Redis 与 Milvus 部署」。
+
+原生开发需要 Python 3.10+（建议 3.12）、Node.js，以及可连接的 MySQL、Redis、Milvus。
 
 ```bash
 conda create -n medix-swarm python=3.12 -y
 conda activate medix-swarm
-cd medix-agent-swarm
+cd medi-agent-swarm
 ```
 
 ### 2. 安装依赖
 
 ```bash
-# 方式 1: uv（推荐，lockfile 锁定）
-uv sync
-
-# 方式 2: pip + conda 环境
-pip install -r requirements.txt  # requirements.txt 不在仓库中，需按 pyproject.toml 手动安装
+# 原生开发依赖（包含测试工具，使用锁定版本）
+uv sync --frozen --extra dev
 ```
 
 ### 3. 配置 API
@@ -411,15 +410,15 @@ REDIS_URL=redis://redis:6379/0
 
 ### 4. 初始化知识库
 
-首次使用前需将医学知识文档导入 Milvus 向量数据库：
+Compose 的 `migrate` 服务负责数据库 schema、检查点和向量集合初始化，会将仓库内置的 94 份医学文档幂等登记为共享默认知识，并创建持久化索引任务。应用启动后由后台工作器构建索引，激活后所有已有用户和新用户均可检索；回答时按需注入相关证据。已有文档及管理员修改不会被覆盖。启动后也可通过知识库管理页面上传文档。
+
+原生开发时先设置 `MYSQL_URL`、`REDIS_URL`、`MILVUS_URI` 为宿主机可访问的地址，并设置可写的 `UPLOAD_DIR`；`.env.example` 中的服务名地址用于容器网络，Compose 将 MySQL、Redis、Milvus 分别映射到本机 3306、6379、19530 端口。执行：
 
 ```bash
-# 追加导入
-python mediZJ/knowledge/scripts/import_hardcoded_data.py
-
-# 清空后重新导入
-python mediZJ/knowledge/scripts/import_hardcoded_data.py --clean
+uv run python -m mediZJ.infrastructure.bootstrap
 ```
+
+内置文档已由上述初始化入口登记，无需再运行旧的直接 Milvus 导入脚本；索引激活仍需应用后台工作器运行。
 
 如需批量生成更多知识文档，可执行生成脚本：
 
@@ -431,16 +430,16 @@ python mediZJ/knowledge/scripts/gen_part3_guidelines.py          # 30 份临床�
 
 ### 5. 运行测试
 
-集成测试依赖真实 LLM API，默认跳过。通过 `--run-integration` 启用，需先确保 `.env` 中 `LLM_API_KEY` / `LLM_BASE_URL` 已配置。
+集成测试默认跳过，通过 `--run-integration` 启用。真实基础设施测试依赖独立 MySQL、Redis 和 Milvus 测试环境；`slow` 测试还需要真实 LLM 配置。环境准备见文末「真实基础设施验收」。
 
 ```bash
 # 单元测试（无需外部服务）
 uv run pytest tests/ -m "not integration"
 
-# 集成测试（14 个，需 .env 中配置 LLM_API_KEY / LLM_BASE_URL）
-uv run pytest tests/ -m "integration" --run-integration
+# 真实模型测试（需测试基础设施及有效 LLM 配置）
+uv run pytest tests/ -m "slow" --run-integration
 
-# 全部测试（当前基线：398 collected / 384 unit passed + 14 integration）
+# 全部测试（需测试基础设施、Docker 和真实 LLM 配置）
 uv run pytest tests/ --run-integration
 
 # 覆盖率报告
@@ -449,7 +448,14 @@ uv run pytest tests/ -m "not integration" --cov=mediZJ --cov-report=html
 
 ### 6. 开始使用
 
-**方式一：Web 界面（推荐）**
+**方式一：Docker Web 界面（推荐）**
+
+```bash
+./start.sh
+# 浏览器访问 http://localhost:8000（APP_PORT 可修改端口）
+```
+
+**方式二：原生 Web 开发（先完成基础设施初始化）**
 
 ```bash
 # 终端 1：启动后端 API 服务
@@ -462,7 +468,7 @@ cd frontend && npm install && npm run dev
 # API 文档：http://localhost:8000/docs
 ```
 
-**方式二：CLI 交互**
+**方式三：CLI 交互（使用已初始化的基础设施）**
 
 ```bash
 python mediZJ/main.py
@@ -734,13 +740,15 @@ Vite Dev Proxy (/api → localhost:8000)
    ↓
 FastAPI (mediZJ/api_main.py)
    ↓
-api/routers/chat.py → api/services/chat_service.py
-   ↓ EventBridge (asyncio.Queue)
+api/routers/chat.py → api/services/run_service.py
+   ↓ 创建持久化运行
+MySQL chat_runs / jobs / checkpoints / events
+   ↓ 工作器认领任务并续租
 SwarmCoordinator.process()
+   ↓ 持久化事件
+GET /api/chat/runs/{run_id}/events?after={seq}
    ↓
-SharedContext.on_event_callback → 事件推送
-   ↓
-换行分隔 JSON 流式响应 → 前端实时渲染
+换行分隔 JSON 流 → 前端按序号补拉、去重和重连
 ```
 
 ### API 端点
@@ -749,7 +757,11 @@ SharedContext.on_event_callback → 事件推送
 |------|------|------|
 | POST | `/api/chat` | 非流式问答 |
 | POST | `/api/chat/stream` | 流式问答（换行分隔 JSON） |
-| POST | `/api/chat/answer` | 提交问卷答案（交互式问诊） |
+| POST | `/api/chat/runs` | 创建持久化问答，返回 run_id；支持 Idempotency-Key |
+| GET | `/api/chat/runs/{run_id}` | 查询执行状态与结果 |
+| GET | `/api/chat/runs/{run_id}/events` | 按 after 序号补读事件（NDJSON） |
+| POST | `/api/chat/runs/{run_id}/cancel` | 取消执行 |
+| POST | `/api/chat/answer` | 持久化问卷答案，包含 run_id、session_id、questionnaire_id、answers |
 | POST | `/api/chat/upload-image` | 上传图片（Vision 解析） |
 | GET | `/api/chat/history/{session_id}` | 获取会话历史 |
 | POST | `/api/auth/login` | 免密登录 |
@@ -916,62 +928,40 @@ STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），�
 | 表 | 用途 |
 | --- | --- |
 | `episodic_summaries` | 保存摘要、解析实体、来源会话、状态和过期时间 |
-| `memory_usage` | 记录实际注入的 memory ID、session、trace 和 Agent |
+| `memory_usage` | 记录实际注入的 memory ID、session、trace 和 Agent；无可用记忆时跳过空批次写入 |
 | `memory_audit` | 记录创建、确认、驳回、替换、失效和删除操作 |
 | `memory_profile_revisions` | 保存用户画像版本和稳定前缀 hash |
 
 pending、dismissed、superseded、stale、过期或未授权的记忆不进入上下文。`highly_sensitive` 数据只有在 `consent_scope=personalization` 时才能跨会话使用。pending、审计记录和最后访问时间变化不会提升 `profile_revision`。
 
-#### 旧数据迁移
+#### 存储初始化与旧数据边界
 
-旧 `profiles`/`memory_lineage` 数据使用单事务迁移，上线前应先执行 dry-run：
-
-```bash
-uv run python -m mediZJ.memory.scripts.migrate_structured_memory --dry-run
-uv run python -m mediZJ.memory.scripts.migrate_structured_memory
-```
-
-迁移工具将旧 `profiles.content` 拆分为 active profile fact/病史，将 `profiles.pending` 转为 `pending/model_inferred`，并尽可能合并 `memory_lineage` 中的来源、trace 和有效期。工具支持幂等执行、前后数量报告、稳定前缀 hash 重复生成校验和异常整体回滚；无法可靠解析的数据会使整体迁移失败，禁止部分成功后上线。旧表保留一个发布周期，运行时不再读写。
+当前使用 Alembic 管理 MySQL schema，由独立 `migrate` 服务执行。旧本地数据库和业务文件不会自动迁入新存储；旧 `migrate_structured_memory` 等脚本已移除，不能继续使用历史迁移命令。
 
 #### 短期记忆（ShortTermMemory）
 
-**作用**：存储当前会话的对话历史，支持多轮对话上下文理解。
+按用户与会话隔离 Redis 快照，默认 TTL 为 3600 秒，由 `SHORT_TERM_TTL` 配置。MySQL 会话历史是权威来源；缓存缺失或过期时根据历史水位重建，Lua 比较版本后更新，避免跨实例覆盖。
 
-**配置**：
 ```python
-# 内存存储（仅测试/开发）
 from mediZJ.memory.short_term import ShortTermMemory
-memory = ShortTermMemory(storage_type="memory")
 
-# Redis 工作记忆（运行时默认）
-memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost", "port": 6379})
+memory = ShortTermMemory(user_id="用户标识")
+# 在已初始化数据库和 Redis 的异步上下文中调用
+history = await memory.get_session("会话标识")
 ```
 
-**存储方式**：
-- **Redis**：默认 TTL 60 分钟，保存当前会话原始消息和结构化临时状态
-- 协调器运行时设置 `enable_compression=False`，已进入历史的 role/content 不再重写，以提高 KV cache 命中
-- 不保存知识库 chunk 完整正文
-
-**智能压缩（写时增量压缩）**：
-
-`ShortTermMemory` 仍保留可选的写时压缩能力，但协调器运行时显式关闭，确保历史消息不被重写。仅在非 KV cache 敏感的独立场景中手动启用时，才使用以下机制：
-
-- **熵驱动触发**：未压缩消息满足 `total_messages > 20` 或 `duplicate_rate > 0.15` 或 `avg_message_length > 500` 时才压缩，否则跳过
-- **增量压缩**：只压缩较旧的消息，保留最近 N 条不动；压缩摘要持久化到 messages 列表，下次读取直接返回
-- **LLM 语义摘要**（推荐）：调用 LLM 将早期对话压缩为结构化摘要，保留关键医学信息
-- **截断降级**（自动）：LLM 不可用时降级为截断模式
-- **去重**：基于向量语义相似度（BAAI/bge-small-zh-v1.5）检测并移除重复消息，阈值 0.9
+运行时不提供内存存储模式或旧写时压缩参数；历史消息保持追加式组织，不缓存知识库 chunk 完整正文。Redis 不保存执行检查点或后台任务。
 
 #### 个人档案（PersonalProfile）
 
 **作用**：持久化患者个人信息（年龄、性别、病史、过敏史等），**按 user_id 隔离存储**。
 
-**存储方式**：`mediZJ/memory/data/sessions.db` 的 `user_memory_items` 表，按 `user_id` 隔离，支持 active/pending/dismissed/superseded/stale、来源权威、授权范围、时效和修订链。`PersonalProfile` 仅作为现有 API 的兼容层。
+**存储方式**：MySQL 的 `user_memory_items` 表，按 `user_id` 隔离，支持 active/pending/dismissed/superseded/stale、来源权威、授权范围、时效和修订链。`PersonalProfile` 仅作为现有 API 的兼容层。
 
 **工作方式**：
 
-- 问答请求可携带 `user_id` 字段（`/api/chat`、`/api/chat/stream`），不同用户的档案互不可见
-- `/api/personal` 系列端点支持 `?user_id=` 查询参数，缺省操作 default 用户
+- 问答和 `/api/personal` 系列端点以登录身份确定用户，客户端传入的用户标识不能覆盖认证身份
+- 同用户的短期记忆实例共享会话历史，不同用户的数据隔离
 - 回答通过医疗安全校验后才异步提取 pending 候选，提取失败或格式非法时不写入
 - 只有 active、未过期且符合 consent scope 的记忆进入用户稳定前缀
 - 医疗人员确认信息高于用户确认信息，低权威写入不会覆盖高权威 active 项
@@ -1065,16 +1055,16 @@ LLM usage/trace 记录 `prompt_tokens`、`cached_prompt_tokens`、`cache_hit_rat
 
 | 层面 | 机制 | 位置 |
 | ------ | ------ | ------ |
-| **会话互斥** | per-session asyncio.Lock，同会话请求排队执行，防止短期记忆 / turn_index 写竞争 | `mediZJ/api/services/chat_service.py` |
-| **记忆写锁** | 短期记忆 per-session 写锁，覆盖写入 + 增量压缩全过程 | `mediZJ/memory/short_term.py` |
+| **会话互斥** | MySQL 持久化运行约束，同一会话已有未结束运行时返回 409 | `mediZJ/api/services/run_service.py` |
+| **缓存并发更新** | Redis Lua 比较版本更新，冲突后重新读取并重试 | `mediZJ/memory/short_term.py` |
 | **档案隔离** | `user_memory_items` 按 user_id 行级隔离，active 项具备唯一约束、修订链和事务替换 | `mediZJ/memory/structured_memory.py` |
 | **任务认领** | SharedContext 子任务认领加锁，防止并行 Worker 重复执行 | `mediZJ/swarm/shared_context.py` |
-| **阻塞下线程** | embedding 推理 / MySQL / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
+| **异步存储** | MySQL 使用 SQLAlchemy + asyncmy 异步事务；embedding、Milvus 同步调用在线程中执行 | `infrastructure/database.py`、`session_vector_store.py` 等 |
 | **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
-| **LLM 限流** | 全局信号量（`LLM_MAX_CONCURRENCY`，默认 16），高并发排队而非触发 429 | `mediZJ/core/llm_client.py` |
+| **容量控制** | MySQL 容量槽位和有界队列限制运行与 LLM 并发，用户超限返回 429、队列过载返回 503 | `infrastructure/capacity.py`、`api/services/run_service.py` |
 | **熔断器** | 进程级共享，跨请求累计 LLM 失败（连续 5 次断开 30s） | `mediZJ/core/circuit_breaker.py` |
 | **存储串行化** | Milvus 服务端客户端调用加锁，业务 outbox 幂等 upsert/delete | `milvus_kb.py`、`session_vector_store.py` |
-| **总超时** | 单次问答 `REQUEST_TIMEOUT`（默认 300s），超时友好返回 504 | `mediZJ/api/services/chat_service.py` |
+| **运行时限** | `RUN_TIMEOUT` 限制累计执行时间，问卷等待受 `QUESTIONNAIRE_TTL` 限制；执行状态持久化 | `mediZJ/api/services/run_service.py` |
 
 ### 压测脚本
 
@@ -1518,7 +1508,7 @@ CitationValidator + MedicalAnswerVerifier
 ChatService
     │  验证通过后，SSE done 事件与 non-stream ChatResponse 携带 citations
     ▼
-MySQL (messages.citations) / JSON 事件文件
+MySQL（messages.citations 与持久化事件）
     │  持久化引用数据，历史会话可回放
     ▼
 前端 ChatMessage.citations
@@ -1835,20 +1825,20 @@ traced_span.__exit__()
       ▼
 TraceCollector.collect(span)         ← 内存缓冲（按 trace_id 分组）
       │
-      ├─► callback → EventBridge     ← 实时 SSE 推向前端（TRACE_SPAN 事件）
+      ├─► callback → 事件持久化       ← 前端通过事件流读取 TRACE_SPAN
       │
       ▼
-TraceCollector.flush(trace_id)       ← 请求结束时调用
+await TraceCollector.flush(trace_id) ← 执行结束时调用
       │
       ├─► _build_tree()              ← 由 parent_id 重建 Span 树
-      └─► TraceSqliteStorage.save()  ← 写入 MySQL（复用 sessions.db）
+      └─► await TraceStorage.save() ← 写入 MySQL
             ├── traces 表             ← 嵌套树 JSON（tree_json）
             └── spans 表              ← 扁平行（便于 SQL 查询），FK CASCADE 关联
 ```
 
 ### 聚合分析
 
-`TraceAnalyzer` 基于 spans 表提供多维统计：
+`TraceAnalyzer` 通过异步 MySQL 查询 spans 表提供多维统计，调用统计方法时需使用 `await`：
 
 | 分析维度 | 指标 |
 |---------|------|
@@ -2001,10 +1991,18 @@ MINIO_ROOT_PASSWORD=自定义存储密码
 ### 构建与启动
 
 ```bash
-docker compose up --build -d
+./start.sh
 ```
 
-该命令会启动 MySQL、Redis、Milvus 及其依赖，完成数据库初始化后启动应用。首次构建需要联网下载依赖和 embedding 模型，耗时较长。
+脚本检查 `.env`、Docker 引擎和 Compose，构建镜像并后台启动，默认等待服务就绪最多 600 秒（不含镜像构建时间）。失败时输出容器状态和最近日志；不会自动创建或覆盖 `.env`。支持从任意工作目录调用脚本的绝对路径。
+
+```bash
+./start.sh --no-build               # 使用已有镜像
+START_WAIT_TIMEOUT=900 ./start.sh   # 调整就绪等待时间
+./start.sh --help                   # 查看帮助
+```
+
+前端在镜像构建阶段打包，由 API 服务提供页面，无需另外运行 Vite。该入口会启动 MySQL、Redis、Milvus 及其依赖，完成数据库初始化后启动应用。首次构建需要联网下载依赖和 embedding 模型，耗时较长。
 
 查看容器状态和应用、初始化日志：
 
@@ -2020,6 +2018,8 @@ docker compose logs -f app migrate
 - 存活检查：<http://localhost:8000/health/live>
 
 默认端口为 8000，可通过 `.env` 中的 `APP_PORT` 修改宿主机端口。
+
+文档管理列表直接查询 MySQL 版本元数据与 `chunk_count`，不读取 Milvus 正文；分块数量在索引激活事务中保存。`0004_knowledge_chunk_count` 迁移按现有默认分块规则回填历史版本统计。前端首次进入加载列表，切换标签复用结果，手动刷新及文档修改后重新加载。
 
 ### 日常操作
 
@@ -2041,9 +2041,9 @@ docker compose logs -f mysql redis milvus etcd minio
 
 Embedding 推理按 CUDA、macOS MPS、CPU 的顺序自动选择可用设备。macOS 原生运行可使用 MPS，Mac 上的 Linux Docker 容器无法使用 MPS。Linux 容器使用 CUDA 需要宿主机 GPU 驱动、NVIDIA Container Toolkit 和 Compose GPU 透传配置；当前默认 Compose 未配置 GPU 透传。
 
-MinIO 采用固定版本源代码构建（`docker/minio.Dockerfile`），首次构建需要访问 Go 模块代理。`migrate` 服务先运行 Alembic 并初始化图检查点、容量槽位和向量 collections；应用启动只检查 schema。独立初始化命令为 `python -m mediZJ.infrastructure.bootstrap`。共享上传目录由 `UPLOAD_DIR` 指定，Compose 默认使用持久卷。数据库端口不向宿主机公开。
+MinIO 采用固定版本源代码构建（`docker/minio.Dockerfile`），首次构建需要访问 Go 模块代理。`migrate` 服务先运行 Alembic 并初始化图检查点、容量槽位和向量 collections；应用启动只检查 schema。独立初始化命令为 `python -m mediZJ.infrastructure.bootstrap`。共享上传目录由 `UPLOAD_DIR` 指定，Compose 默认使用持久卷。MySQL、Redis、Milvus 端口仅绑定 `127.0.0.1`，供本地开发访问。
 
-问答入口为 `POST /api/chat/runs`，返回执行标识；通过 `GET /api/chat/runs/{run_id}/events?after={seq}` 补读持久化事件。答案必须包含 `run_id`。关闭连接后执行继续；取消使用 `POST /api/chat/runs/{run_id}/cancel`。
+问答入口为 `POST /api/chat/runs`，返回执行标识；通过 `GET /api/chat/runs/{run_id}/events?after={seq}` 补读持久化事件。答案必须包含 `run_id`、`session_id`、`questionnaire_id` 和 `answers`，重复答案由后端校验。前端保存当前运行标识和创建请求幂等键，断线后按事件序号补拉并过滤重复事件；重新连接时检查已有运行与请求是否匹配。关闭连接后执行继续；取消使用 `POST /api/chat/runs/{run_id}/cancel`。
 
 存活与就绪接口为 `/health/live`、`/health/ready`，管理员通过 `/api/metrics` 查询任务与缓存状态。真实 MySQL、Redis 恢复测试使用 `pytest tests/test_infrastructure --run-integration`。
 
@@ -2083,3 +2083,15 @@ TEST_COMPOSE_PROJECT=medizj-validation uv run pytest tests/test_infrastructure/t
 ```
 
 MySQL schema 升级由独立 `migrate` 服务执行，应用不自动建表；保留上一版镜像与备份后再升级。单机 Compose 提供可恢复部署，不提供基础设施高可用。
+
+### 最新验证记录
+
+最新提交 `79b3e72`（2026-10-02）记录的验证结果如下，并非每次修改 README 时重新执行的结果：
+
+- 后端完整测试 532 项通过、无跳过，包含真实 LLM、跨进程恢复及六卷备份恢复。
+- 基础设施与运行服务覆盖率 90.06%，后端整体覆盖率 77.51%；整体仍低于建议的 80%，需要补充测试。
+- 前端 42 项测试、覆盖率检查和生产构建通过；覆盖率门槛针对 `useSSE.ts` 和 `chat.ts`，不代表前端整体达到 80%。
+- Docker 镜像构建、断网加载 512 维 embedding 模型和双副本就绪检查通过。
+- 修改相关 Ruff、基础设施 mypy 和差异空白检查通过。
+
+CI 分别执行后端静态检查与单元测试、前端覆盖率与构建、真实基础设施和容器验证。上述验证范围不等同于基础设施高可用或全仓库覆盖率达标。

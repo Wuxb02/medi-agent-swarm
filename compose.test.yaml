@@ -3,11 +3,11 @@ services:
   mysql:
     environment:
       MYSQL_DATABASE: medizj_test
-    ports: ["127.0.0.1:${TEST_MYSQL_PORT:-23306}:3306"]
+    ports: !override ["127.0.0.1:${TEST_MYSQL_PORT:-23306}:3306"]
   redis:
-    ports: ["127.0.0.1:${TEST_REDIS_PORT:-26379}:6379"]
+    ports: !override ["127.0.0.1:${TEST_REDIS_PORT:-26379}:6379"]
   milvus:
-    ports: ["127.0.0.1:${TEST_MILVUS_PORT:-29530}:19530"]
+    ports: !override ["127.0.0.1:${TEST_MILVUS_PORT:-29530}:19530"]
   migrate:
     environment:
       MYSQL_URL: mysql+asyncmy://medizj:${MYSQL_PASSWORD}@mysql:3306/medizj_test
