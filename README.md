@@ -16,11 +16,11 @@
 - **🤖 LangGraph Agent 子图**: LLM 驱动的 Skill 调用循环（AgentSubGraph），Worker 自主规划、调用 Skills 并完成任务 ✅
 - **🤖 统一 Agent 委派**: 单 Agent 与 Swarm 共用 `AgentSubGraph` 执行机制，Worker 使用隔离子会话执行并通过统一 ContextBuilder 获取受控上下文，路由由 LeadAgent 评估自动决定 ✅
 - **🧭 意图识别**: 默认由 JEV 区分 `medical` / `others`；仅高置信度 `others` 进入闲聊路径，调用失败或判断不确定时进入医疗流程 ✅
-- **🧠 分层记忆**: KnowledgeCatalog 医学事实 + SQLite 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
+- **🧠 分层记忆**: KnowledgeCatalog 医学事实 + MySQL 用户语义/情景记忆 + Redis 工作记忆 + evolution 程序性策略 ✅
 - **🧩 双轨记忆提取**: 最终回答通过校验后，由 JEV 分别判断个人信息和通用医学知识候选；个人信息待用户确认，医学知识经可信库内证据核对和管理员审核后入库 ✅
 - **⚡ KV Cache 优化**: 统一上下文入口、确定性序列化、稳定前缀指纹与供应商实际 cached token 监控 ✅
 - **💾 Milvus 知识库**: 统一知识管理，语义检索，支持模糊查询（"血压高" → "高血压"）；Web 界面支持文档增删改查、文件上传、chunk 查看 ✅
-- **📚 知识版本治理**: SQLite Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、上一版恢复、有效期时间范围与过期标记 ✅
+- **📚 知识版本治理**: MySQL Catalog 管理逻辑文档和物理版本，支持原子激活、失败回滚、上一版恢复、有效期时间范围与过期标记 ✅
 - **🛡️ 医疗回答安全验证**: 回答返回前统一检查红旗症状、诊断越界、处方、医学数值、引用有效性及语义一致性；最多重写一次，失败时安全降级 ✅
 - **🔗 可追溯引用**: 校验文档版本与有效期；引用提供 `chunk_uid` 时进一步核验唯一 chunk，历史会话保留引用快照 ✅
 - **🧹 数据生命周期**: 结构化记忆具备来源、授权、时效、修订、用量记录、审计和用户删除治理 ✅
@@ -29,7 +29,7 @@
 - **📝 Prompt 集中管理**: 所有 prompt 统一存放在 `mediZJ/prompt/` 目录，基于 Jinja2 模板引擎管理，支持变量渲染和条件分支 ✅
 - **🔍 Trace 追踪**: 全链路请求追踪，六种 Span 类型（TRACE/STAGE/AGENT/ITERATION/LLM/TOOL），瀑布图可视化，per-agent/tool/llm 聚合统计 ✅
 - **🚦 并发安全**: per-session 请求互斥与记忆写锁、个人档案按 user_id 隔离、LLM 全局并发限流 + 共享连接池、阻塞调用全部下线程，支持多用户同时提问 ✅
-- **🔐 免密登录**: 多用户身份隔离（SQLite 随机会话令牌 + Cookie），个人档案按 user_id 隔离，非登录用户强制跳转个人中心 ✅
+- **🔐 免密登录**: 多用户身份隔离（MySQL 随机会话令牌 + Cookie），个人档案按 user_id 隔离，非登录用户强制跳转个人中心 ✅
 - **🖼️ 多模态图片**: 图片上传 → Vision 模型（VISION_* 配置）解析 OCR 文本 → 注入 Agent 子任务上下文 ✅
 - **♻️ 对话自进化**: 真实对话按用户反馈/确定性采样异步评审（医疗安全七维量表），沉淀原子可复用经验（脱敏/过期/回滚控制），运行时注入 Worker 档案与任务分解 prompt，驱动系统自我改进 ✅
 - **🪜 依赖性子问题（DAG 分层求解）**: 同一消息内含有依赖的子问时（如"xx 最新治疗方案是什么？如果用这个方案出现不良反应怎么办？"），`plan_stages` 判 dag 后按"依赖已就绪即执行"逐层求解，前一阶段具体结论注入后一阶段 worker；最终合成一条 `##` 分小节回答，一次引用统一、一次安全校验 ✅
@@ -64,14 +64,14 @@
 
 ### 知识准入与原子发布
 
-知识正文和向量保存在 Milvus，`KnowledgeCatalog` 使用 SQLite 保存逻辑文档、物理版本、权威等级、生效时间、过期时间和状态。更新文档时执行两阶段切换：
+知识正文和向量保存在 Milvus，`KnowledgeCatalog` 使用 MySQL 保存逻辑文档、物理版本、权威等级、生效时间、过期时间和状态。更新文档时执行两阶段切换：
 
 ```text
 创建 indexing 版本
   → 分块并写入 Milvus
   → 校验全部 chunk 写入成功
   → 清理 Active 和待激活版本以外的旧 chunk
-  → SQLite 事务内激活新版本并归档旧版本
+  → MySQL 事务内激活新版本并归档旧版本
 ```
 
 任何分块写入或旧版本清理失败都会清理新版本 chunk 并将版本标记为 `failed`，旧 active 版本继续服务。每份文档最多保留当前 Active 和唯一上一版；在线检索同时过滤非 active、尚未到 `effective_at` 或已过 `expires_at` 的版本。
@@ -150,8 +150,8 @@
 5. **多轮对话支持**
    - 工作记忆：Redis 保存追加式原始对话，统一 ContextBuilder 根据调用类型组装历史和本轮上下文
    - **统一子会话隔离**：所有模式（单 Agent / Swarm / 降级）均通过 `AgentSubGraph` 执行 Worker，使用独立子会话 ID（`{session_id}:{agent_id}:{subtask_id}`），Worker 不直接读取任何记忆存储
-   - 用户语义记忆：SQLite `user_memory_items`，仅 active、未过期且已授权内容进入稳定用户前缀
-   - 情景记忆：SQLite `episodic_summaries`，作为跨会话背景动态注入，不参与医学引用
+   - 用户语义记忆：MySQL `user_memory_items`，仅 active、未过期且已授权内容进入稳定用户前缀
+   - 情景记忆：MySQL `episodic_summaries`，作为跨会话背景动态注入，不参与医学引用
    - **追加式历史**：生产调用链不重新摘要、格式化或排序已入历史消息，保持 KV Cache 前缀稳定
 
 ### SKILL.md 格式
@@ -185,7 +185,7 @@ class SkillDefinition:
 
 ## 🩺 交互式问诊（question_for_user）
 
-系统在将用户问题分发给 Worker Agent 之前，由 **LeadAgent 先执行信息澄清阶段**，通过结构化问卷收集用户背景信息，实现"先问后诊"。澄清基于 **LangGraph interrupt() 打断 + Command(resume) 恢复**，图执行在问卷处挂起、用户提交答案后恢复，**checkpoint 按需引入**（仅流式路径挂载 MemorySaver）。
+系统在将用户问题分发给 Worker Agent 之前，由 **LeadAgent 先执行信息澄清阶段**，通过结构化问卷收集用户背景信息，实现"先问后诊"。澄清基于 **LangGraph interrupt() 打断 + Command(resume) 恢复**，图执行在问卷处挂起、用户提交答案后恢复，**checkpoint 按需引入**（使用 MySQL 持久化检查点，流式路径允许问卷）。
 
 ### 工作流程
 
@@ -252,12 +252,12 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 | **question_for_user 工具** | `mediZJ/core/tools/questionnaire.py` | XML 问卷解析 + 结构化数据构建 |
 | **clarify_decide 节点** | `mediZJ/lgraph/supervisor_graph.py` | 每轮 LLM 判定是否追问，发问卷、存 pending payload（硬上限 3 轮） |
 | **clarify_ask 节点** | `mediZJ/lgraph/supervisor_graph.py` | 唯一 `interrupt()` 挂起点，resume 返回用户答案 |
-| **SessionRuntime** | `mediZJ/api/services/session_runtime.py` | 缓存 graph + MemorySaver，跨请求复用完成恢复 |
-| **SSE 状态机** | `mediZJ/api/services/chat_service.py` | `while True + phase` 循环，支持 0/1/多次 interrupt 挂起恢复 |
+| **执行服务** | `mediZJ/api/services/run_service.py` | MySQL 执行、检查点、答案与事件，跨实例恢复 |
+| **SSE 状态机** | `mediZJ/api/services/chat_service.py` | 统一执行服务的答案校验与最终消息持久化 |
 | **AGENT_QUESTIONNAIRE 事件** | `mediZJ/swarm/events.py` | 向前端推送问卷（另有 AGENT_QUESTIONNAIRE_CANCELLED 取消事件） |
 | **QuestionnaireCard 组件** | `frontend/src/components/chat/QuestionnaireCard.vue` | Tab 切换式问卷 UI（含提交失败错误态） |
 | **答案提交端点** | `mediZJ/api/routers/chat.py` | `POST /api/chat/answer` 接收用户回答 → 入信号队列 |
-| **QuestionnaireManager** | `mediZJ/core/questionnaire_manager.py` | 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担） |
+| **QuestionnaireManager** | `mediZJ/core/questionnaire_manager.py` | 旧工具适配；HTTP 问卷由 MySQL 执行服务管理 |
 
 ### XML 问卷格式
 
@@ -291,7 +291,7 @@ LeadAgent.assess_and_decompose(问题 + collected_info)
 ### 关键设计
 
 1. **仅 LeadAgent 澄清**：澄清阶段仅在 LeadAgent 层面执行，`question_for_user` 工具通过 `allowed_agents=["lead_agent"]` 权限收口，Worker Agent 不可见、不可调用
-2. **interrupt 挂起/Command 恢复**：澄清基于 LangGraph `interrupt()` 打断 + `Command(resume=...)` 恢复，替代旧版 asyncio.Future 阻塞；checkpoint 按需引入（仅流式路径挂载 MemorySaver）
+2. **interrupt 挂起/Command 恢复**：澄清基于 LangGraph `interrupt()` 打断 + `Command(resume=...)` 恢复，替代旧版 asyncio.Future 阻塞；checkpoint 按需引入（使用 MySQL 持久化检查点，流式路径允许问卷）
 3. **decide/ask 双节点多轮循环**：`_clarify_decide`（LLM 判定是否追问）+ `_clarify_ask`（唯一 interrupt 挂起点）构成环，每轮 resume 只重跑 ask（无 LLM 重放）；**LLM 自决追问 + 硬上限 3 轮**，第 4 次 LLM 不会被调用
 4. **SSE 状态机**：`_chat_stream_impl` 用 `while True + phase` 统一管理 0/1/多次 interrupt——挂起时等待答案、收到后 resume、可能再次挂起，resume 后正常完成则收尾（不卡死）
 5. **先澄清再检索**：意图分类独立节点提前路由闲聊/澄清；记忆检索（retrieve_memories）后移到 clarify 完成后、任务分解之前
@@ -402,7 +402,7 @@ BASELINE_LLM_BASE_URL=https://api.openai.com/v1
 BASELINE_LLM_MODEL_NAME=gpt-4o
 
 # Redis 工作记忆（默认）
-WORKING_MEMORY_STORAGE=redis
+REDIS_URL=redis://redis:6379/0
 ```
 
 `INTENT_CLASSIFIER_MODE` 可设为 `jev`（默认）、`llm`（原有 LLM 分类）或 `shadow`。默认模式会将当前问句发送至 TypeSafe API，部署前须配置有效的 `TYPESAFE_API_KEY` 并确认数据处理要求。`shadow` 始终使用 LLM 结果路由，只有调用方显式允许时才会额外发送问句给 JEV；业务主链路目前未开启该许可。JEV 结果无效、超时或 `others` 置信度低于 0.9 时，意图按 `medical` 处理，不跳过医疗流程。
@@ -477,7 +477,7 @@ medix-agent-swarm/
 │   ├── api_main.py                      # Web 服务入口（uvicorn）
 │   ├── api/                             # FastAPI 后端 API 层
 │   │   ├── main.py                      # FastAPI 应用入口、CORS、路由挂载
-│   │   ├── auth.py                      # 免密登录认证（SQLite 随机会话令牌 + Cookie）
+│   │   ├── auth.py                      # 免密登录认证（MySQL 随机会话令牌 + Cookie）
 │   │   ├── routers/
 │   │   │   ├── chat.py                  # /api/chat 问答接口（含流式、图片上传）
 │   │   │   ├── knowledge.py             # /api/knowledge 知识库检索
@@ -490,7 +490,7 @@ medix-agent-swarm/
 │   │   ├── models/                      # Pydantic 请求/响应模型
 │   │   ├── services/                    # 业务逻辑封装
 │   │   │   ├── chat_service.py          # 流式状态机（while True + phase）
-│   │   │   ├── session_runtime.py       # 会话级 graph + MemorySaver 缓存
+│   │   │   ├── run_service.py           # 持久化执行与事件
 │   │   │   ├── image_analyzer.py        # Vision 多模态图片解析
 │   │   │   ├── dashboard_service.py     # 仪表盘统计
 │   │   │   ├── knowledge_service.py     # 知识库服务
@@ -503,7 +503,7 @@ medix-agent-swarm/
 │   │   ├── prompt_loader.py             # Jinja2 Prompt 模板加载器
 │   │   ├── skill_loader.py              # 动态加载 Skills（支持多函数加载、指令提取）
 │   │   ├── skill_registry.py            # SkillParameter 参数数据模型（SkillRegistry 类已由 ToolRegistry 取代）
-│   │   ├── questionnaire_manager.py     # 问卷幂等校验/清理（interrupt 恢复由 SessionRuntime 承担）
+│   │   ├── questionnaire_manager.py     # 旧工具适配；HTTP 问卷由 MySQL 执行服务管理
 │   │   └── tools/                       # 统一基础工具目录
 │   │       ├── __init__.py              # 统一导出
 │   │       └── questionnaire.py         # question_for_user 工具（XML 解析 + 格式化）
@@ -558,14 +558,14 @@ medix-agent-swarm/
 │   │   ├── __init__.py                  # 模块导出
 │   │   ├── models.py                    # Span 数据模型（6 种类型 + 4 类属性）
 │   │   ├── context.py                   # traced_span 上下文管理器（contextvars，异步安全）
-│   │   ├── collector.py                 # Span 收集器（单例，内存缓冲 → flush SQLite）
+│   │   ├── collector.py                 # Span 收集器（单例，内存缓冲 → flush MySQL）
 │   │   ├── analysis.py                  # 聚合分析（per-agent/tool/llm 统计、慢请求、错误）
 │   │   └── storage/
-│   │       └── __init__.py              # SQLite 存储（traces + spans 表，树 JSON + 扁平行）
+│   │       └── __init__.py              # MySQL 存储（traces + spans 表，树 JSON + 扁平行）
 │   ├── memory/                          # 记忆管理（集成熵管理）
 │   │   ├── context_builder.py            # 统一医疗记忆上下文入口
 │   │   ├── prompt_prefix.py              # 确定性稳定前缀与指纹
-│   │   ├── structured_memory.py          # SQLite 用户/情景记忆与审计
+│   │   ├── structured_memory.py          # MySQL 用户/情景记忆与审计
 │   │   ├── short_term.py                # Redis 工作记忆（TTL + 子会话隔离）
 │   │   ├── personal_profile.py          # 个人档案 API 兼容层
 │   │   ├── session_summary.py           # 会话总结
@@ -608,7 +608,7 @@ medix-agent-swarm/
 │   └── evolution/                       # 对话自进化闭环
 │       ├── service.py                   # 编排服务（反馈入队/异步评审 worker/运行时经验检索/采样分流）
 │       ├── judge.py                     # ConversationJudge LLM 评审器（七维量表 + 评分封顶 + 经验脱敏）
-│       ├── storage.py                   # SQLite 存储（反馈/评审/失败/经验/发布/任务 + 回滚）
+│       ├── storage.py                   # MySQL 存储（反馈/评审/失败/经验/发布/任务 + 回滚）
 │       ├── source_catalog.py            # 失败归因源码追溯目录（白名单源码片段）
 │       └── config.py                    # 自进化配置（采样率/观察率/可信来源）
 │
@@ -838,7 +838,7 @@ AUTH_COOKIE_SECURE=false
 EMBEDDING_MODEL_NAME=BAAI/bge-small-zh-v1.5
 
 # Redis 工作记忆
-WORKING_MEMORY_STORAGE=redis
+REDIS_URL=redis://redis:6379/0
 
 # Vision 多模态模型配置（用于图片解析，可选；未设置则回退到主 LLM 配置）
 VISION_MODEL_NAME=gpt-4o
@@ -880,11 +880,11 @@ STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），�
 
 | 记忆层 | 权威存储 | 主要内容 | 注入位置 | 可否引用 |
 | --- | --- | --- | --- | --- |
-| 医学知识事实 | KnowledgeCatalog SQLite + Milvus | 文档版本、chunk、向量、权威和时效 | 本轮动态证据 | **是** |
-| 用户语义记忆 | SQLite `user_memory_items` | 个人资料、过敏史、用药史、既往史和候选项 | 用户稳定前缀 | 否 |
+| 医学知识事实 | KnowledgeCatalog MySQL + Milvus | 文档版本、chunk、向量、权威和时效 | 本轮动态证据 | **是** |
+| 用户语义记忆 | MySQL `user_memory_items` | 个人资料、过敏史、用药史、既往史和候选项 | 用户稳定前缀 | 否 |
 | 工作记忆 | Redis `ShortTermMemory` | 当前会话消息、已确认实体、澄清结果和 chunk ID | 追加式会话历史/动态尾部 | 否 |
-| 情景记忆 | SQLite `episodic_summaries` | 跨会话摘要、已解析实体和来源会话 | 本轮动态背景 | 否 |
-| 程序性策略 | evolution SQLite | 路由、检索、上下文和表达经验 | 本轮动态策略 | 否 |
+| 情景记忆 | MySQL `episodic_summaries` | 跨会话摘要、已解析实体和来源会话 | 本轮动态背景 | 否 |
+| 程序性策略 | evolution MySQL | 路由、检索、上下文和表达经验 | 本轮动态策略 | 否 |
 
 #### 事实权威顺序
 
@@ -909,7 +909,7 @@ STAGE_WORKER_TIMEOUT=70                   # 单阶段 worker 超时（秒），�
 - 隐私与时效：`sensitivity_level`、`consent_scope`、`effective_at`、`expires_at`
 - 时间字段：`created_at`、`updated_at`、`confirmed_at`
 
-同一 `(user_id, memory_type, memory_key)` 最多只有一条 active 记录。新版本激活时，旧版本在同一 SQLite 事务内转为 `superseded`，不执行 Markdown 全文读取、修改和覆盖。
+同一 `(user_id, memory_type, memory_key)` 最多只有一条 active 记录。新版本激活时，旧版本在同一 MySQL 事务内转为 `superseded`，不执行 Markdown 全文读取、修改和覆盖。
 
 辅助表用途：
 
@@ -977,7 +977,7 @@ memory = ShortTermMemory(storage_type="redis", redis_config={"host": "localhost"
 - 医疗人员确认信息高于用户确认信息，低权威写入不会覆盖高权威 active 项
 - 前端「个人中心」支持手动查看和编辑
 
-**存储格式**（SQLite 行记录 + 确定性 JSON）：
+**存储格式**（MySQL 行记录 + 确定性 JSON）：
 
 ```json
 {
@@ -1069,11 +1069,11 @@ LLM usage/trace 记录 `prompt_tokens`、`cached_prompt_tokens`、`cache_hit_rat
 | **记忆写锁** | 短期记忆 per-session 写锁，覆盖写入 + 增量压缩全过程 | `mediZJ/memory/short_term.py` |
 | **档案隔离** | `user_memory_items` 按 user_id 行级隔离，active 项具备唯一约束、修订链和事务替换 | `mediZJ/memory/structured_memory.py` |
 | **任务认领** | SharedContext 子任务认领加锁，防止并行 Worker 重复执行 | `mediZJ/swarm/shared_context.py` |
-| **阻塞下线程** | embedding 推理 / SQLite / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
+| **阻塞下线程** | embedding 推理 / MySQL / Milvus 等同步调用统一 `asyncio.to_thread`，不阻塞事件循环 | `chat_service.py`、`session_vector_store.py` 等 |
 | **连接池复用** | AsyncOpenAI 进程级共享（httpx 池复用），embedding 模型全局单例（lru_cache） | `mediZJ/core/llm_client.py`、`mediZJ/memory/embedding.py` |
 | **LLM 限流** | 全局信号量（`LLM_MAX_CONCURRENCY`，默认 16），高并发排队而非触发 429 | `mediZJ/core/llm_client.py` |
 | **熔断器** | 进程级共享，跨请求累计 LLM 失败（连续 5 次断开 30s） | `mediZJ/core/circuit_breaker.py` |
-| **存储串行化** | Milvus Lite 客户端调用加锁（知识库 `@_serialized` 装饰器、会话向量 RLock + 原子 delete/insert） | `milvus_kb.py`、`session_vector_store.py` |
+| **存储串行化** | Milvus 服务端客户端调用加锁，业务 outbox 幂等 upsert/delete | `milvus_kb.py`、`session_vector_store.py` |
 | **总超时** | 单次问答 `REQUEST_TIMEOUT`（默认 300s），超时友好返回 504 | `mediZJ/api/services/chat_service.py` |
 
 ### 压测脚本
@@ -1352,7 +1352,7 @@ user_msg = PromptLoader.render(
 
 ## 📚 可信 RAG 与统一知识库
 
-- **向量数据库**: Milvus Lite（本地文件，无需服务器）
+- **向量数据库**: Milvus 服务端（独立容器）
 - **Embedding 模型**: BAAI/bge-small-zh-v1.5（中文，512维）
 - **数据存储**: `mediZJ/knowledge/data/documents/` (txt 文档，当前 94 个)
 - **初始化**: `python mediZJ/knowledge/scripts/import_hardcoded_data.py`（--clean 清空后重导）
@@ -1518,7 +1518,7 @@ CitationValidator + MedicalAnswerVerifier
 ChatService
     │  验证通过后，SSE done 事件与 non-stream ChatResponse 携带 citations
     ▼
-SQLite (messages.citations) / JSON 事件文件
+MySQL (messages.citations) / JSON 事件文件
     │  持久化引用数据，历史会话可回放
     ▼
 前端 ChatMessage.citations
@@ -1611,9 +1611,9 @@ SwarmCoordinator
 
 ```
 医学知识事实 (KnowledgeCatalog + Milvus) ─┐
-用户语义记忆 (SQLite user_memory_items) ─┤
+用户语义记忆 (MySQL user_memory_items) ─┤
 工作记忆 (Redis ShortTermMemory) ──────┤
-情景记忆 (SQLite episodic_summaries) ───┤
+情景记忆 (MySQL episodic_summaries) ───┤
 程序性策略 (evolution) ─────────────┤
                                                    ▼
                               MedicalMemoryContextBuilder
@@ -1841,7 +1841,7 @@ TraceCollector.collect(span)         ← 内存缓冲（按 trace_id 分组）
 TraceCollector.flush(trace_id)       ← 请求结束时调用
       │
       ├─► _build_tree()              ← 由 parent_id 重建 Span 树
-      └─► TraceSqliteStorage.save()  ← 写入 SQLite（复用 sessions.db）
+      └─► TraceSqliteStorage.save()  ← 写入 MySQL（复用 sessions.db）
             ├── traces 表             ← 嵌套树 JSON（tree_json）
             └── spans 表              ← 扁平行（便于 SQL 查询），FK CASCADE 关联
 ```
@@ -1878,7 +1878,7 @@ TraceCollector.flush(trace_id)       ← 请求结束时调用
 用户反馈（like/dislike + reason_codes）/ 确定性采样（sha256(message_id) < sample_rate）
       │
       ▼
-EvolutionService.submit_feedback / maybe_enqueue_sample → SQLite 任务队列
+EvolutionService.submit_feedback / maybe_enqueue_sample → MySQL 任务队列
       │
       ▼
 后台评审 worker（startup 启动，不阻塞主对话）→ ConversationJudge.evaluate()
@@ -1933,7 +1933,7 @@ EvolutionService.submit_feedback / maybe_enqueue_sample → SQLite 任务队列
 
 - `chat_service`：问答前调用 `get_runtime_context()` 检索匹配经验，注入运行时 context；持久化后记录经验暴露 + 按采样率入队
 - `supervisor_graph` / `swarm_coordinator`：`verified_experiences` 注入 Worker 档案与 `assessment_user.j2`（"仅在与当前问题匹配且不违反医学安全要求时使用"）
-- `trace`：`TraceAttributes` 携带 `applied_experience_ids` / `experience_assignments`，会话删除时在同一 SQLite 事务内联动清理自进化数据
+- `trace`：`TraceAttributes` 携带 `applied_experience_ids` / `experience_assignments`，会话删除时在同一 MySQL 事务内联动清理自进化数据
 
 ### 管理页面与配置
 
@@ -1964,6 +1964,122 @@ MIT License
 ## 🙏 致谢
 
 - 使用 [LLM API](https://www.volcengine.com/) 作为LLM后端
-- 用户语义与情景记忆使用 SQLite，工作记忆使用 Redis
+- 用户语义与情景记忆使用 MySQL，工作记忆使用 Redis
 
 ---
+
+
+## MySQL、Redis 与 Milvus 部署
+
+工程改造采用一个应用镜像与独立基础设施容器。MySQL 保存业务数据、执行、事件和检查点；Redis 仅保存可重建的短期上下文；Milvus 保存检索向量。旧数据库和业务文件不会自动导入、修改或删除。
+
+先安装并启动 Docker Desktop（Linux 可使用 Docker Engine 和 Compose 插件），然后进入项目根目录：
+
+```bash
+cd "/Users/xiaobin.wu/Desktop/code_project/医疗助手/medi-agent-swarm"
+```
+
+### 配置环境变量
+
+若已有 `.env`，直接编辑，避免覆盖现有配置；仅在文件不存在时从模板创建：
+
+```bash
+cp .env.example .env
+```
+
+至少配置以下变量。数据库和存储密码请替换为自定义值；`MINIO_ROOT_PASSWORD` 至少需要 8 个字符。Compose 会自动设置容器内的 MySQL、Redis 和 Milvus 连接地址。
+
+```dotenv
+LLM_API_KEY=你的密钥
+LLM_BASE_URL=你的模型API地址
+LLM_MODEL_NAME=你的模型名称
+MYSQL_PASSWORD=自定义数据库密码
+MYSQL_ROOT_PASSWORD=自定义管理员密码
+MINIO_ROOT_PASSWORD=自定义存储密码
+```
+
+### 构建与启动
+
+```bash
+docker compose up --build -d
+```
+
+该命令会启动 MySQL、Redis、Milvus 及其依赖，完成数据库初始化后启动应用。首次构建需要联网下载依赖和 embedding 模型，耗时较长。
+
+查看容器状态和应用、初始化日志：
+
+```bash
+docker compose ps -a
+docker compose logs -f app migrate
+```
+
+`migrate` 显示 `Exited (0)` 表示初始化成功；应用显示 `healthy` 后可访问：
+
+- 应用页面：<http://localhost:8000>
+- 就绪检查：<http://localhost:8000/health/ready>
+- 存活检查：<http://localhost:8000/health/live>
+
+默认端口为 8000，可通过 `.env` 中的 `APP_PORT` 修改宿主机端口。
+
+### 日常操作
+
+```bash
+# 停止服务并保留持久化数据
+docker compose down
+
+# 再次启动已有服务
+docker compose up -d
+
+# 修改代码或依赖后重新构建并启动
+docker compose up --build -d
+
+# 查看基础设施日志
+docker compose logs -f mysql redis milvus etcd minio
+```
+
+不要在停止命令中添加 `-v`：`docker compose down -v` 会删除本项目的持久化数据卷，包括数据库、向量、Redis 和上传文件。
+
+Embedding 推理按 CUDA、macOS MPS、CPU 的顺序自动选择可用设备。macOS 原生运行可使用 MPS，Mac 上的 Linux Docker 容器无法使用 MPS。Linux 容器使用 CUDA 需要宿主机 GPU 驱动、NVIDIA Container Toolkit 和 Compose GPU 透传配置；当前默认 Compose 未配置 GPU 透传。
+
+MinIO 采用固定版本源代码构建（`docker/minio.Dockerfile`），首次构建需要访问 Go 模块代理。`migrate` 服务先运行 Alembic 并初始化图检查点、容量槽位和向量 collections；应用启动只检查 schema。独立初始化命令为 `python -m mediZJ.infrastructure.bootstrap`。共享上传目录由 `UPLOAD_DIR` 指定，Compose 默认使用持久卷。数据库端口不向宿主机公开。
+
+问答入口为 `POST /api/chat/runs`，返回执行标识；通过 `GET /api/chat/runs/{run_id}/events?after={seq}` 补读持久化事件。答案必须包含 `run_id`。关闭连接后执行继续；取消使用 `POST /api/chat/runs/{run_id}/cancel`。
+
+存活与就绪接口为 `/health/live`、`/health/ready`，管理员通过 `/api/metrics` 查询任务与缓存状态。真实 MySQL、Redis 恢复测试使用 `pytest tests/test_infrastructure --run-integration`。
+
+### 真实基础设施验收
+
+测试使用全新的 `medizj_test` 数据库、Redis 环境前缀和随机测试 collections。测试夹具拒绝清理非 `_test` 数据库。运行下列命令前停止测试项目的应用副本，避免工作器抢占测试任务：
+
+```bash
+docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml up -d --build --wait mysql redis etcd minio milvus
+export MYSQL_URL=mysql+asyncmy://medizj:${MYSQL_PASSWORD}@127.0.0.1:23306/medizj_test
+export REDIS_URL=redis://127.0.0.1:26379/0
+export MILVUS_URI=http://127.0.0.1:29530
+export TEST_MYSQL_URL="$MYSQL_URL" TEST_REDIS_URL="$REDIS_URL" TEST_MILVUS_URI="$MILVUS_URI"
+uv run alembic upgrade head
+uv run pytest tests/ -m 'not slow and (not integration or infrastructure)' --run-integration --cov=mediZJ.infrastructure --cov=mediZJ.api.services.run_service --cov-fail-under=80 --cov-report=term-missing
+```
+
+测试覆盖真实事务、Redis CAS/过期重建、Milvus 故障补偿和乱序索引，以及两个独立应用进程中的强制退出接管、问卷补偿、答案重复提交、重连序号、取消和集群过载。模型边界使用固定响应，不消耗外部模型额度。真实 LLM 测试另用 `--run-integration -m slow` 执行。CI 另外构建镜像、验证离线模型加载、启动两个应用容器并运行六卷备份恢复。
+
+固定 embedding 为 `BAAI/bge-small-zh-v1.5`，revision `7999e1d3359715c523056ef9478215996d62a620`，512 维。向量 collection 校验模型版本、维度和字段类型；切换时通过 `KNOWLEDGE_COLLECTION`、`SESSION_COLLECTION` 指定全新 collections，禁止复用不同模型的旧索引。失败索引由管理员调用 `POST /api/governance/index/jobs/{job_id}/retry` 显式重试；缺失 outbox 每分钟自动补偿。指标包括拒绝、重试、租约回收、索引滞后、缓存命中和重建，以及 Redis 内存与淘汰计数。
+
+### 备份与恢复
+
+`scripts/backup.py` 停止指定 Compose 项目的应用和基础设施后，完整归档 MySQL、Redis、etcd、MinIO、Milvus 和上传文件卷，记录 SHA-256；结束后启动原先运行的容器。备份会短暂中断服务。恢复完整校验归档且只允许写入不存在的新卷，保留原项目及旧数据：
+
+```bash
+uv run python scripts/backup.py backup --project medizj --directory /备份目录/本次备份
+uv run python scripts/backup.py restore --project medizj-restored --directory /备份目录/本次备份
+APP_PORT=8001 docker compose -p medizj-restored up -d
+```
+
+`--project` 必须与部署时使用的 Compose 项目名一致；使用覆盖配置时重复传入 `--compose` 指定全部配置文件。恢复部署连接相同镜像与配置，恢复前校验模型资源和密码。测试部署的真实恢复验证：
+
+```bash
+docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml up -d --no-build --wait --scale app=2
+TEST_COMPOSE_PROJECT=medizj-validation uv run pytest tests/test_infrastructure/test_backup.py --run-integration
+```
+
+MySQL schema 升级由独立 `migrate` 服务执行，应用不自动建表；保留上一版镜像与备份后再升级。单机 Compose 提供可恢复部署，不提供基础设施高可用。

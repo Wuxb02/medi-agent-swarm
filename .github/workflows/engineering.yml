@@ -1,0 +1,75 @@
+name: Engineering validation
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.21'
+          python-version: '3.12'
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check mediZJ/infrastructure mediZJ/api/services/run_service.py scripts/backup.py tests/test_infrastructure
+      - run: uv run mypy mediZJ/infrastructure --ignore-missing-imports --follow-imports skip
+      - run: uv run pytest tests/ -m 'not integration and not slow'
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: frontend
+      - run: npm run test:coverage -- --coverage.reporter=text && npm run build
+        working-directory: frontend
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      MYSQL_PASSWORD: test_password
+      MYSQL_ROOT_PASSWORD: test_root_password
+      MINIO_ROOT_PASSWORD: test_minio_password
+      MYSQL_URL: mysql+asyncmy://medizj:test_password@127.0.0.1:23306/medizj_test
+      REDIS_URL: redis://127.0.0.1:26379/0
+      MILVUS_URI: http://127.0.0.1:29530
+      TEST_MYSQL_URL: mysql+asyncmy://medizj:test_password@127.0.0.1:23306/medizj_test
+      TEST_REDIS_URL: redis://127.0.0.1:26379/0
+      TEST_MILVUS_URI: http://127.0.0.1:29530
+      TEST_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.21'
+          python-version: '3.12'
+      - uses: docker/setup-buildx-action@v3
+      - run: uv sync --frozen --extra dev
+      - run: cp .env.example .env
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: medizj-app:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml up -d --build --wait mysql redis etcd minio milvus
+      - run: uv run alembic upgrade head
+      - run: >-
+          uv run pytest tests/ -m 'not slow and (not integration or infrastructure)' --run-integration
+          --cov=mediZJ.infrastructure --cov=mediZJ.api.services.run_service --cov-report=term-missing --cov-fail-under=80
+      - run: docker run --rm --network none medizj-app:local python -c "from mediZJ.memory.embedding import load_embedding_model; assert load_embedding_model().get_sentence_embedding_dimension() == 512"
+      - run: docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml up -d --no-build --wait --wait-timeout 180 --scale app=2
+      - run: uv run pytest tests/test_infrastructure/test_backup.py --run-integration
+        env:
+          TEST_COMPOSE_PROJECT: medizj-validation
+      - run: |
+          docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml exec -T --index 1 app python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"
+          docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml exec -T --index 2 app python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"
+      - if: failure()
+        run: docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml logs --tail 100
+      - if: always()
+        run: docker compose -p medizj-validation -f compose.yaml -f compose.test.yaml down
