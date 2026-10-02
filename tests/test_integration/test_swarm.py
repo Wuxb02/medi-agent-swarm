@@ -1,7 +1,6 @@
 """test_integration/test_swarm.py — Swarm 集成测试（需要真实 LLM）"""
 
 import pytest
-import asyncio
 from mediZJ.swarm import SwarmCoordinator, process_with_swarm
 
 
@@ -17,6 +16,7 @@ class TestSwarmIntegration:
             session_id="test-routing-simple",
         )
         assert isinstance(result, dict)
+        assert "error" not in result, result.get("error")
         assert "response" in result or "answer" in result
 
     @pytest.mark.asyncio
@@ -28,6 +28,7 @@ class TestSwarmIntegration:
             session_id="test-swarm-complex",
         )
         assert isinstance(result, dict)
+        assert "error" not in result, result.get("error")
         assert "response" in result or "answer" in result
 
     @pytest.mark.asyncio
@@ -37,14 +38,16 @@ class TestSwarmIntegration:
         session_id = "test-session-summary"
 
         # 产生一些对话
-        await coordinator.process(
+        first = await coordinator.process(
             question="高血压患者饮食需要注意什么？",
             session_id=session_id,
         )
-        await coordinator.process(
+        assert "error" not in first, first.get("error")
+        second = await coordinator.process(
             question="运动方面有什么建议？",
             session_id=session_id,
         )
+        assert "error" not in second, second.get("error")
 
         # 获取历史记录
         history = await coordinator.short_term_memory.get_history(session_id, limit=10)
@@ -58,4 +61,5 @@ class TestSwarmIntegration:
             session_id="test-backward-compat",
         )
         assert isinstance(result, dict)
+        assert "error" not in result, result.get("error")
         assert "response" in result or "answer" in result

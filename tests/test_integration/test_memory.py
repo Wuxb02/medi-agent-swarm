@@ -1,7 +1,6 @@
 """test_integration/test_memory.py — 记忆系统集成测试（需要真实 LLM + Mem0）"""
 
 import pytest
-import os
 from mediZJ.swarm import SwarmCoordinator
 
 
@@ -20,12 +19,14 @@ class TestMemoryIntegration:
             session_id=session_id,
         )
         assert isinstance(r1, dict)
+        assert "error" not in r1, r1.get("error")
 
         # 第2轮：引用之前的上下文
         r2 = await coordinator.process(
             question="我之前提到的发热，需要用退烧药吗？",
             session_id=session_id,
         )
+        assert "error" not in r2, r2.get("error")
         answer2 = r2.get("response", r2.get("answer", ""))
         assert len(answer2) > 10
 
@@ -39,10 +40,11 @@ class TestMemoryIntegration:
         coordinator = SwarmCoordinator()
         session_id = "test-unified-single"
 
-        await coordinator.process(
+        result = await coordinator.process(
             question="高血压是什么？",
             session_id=session_id,
         )
+        assert "error" not in result, result.get("error")
         history = await coordinator.short_term_memory.get_history(session_id)
         assert len(history) >= 1
 
@@ -52,9 +54,10 @@ class TestMemoryIntegration:
         coordinator = SwarmCoordinator()
         session_id = "test-unified-swarm"
 
-        await coordinator.process(
+        result = await coordinator.process(
             question="胸痛、呼吸困难、心悸，应该怎么办？有高血压史。",
             session_id=session_id,
         )
+        assert "error" not in result, result.get("error")
         history = await coordinator.short_term_memory.get_history(session_id)
         assert len(history) >= 1

@@ -9,11 +9,13 @@ from mediZJ.knowledge.milvus_kb import MedicalKnowledgeBase
 
 @pytest.mark.integration
 class TestSingletonIntegration:
-    def test_short_term_memory_singleton(self):
-        """ShortTermMemory 是单例。"""
-        stm1 = ShortTermMemory()
-        stm2 = ShortTermMemory()
-        assert stm1 is stm2
+    async def test_short_term_memory_instances_share_user_history(self):
+        """同用户实例共享 Redis 历史，不同用户相互隔离。"""
+        stm1 = ShortTermMemory("alice")
+        stm2 = ShortTermMemory("alice")
+        await stm1.add_message("shared", "user", "测试共享历史")
+        assert await stm1.get_history("shared") == await stm2.get_history("shared")
+        assert await ShortTermMemory("bob").get_history("shared") == []
 
     def test_medical_knowledge_base_singleton(self):
         """MedicalKnowledgeBase 是单例。"""
@@ -33,10 +35,11 @@ class TestSingletonIntegration:
         coordinator = SwarmCoordinator()
         session_id = "test-no-dup"
 
-        await coordinator.process(
+        result = await coordinator.process(
             question="感冒了怎么办？只有流鼻涕。",
             session_id=session_id,
         )
+        assert "error" not in result, result.get("error")
         history = await coordinator.short_term_memory.get_history(session_id)
         assert len(history) >= 1
         # 验证没有重复：content 不应有连续重复

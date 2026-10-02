@@ -512,6 +512,9 @@ class StructuredMemoryStore:
         agent_id: str,
         user_id: str,
     ) -> None:
+        memory_ids = list(memory_ids)
+        if not memory_ids:
+            return
         now = _now()
 
         async def _record(conn):

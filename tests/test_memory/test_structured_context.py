@@ -37,6 +37,16 @@ async def test_active_revision_and_pending_isolation(store):
     assert len(await store.list_items("u1", statuses=("superseded",))) == 1
 
 
+@pytest.mark.parametrize("memory_ids", [[], iter(())])
+async def test_empty_usage_does_not_write_sql(store, execute_sql, memory_ids):
+    """无用户记忆时，真实数据库不执行空批次 INSERT。"""
+    await store.record_usage(
+        memory_ids, session_id="s1", trace_id="t1", agent_id="lead", user_id="u1"
+    )
+    row = (await execute_sql("SELECT COUNT(*) AS count FROM memory_usage")).fetchone()
+    assert row["count"] == 0
+
+
 async def test_authority_pending_episode_and_usage_lifecycle(store, execute_sql):
     clinician_id = await store.upsert_active(
         "u1", "profile_fact", "过敏史", "青霉素", source_type="clinician_confirmed"

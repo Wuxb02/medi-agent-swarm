@@ -18,6 +18,7 @@ class TestHarnessIntegration:
             question="我今天有点头疼，需要注意什么？",
             session_id="test-harness-validate",
         )
+        assert "error" not in result, result.get("error")
         answer = result.get("response", result.get("answer", ""))
         validator = ConstraintValidator()
         validation = validator.validate_output("consultation_agent", answer)
@@ -32,6 +33,7 @@ class TestHarnessIntegration:
             question="我今天有点头疼，需要注意什么？",
             session_id="test-harness-fixer",
         )
+        assert "error" not in result, result.get("error")
         answer = result.get("response", result.get("answer", ""))
         fixer = AutoFixer()
         fixed = fixer.fix_high_risk_warning(answer)
@@ -43,10 +45,11 @@ class TestHarnessIntegration:
         coordinator = SwarmCoordinator()
         session_id = "test-harness-entropy"
 
-        await coordinator.process(
+        result = await coordinator.process(
             question="高血压患者应该注意什么？",
             session_id=session_id,
         )
+        assert "error" not in result, result.get("error")
 
         history = await coordinator.short_term_memory.get_history(session_id)
         assert len(history) > 0
